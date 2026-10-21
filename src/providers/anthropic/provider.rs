@@ -133,7 +133,7 @@ impl Provider for AnthropicCompatibleProvider {
     fn transport(&self) -> Option<&dyn HttpTransport> {
         Some(self.transport.as_ref())
     }
-    fn transport_arc(&self) -> Option<Arc<dyn HttpTransport>> {
+    fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
         Some(self.transport.clone())
     }
     fn is_configured(&self) -> bool {

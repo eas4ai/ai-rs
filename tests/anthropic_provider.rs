@@ -76,7 +76,7 @@ fn explicit_config_snapshot_defaults_and_transport_ownership() {
         p.protocol().unwrap().protocol_class_id(),
         "anthropic_messages"
     );
-    assert!(p.transport_arc().is_some());
+    assert!(p.shared_transport().is_some());
     assert!(!format!("{p:?}").contains("sk-test"));
     let p = AnthropicCompatibleProvider::new(
         ProviderConfig {

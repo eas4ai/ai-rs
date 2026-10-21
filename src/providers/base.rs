@@ -244,8 +244,9 @@ pub trait Provider: Send + Sync + AsProvider {
     fn transport(&self) -> Option<&dyn HttpTransport> {
         None
     }
-    /// Clone the transport handle for a stream that outlives this method call.
-    fn transport_arc(&self) -> Option<Arc<dyn HttpTransport>> {
+    /// Share an owned transport with a provider adapter's static event stream.
+    /// Implement this alongside `transport` when using a concrete HTTP protocol.
+    fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
         None
     }
     fn client(&self) -> Result<&dyn HttpTransport, Error> {
@@ -505,7 +506,7 @@ impl Provider for ConfiguredProvider {
     fn transport(&self) -> Option<&dyn HttpTransport> {
         self.transport.as_deref()
     }
-    fn transport_arc(&self) -> Option<Arc<dyn HttpTransport>> {
+    fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
         self.transport.clone()
     }
 }

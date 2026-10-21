@@ -80,12 +80,12 @@ impl ProviderProtocol for AnthropicMessagesProtocol {
         provider: &dyn Provider,
     ) -> EventStream {
         let request = build_request(model, &messages, &options, provider);
-        let transport = provider.transport_arc();
+        let transport = provider.shared_transport();
         let name = provider.name().to_owned();
         let model_id = model.id.clone();
         stream::once(async move {
             let request=request?;
-            let transport=transport.ok_or_else(||Error::Configuration("Anthropic streams require an owned HttpTransport handle (Provider::transport_arc)".into()))?;
+            let transport=transport.ok_or_else(||Error::Configuration("Anthropic streams require an owned HttpTransport handle (Provider::shared_transport)".into()))?;
             let response=http::send(transport.as_ref(),request,&name,Some(&model_id)).await?;
             Ok::<_,Error>(super::stream::parse(response.body,name))
         }).try_flatten().boxed()
