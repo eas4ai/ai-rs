@@ -59,6 +59,14 @@ impl Eq for RuntimeError {}
 pub trait ValueAggregator: Send {
     fn feed(&mut self, value: Value);
     fn snapshot(&self) -> Value;
+    /// Preserve the runtime type of special tool snapshots.
+    ///
+    /// JSON reducers keep their existing behavior. Reducers that produce a
+    /// message bundle can override this method so adapters do not infer special
+    /// results from an ordinary JSON object's shape.
+    fn snapshot_result(&self) -> crate::types::messages::ToolResultValue {
+        self.snapshot().into()
+    }
     fn get_model_input(&self) -> Value;
 }
 impl<T: Aggregator<Value, Snapshot = Value, ModelInput = Value> + Send> ValueAggregator for T {

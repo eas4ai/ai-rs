@@ -20,6 +20,7 @@ pub mod models;
 pub mod providers;
 pub mod transport;
 pub mod types;
+pub mod ui;
 pub mod util;
 
 pub use errors::Error;

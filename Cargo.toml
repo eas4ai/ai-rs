@@ -20,7 +20,7 @@ cookie_store = { version = "0.22.0", default-features = false }
 futures = "0.3.31"
 mime_guess = "2.0.5"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = { version = "1.0.145", features = ["float_roundtrip", "preserve_order"] }
 schemars = "1.0.4"
 thiserror = "2.0.17"
 url = "2.5.7"

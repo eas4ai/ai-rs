@@ -6,6 +6,10 @@ The crate provides messages, events, tool schemas, stream aggregation, provider
 contracts, and streaming HTTP transport. Concrete provider adapters and agent loops
 will be added separately. The provider registry starts empty.
 
+`ui::ai_sdk` converts Vercel AI SDK v6 UI requests into core messages and converts
+core histories and event streams back to UI messages and SSE. It preserves the
+Python 0.8.0 adapter protocol and message identity metadata.
+
 ```rust
 use std::sync::Arc;
 use ai::{Model, ProviderConfig, ProviderProtocol, StreamOptions, stream};
@@ -66,5 +70,22 @@ use an existing client, or enable the optional `reqwest` feature. Media download
 use a separate `DownloadTransport` contract that pins validated DNS addresses.
 
 Run `./scripts/check.sh` for the pinned toolchain build, test, lint, and documentation checks.
+
+For UI requests, parse `UIMessage` with Serde and pass the core event stream to
+`to_sse`. Set the response headers from `UI_MESSAGE_STREAM_HEADERS`. The SSE
+adapter consumes events lazily and propagates source errors.
+
+```rust
+use ai::ui::ai_sdk::{UIMessage, to_messages, to_sse, UI_MESSAGE_STREAM_HEADERS};
+
+# fn example(model: &ai::Model, request: Vec<UIMessage>) -> Result<(), ai::Error> {
+let (messages, approvals) = to_messages(&request, None)?;
+// Apply approvals through a run-scoped ApprovalResolver before polling the run.
+let body = to_sse(ai::stream(model, messages, ai::StreamOptions::default()));
+let headers = UI_MESSAGE_STREAM_HEADERS;
+# let _ = (approvals, body, headers);
+# Ok(())
+# }
+```
 
 See [docs/PORT.md](docs/PORT.md) for compatibility, test coverage, and deferred work.

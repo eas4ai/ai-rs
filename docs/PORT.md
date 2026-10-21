@@ -25,6 +25,7 @@ The source is AI SDK for Python 0.8.0 at
 | `ai.errors` | `errors` | Framework errors, provider categories, HTTP context |
 | `ai.util` | `util`, `futures`, Tokio | Stream composition and task/resource ownership |
 | Upstream SDK HTTP clients | `transport` | Application-supplied HTTP transport and SSE framing |
+| `ai.ui.ai_sdk` | `ui::ai_sdk` | Inbound UI requests, persisted UI histories, approvals, identity metadata and outbound SSE |
 
 ## Wire format
 
@@ -43,6 +44,9 @@ Partial-result events retain cloneable aggregator factories. Tool-result events
 retain cloneable original errors and their source chains. Both runtime handles
 stay out of serialized events. An object-safe JSON reducer facade adapts the
 core's generic `Aggregator` trait for partial-result factories.
+`ValueAggregator::snapshot_result` defaults to ordinary JSON. Reducers that
+produce typed message bundles override it to retain the distinction between
+special results and ordinary JSON with similar fields.
 
 A yielded event contains a snapshot of its message at that point in the stream.
 Rust owns snapshots. Python shares mutable message references. The final handle
@@ -113,6 +117,38 @@ chunks. The bundled client supports gzip, deflate, Brotli, and Zstandard.
 streams. Python queues, dynamic task groups, and exception-group teardown belong
 to the later agent runtime. Rust `Drop` handles stream and resource cancellation.
 
+## UI adapter
+
+`ui::ai_sdk::to_messages` returns core history and extracted approval responses.
+`apply_approvals` accepts an explicit `ApprovalResolver` supplied by the agent
+runtime or application. `ToolResultValidator` supplies optional tool output
+validation and coercion; the adapter does not depend on an ambient agent context
+or Python runtime annotations.
+
+`UIMessage` deserialization validates known part fields, accepts Python field
+names and browser aliases, retains extra application fields, and skips unknown
+part types. Parts use JSON values because tool and data type names are dynamic.
+Core messages and events remain the crate's existing typed structures.
+
+`to_ui_messages` collapses assistant, tool, and internal records into bubbles and
+records the source IDs in `metadata.aiPython.sourceMessages`. Special content and
+message-bundle results carry explicit `toolResultKinds` hints. The inbound path
+uses those hints rather than inferring special results from arbitrary JSON.
+
+`to_stream` emits typed UI events; `to_sse` encodes the same events as SSE and
+appends `data: [DONE]` on successful exhaustion. Both consume fallible core event
+streams lazily. A source error terminates the stream without a successful finish
+or done marker. Applications set `UI_MESSAGE_STREAM_HEADERS` on the HTTP response.
+The encoder preserves camelCase aliases, omitted top-level nulls, nested nulls,
+Python JSON spacing, finite-float notation, ASCII escaping, and dataclass field
+order. JSON values retain insertion order through Serde's `preserve_order` feature and use `float_roundtrip`
+when parsing decimal numbers. Core `Metadata` retains its existing sorted map
+representation.
+
+An empty assistant `turn_id` uses the message ID and consumes the first record.
+The Python implementation otherwise stalls on this input. Other turn grouping
+rules follow the source.
+
 ## Test map
 
 | Python tests | Rust integration tests | Coverage |
@@ -129,6 +165,12 @@ to the later agent runtime. Rust `Drop` handles stream and resource cancellation
 | `ai.errors` contract | `tests/errors.rs` | Status mapping, retryability, context and error sources |
 | Canonical Python wire fixtures | `tests/python_compat.rs`, `tests/fixtures/python-0.8.0.json` | Actual upstream serialization of all 21 events, 5 message roles, 3 tools, and usage |
 | New transport boundary | `tests/transport.rs`, `tests/transport_reqwest.rs` | SSE chunk boundaries, limits, EOF, errors, HTTP request/response and redirects |
+| `tests/ui/ai_sdk/test_inbound_messages.py` | `tests/ui_inbound_messages.rs` | Tool boundaries, approvals, special results, optional tool validation, UI-only parts and built-in tools |
+| `tests/ui/ai_sdk/test_approvals.py` | `tests/ui_approvals.rs` | Approval extraction, hook identity, metadata and explicit registry resolution |
+| `tests/ui/ai_sdk/test_outbound_messages.py` | `tests/ui_outbound_messages.rs` | Bubbles, tool deduplication, files, provider metadata and persisted identity roundtrips |
+| `tests/ui/ai_sdk/test_outbound_stream.py` | `tests/ui_outbound_stream.rs` | Stream boundaries, retries, tools, typed partial results, hooks, files and SSE encoding |
+| Captured Python UI outputs | `tests/ui_python_compat.rs`, `tests/fixtures/ui-python-0.8.0.json` | Requests, histories, event streams and exact JSON encoding from the unmodified Python tests |
+| UI transport integration | `tests/ui_transport.rs`, `tests/ui_aggregator.rs` | Scripted `HttpTransport`, byte-split SSE, hydration, lazy conversion, error termination and typed reducer compatibility |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
 not reproduce Python test counts. Python garbage-collector closure behavior,
@@ -140,6 +182,12 @@ the adapters. No live provider credentials are needed by the Rust suite.
 Regenerate wire fixtures with `scripts/generate_python_fixtures.py`, an explicit
 path to the upstream checkout, and an isolated Python environment with Pydantic
 2.13 or newer. The Rust tests read the committed fixture and do not need Python.
+
+Regenerate UI fixtures with `scripts/generate_ui_fixtures.py UPSTREAM DESTINATION`
+in an isolated environment containing the upstream runtime dependencies, pytest,
+pytest-asyncio and async-solipsism. This runs all upstream `tests/ui` tests and
+records their adapter calls. Runtime-only aggregator factories are checked by the
+Rust streaming tests because they cannot be stored in JSON fixtures.
 
 ## Later modules
 
@@ -154,12 +202,10 @@ path to the upstream checkout, and an isolated Python environment with Pydantic
   context/history, dispatch hooks, and implement retry/replay policy. The core
   already carries result kinds, cached results, hook parts, agent events, replay,
   hydration, and pending-run state.
-- `ui`: convert the core `Event`/`Message` shapes to the UI protocol. Use explicit
-  event-message omission and hydration for persisted or transported streams.
 - Telemetry and dedicated operation front ends: wrap the existing model/provider
   contracts. The base exposes typed dedicated-operation methods and unsupported
   defaults; this cut does not implement any provider's remote operation.
 - Provider history repair, testing helpers, MCP, durable workflow integrations,
   vendor convenience factories, and environment-loading examples remain separate.
 
-The deferred modules are absent. There are no placeholder implementations.
+The modules listed as deferred are absent. There are no placeholder implementations.
