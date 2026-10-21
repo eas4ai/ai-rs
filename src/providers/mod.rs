@@ -14,6 +14,7 @@
 
 //! Provider and protocol extension points. Concrete adapters register explicitly.
 
+pub mod anthropic;
 pub mod base;
 pub mod operations;
 pub use base::{

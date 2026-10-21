@@ -244,6 +244,10 @@ pub trait Provider: Send + Sync + AsProvider {
     fn transport(&self) -> Option<&dyn HttpTransport> {
         None
     }
+    /// Clone the transport handle for a stream that outlives this method call.
+    fn transport_arc(&self) -> Option<Arc<dyn HttpTransport>> {
+        None
+    }
     fn client(&self) -> Result<&dyn HttpTransport, Error> {
         self.transport()
             .ok_or_else(|| Error::Configuration("provider client has not been initialized".into()))
@@ -500,6 +504,9 @@ impl Provider for ConfiguredProvider {
     }
     fn transport(&self) -> Option<&dyn HttpTransport> {
         self.transport.as_deref()
+    }
+    fn transport_arc(&self) -> Option<Arc<dyn HttpTransport>> {
+        self.transport.clone()
     }
 }
 
