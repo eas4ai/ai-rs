@@ -15,6 +15,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+pub mod agents;
 pub mod errors;
 pub mod models;
 pub mod providers;
@@ -22,6 +23,7 @@ pub mod transport;
 pub mod types;
 pub mod util;
 
+pub use agents::{Agent, AgentStream, AgentTool, Context, HookRegistry, RunOptions};
 pub use errors::Error;
 pub use models::{
     Model, StreamHandle, StreamOptions, experimental_generate, generate, get_model, probe, stream,

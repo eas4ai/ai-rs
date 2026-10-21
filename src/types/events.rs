@@ -1066,6 +1066,7 @@ pub struct RunStateTracker {
     deferred: Vec<HookPart>,
     in_flight: BTreeSet<String>,
     last_scheduled: BTreeSet<String>,
+    completed_while_streaming: BTreeSet<String>,
     streaming: u32,
     stream_ended: bool,
     blocked: bool,
@@ -1088,6 +1089,7 @@ impl RunStateTracker {
                 self.streaming += 1;
                 self.stream_ended = false;
                 self.last_scheduled.clear();
+                self.completed_while_streaming.clear();
             }
             Event::StreamEnd(value) => {
                 self.streaming = self.streaming.saturating_sub(1);
@@ -1099,7 +1101,13 @@ impl RunStateTracker {
                     .into_iter()
                     .map(|call| call.tool_call_id.clone())
                     .collect();
-                self.in_flight.extend(self.last_scheduled.iter().cloned());
+                // Tools start at ToolEnd and can settle before StreamEnd.
+                // Do not reintroduce those completed calls as pending work.
+                self.in_flight.extend(
+                    self.last_scheduled
+                        .difference(&self.completed_while_streaming)
+                        .cloned(),
+                );
             }
             Event::Retry(_) => {
                 self.streaming = self.streaming.saturating_sub(1);
@@ -1110,10 +1118,15 @@ impl RunStateTracker {
                     .cloned()
                     .collect();
                 self.last_scheduled.clear();
+                self.completed_while_streaming.clear();
             }
             Event::ToolCallResult(value) => {
                 for result in &value.results {
                     self.in_flight.remove(&result.tool_call_id);
+                    if self.streaming > 0 {
+                        self.completed_while_streaming
+                            .insert(result.tool_call_id.clone());
+                    }
                 }
             }
             Event::Hook(value) => match value.hook.status {
