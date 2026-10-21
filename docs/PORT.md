@@ -191,21 +191,15 @@ Rust streaming tests because they cannot be stored in JSON fixtures.
 
 ## Later modules
 
-- `providers::openai`: implement `ProviderProtocol`, emit normalized events, use
-  `HttpTransport` and `transport::sse`, map HTTP errors, list/probe without inference,
-  and register handles plus restoration factories. Preserve provider tool config.
-- `providers::anthropic`: use the same contracts. Preserve reasoning metadata,
-  built-in tool events, multipart results, and provider stop-reason normalization.
-- Gateway: implement the gateway wire protocol, authentication and catalog support.
-  Model parsing and gateway aliases already exist in the core.
-- `agents`: execute `Tool` declarations, validate arguments, maintain explicit
-  context/history, dispatch hooks, and implement retry/replay policy. The core
-  already carries result kinds, cached results, hook parts, agent events, replay,
-  hydration, and pending-run state.
-- Telemetry and dedicated operation front ends: wrap the existing model/provider
-  contracts. The base exposes typed dedicated-operation methods and unsupported
-  defaults; this cut does not implement any provider's remote operation.
-- Provider history repair, testing helpers, MCP, durable workflow integrations,
-  vendor convenience factories, and environment-loading examples remain separate.
+Implemented after the core cut: `providers::openai` (Responses and Chat Completions
+protocols, built-in tools, streaming, errors), `providers::anthropic` (messages,
+tools, reasoning, streaming, errors), `agents` (Agent, tools, hooks, aggregators,
+runtime, middleware, buffering) and `ui::ai_sdk`. Each keeps the core contracts and
+the Python tests' semantics; see its module documentation and tests.
 
-The modules listed as deferred are absent. There are no placeholder implementations.
+Still absent, by decision: the Vercel AI Gateway protocol and catalog, OIDC,
+telemetry spans, dedicated media and embedding operation front ends beyond the
+provider base contract, the MCP client, durable workflow integrations and
+environment-loading convenience factories.
+
+The absent modules have no placeholder implementations.

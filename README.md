@@ -3,8 +3,11 @@
 Rust port of the inference core in AI SDK for Python 0.8.0.
 
 The crate provides messages, events, tool schemas, stream aggregation, provider
-contracts, and streaming HTTP transport. Concrete provider adapters and agent loops
-will be added separately. The provider registry starts empty.
+contracts, streaming HTTP transport, the OpenAI-compatible and Anthropic provider
+adapters (`providers::openai`, `providers::anthropic`), the agent loop with tools,
+approval hooks and middleware (`agents`), and the AI SDK UI message stream adapter
+(`ui::ai_sdk`). The provider registry starts empty; register the adapters you use.
+The Vercel AI Gateway, OIDC, telemetry and the MCP client are not ported.
 
 `ui::ai_sdk` converts Vercel AI SDK v6 UI requests into core messages and converts
 core histories and event streams back to UI messages and SSE. It preserves the
