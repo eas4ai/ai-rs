@@ -205,6 +205,9 @@ pub struct ProviderError {
     pub is_retryable: bool,
     /// Model id for [`ProviderErrorKind::ModelNotFound`], when known.
     pub model_id: Option<String>,
+    /// Original runtime failure, retained across clones and omitted from Debug.
+    #[source]
+    pub source: Option<crate::types::events::RuntimeError>,
 }
 
 impl fmt::Debug for ProviderError {
@@ -244,7 +247,14 @@ impl ProviderError {
                 ProviderErrorKind::Connection | ProviderErrorKind::Timeout
             ),
             model_id: None,
+            source: None,
         }
+    }
+
+    /// Retains the original runtime error and its source chain.
+    pub fn with_source(mut self, error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(crate::types::events::RuntimeError::new(error));
+        self
     }
 
     /// Creates a generic provider API error.

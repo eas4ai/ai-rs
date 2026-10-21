@@ -244,6 +244,11 @@ pub trait Provider: Send + Sync + AsProvider {
     fn transport(&self) -> Option<&dyn HttpTransport> {
         None
     }
+    /// Share an owned transport with a provider adapter's static event stream.
+    /// Implement this alongside `transport` when using a concrete HTTP protocol.
+    fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
+        None
+    }
     fn client(&self) -> Result<&dyn HttpTransport, Error> {
         self.transport()
             .ok_or_else(|| Error::Configuration("provider client has not been initialized".into()))
@@ -500,6 +505,9 @@ impl Provider for ConfiguredProvider {
     }
     fn transport(&self) -> Option<&dyn HttpTransport> {
         self.transport.as_deref()
+    }
+    fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
+        self.transport.clone()
     }
 }
 

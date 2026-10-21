@@ -15,6 +15,7 @@
 //! Provider and protocol extension points. Concrete adapters register explicitly.
 
 pub mod base;
+pub mod openai;
 pub mod operations;
 pub use base::{
     ConfiguredProvider, EventStream, ModelsDevProvider, Provider, ProviderConfig, ProviderProtocol,
