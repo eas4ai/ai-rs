@@ -53,7 +53,7 @@ static PROFILE: ChatProfile = ChatProfile {
     json_drops_tool_calls_after_text: true,
 };
 
-static HOST: Host = Host {
+pub(super) static HOST: Host = Host {
     name: "cerebras",
     handle: "@ai-sdk/cerebras",
     default_base_url: "https://api.cerebras.ai/v1",

@@ -47,6 +47,7 @@
 use crate::{
     Error, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     providers::{
+        ModelsDevProvider,
         anthropic::protocol::{HostMessagesProtocol, MessagesProfile},
         openai::{profile::ChatProfile, protocol::HostChatProtocol},
     },
@@ -61,6 +62,29 @@ pub mod fireworks;
 pub mod minimax;
 pub mod togetherai;
 pub mod zai;
+
+/// Every host, for lookups by package or name.
+static HOSTS: [&Host; 6] = [
+    &cerebras::HOST,
+    &deepinfra::HOST,
+    &fireworks::HOST,
+    &togetherai::HOST,
+    &zai::HOST,
+    &minimax::HOST,
+];
+
+/// The Chat Completions profile of the host that models.dev metadata names,
+/// by its package handle first and then by its id.
+pub(crate) fn chat_profile_for(metadata: &ModelsDevProvider) -> Option<&'static ChatProfile> {
+    let host = HOSTS
+        .iter()
+        .find(|host| metadata.npm.as_deref() == Some(host.handle))
+        .or_else(|| HOSTS.iter().find(|host| host.name == metadata.id))?;
+    match host.protocol {
+        HostProtocol::Chat(profile) => Some(profile),
+        HostProtocol::Messages(_) => None,
+    }
+}
 
 /// A host: its names, endpoint, key variable and protocol profile.
 #[derive(Debug)]
