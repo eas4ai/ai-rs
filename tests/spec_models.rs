@@ -1017,7 +1017,6 @@ mod reqwest_limits {
         let address = listener.local_addr().unwrap();
         let mut held = Vec::new();
         for _ in 0..8 {
-            let address = address;
             let connected = tokio::task::spawn_blocking(move || {
                 std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300))
             })
