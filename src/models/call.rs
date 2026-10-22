@@ -279,6 +279,19 @@ impl StreamCall {
                     return Some(Err(total_timeout_error(&self.model, timeout)));
                 }
             };
+            let item = match item {
+                // An attempt that ends before any event is an incomplete
+                // response that arrived before the first event: retry it.
+                None if !self.started => {
+                    self.attempt = None;
+                    Some(Err(ProviderError::incomplete_response(
+                        "the provider stream ended without any event; the response is incomplete",
+                        Some(self.model.provider.name().to_owned()),
+                    )
+                    .into()))
+                }
+                item => item,
+            };
             match item {
                 None => {
                     self.attempt = None;

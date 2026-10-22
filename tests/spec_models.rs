@@ -545,6 +545,35 @@ async fn mod_005_transport_connection_failures_are_retried() {
     assert_eq!(provider.requests().len(), 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn mod_005_an_empty_provider_stream_is_retried() {
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [
+            ScriptedResponse::events(vec![]),
+            ScriptedResponse::text("ok"),
+        ],
+    );
+    let model = provider.model("m");
+    let mut response = model_stream(&model, vec![user_message("hi")], StreamOptions::default());
+    while let Some(event) = response.next().await {
+        event.unwrap();
+    }
+    assert_eq!(response.text(), "ok");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].at - requests[0].at, Duration::from_secs(2));
+
+    let provider = ScriptedProvider::new("scripted", [ScriptedResponse::events(vec![])]);
+    let (events, error) = drain(&provider.model("m"), no_retry()).await;
+    assert!(events.is_empty());
+    assert_eq!(
+        provider_error(&error.unwrap()).kind,
+        ProviderErrorKind::IncompleteResponse
+    );
+    assert_eq!(provider.requests().len(), 1);
+}
+
 #[test]
 fn mod_005_without_a_tokio_runtime_a_retryable_error_is_returned_not_retried() {
     let provider = rate_limit_then_text();
