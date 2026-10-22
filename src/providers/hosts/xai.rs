@@ -67,7 +67,7 @@ static PROFILE: ResponsesProfile = ResponsesProfile {
 pub(super) static HOST: Host = Host {
     name: "xai",
     handle: "@ai-sdk/xai",
-    default_base_url: "https://api.x.ai",
+    default_base_url: "https://api.x.ai/v1",
     api_key_env: "XAI_API_KEY",
     protocol: HostProtocol::Responses(&PROFILE),
 };

@@ -89,6 +89,7 @@ pub(super) fn responses_request(
         && let Some(effort) = reasoning.get("effort").and_then(Value::as_str)
     {
         let sent = match effort {
+            "minimal" => "low",
             "xhigh" | "max" if model == "grok-4.6" => "xhigh",
             "xhigh" | "max" => "high",
             other => other,

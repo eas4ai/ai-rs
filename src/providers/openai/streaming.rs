@@ -556,7 +556,7 @@ impl Parser {
                             && let Some(cached) = u.cache_read_tokens
                             && cached > u.input_tokens
                         {
-                            let _ = cached;
+                            u.input_tokens = u.input_tokens.saturating_add(cached);
                         }
                         self.usage = Some(u);
                     }
@@ -568,7 +568,7 @@ impl Parser {
                     }
                     .map(str::to_owned);
                 }
-                if kind == "response.failed" && false {
+                if kind == "response.failed" {
                     return Err(dialect::stream_error(true, self.api, &self.provider, r));
                 }
             }

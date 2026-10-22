@@ -408,6 +408,7 @@ fn xai_assistant(msg: &Message, key: &str, out: &mut Vec<Value>) {
                 "call_id":c.tool_call_id,
                 "name":c.tool_name,
                 "arguments":c.tool_args,
+                "status":"completed",
             })),
             Part::Reasoning(r) => {
                 let encrypted = encrypted_reasoning(md);

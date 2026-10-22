@@ -455,7 +455,10 @@ fn huggingface_tools(body: &mut serde_json::Map<String, Value>, choice: Option<&
             body.remove("tool_choice");
         }
         Some(ToolChoice::Tool(tool)) => {
-            let _ = tool;
+            body.insert(
+                "tool_choice".into(),
+                json!({"type":"function","function":{"name":tool.0}}),
+            );
         }
         _ => {}
     }
