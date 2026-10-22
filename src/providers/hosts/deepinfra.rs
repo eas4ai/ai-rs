@@ -45,7 +45,7 @@ static PROFILE: ChatProfile = ChatProfile {
     auto_tool_choice_only: false,
     rejects_penalties_and_seed: false,
     finish_reasons: &[],
-    reasoning_outside_completion: true,
+    reasoning_outside_completion: false,
     json_drops_tool_calls_after_text: false,
 };
 
