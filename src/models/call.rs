@@ -139,15 +139,16 @@ fn total_timeout_error(model: &Model, timeout: Duration) -> Error {
     )
 }
 
-/// Retries and timeouts need the Tokio timer; report its absence instead of
-/// letting Tokio panic.
+/// Retries and timeouts need the Tokio timer. Report a missing runtime instead
+/// of letting Tokio panic. Tokio offers no check for a runtime built without
+/// its time driver; in such a runtime the first wait panics, as every Tokio
+/// timer does, so the README requires a runtime with the time driver enabled.
 fn require_timer() -> Result<()> {
     tokio::runtime::Handle::try_current()
         .map(|_| ())
         .map_err(|_| {
             Error::Configuration(
-                "model call retries and timeouts require a Tokio runtime with its timer enabled"
-                    .to_owned(),
+                "model call retries and timeouts require a Tokio runtime".to_owned(),
             )
         })
 }

@@ -73,8 +73,12 @@ provider's `retry-after` wait when that is under 60 s. Set `StreamOptions::retry
 to change this, or use `RetryPolicy::none()` to turn it off.
 `StreamOptions::timeout` bounds the whole call and `StreamOptions::idle_timeout`
 bounds the silence before each event; both are unset by default. Retries and
-timeouts use the Tokio timer. Dropping a call stops it, including a pending
-retry wait.
+timeouts use the Tokio timer, so run calls in a Tokio runtime with its time
+driver enabled (`enable_time` or `enable_all`, which `#[tokio::main]` sets).
+Without a runtime, a retryable error is returned without a retry and a call with a
+timeout fails with a configuration error; in a runtime built without the time
+driver, Tokio panics at the first wait. Dropping a call stops it, including a
+pending retry wait.
 
 `Model::to_value` leaves out credentials: the API key value, the `env` map and
 the headers. `Model::from_value` takes them from the provider that the registry
