@@ -482,11 +482,37 @@ async fn finish_reason_normalization() {
             json!([]),
             "other",
         ),
-        ("failed", Value::Null, json!([]), "error"),
     ] {
         let ev=collect(Scripted::sse(vec![json!({"type":format!("response.{status}"),"response":{"status":status,"incomplete_details":details,"output":output}})]),false,vec![],StreamOptions::default()).await;
         assert_eq!(end(&ev).finish_reason.as_deref(), Some(want));
     }
+    // A failed response ends the call with an error (HST-025), where Python
+    // reports the finish reason error.
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(
+            ProviderConfig {
+                api_key_value: Some("sk-test".into()),
+                ..Default::default()
+            },
+            Scripted::sse(vec![
+                json!({"type":"response.failed","response":{"status":"failed","output":[]}}),
+            ]),
+        )),
+    );
+    let mut handle = suprnova_ai::stream(
+        &model,
+        vec![suprnova_ai::user_message("hi")],
+        StreamOptions::default(),
+    );
+    let mut failed = false;
+    while let Some(event) = handle.next().await {
+        failed |= matches!(event, Err(suprnova_ai::Error::Provider(_)));
+    }
+    assert!(
+        failed,
+        "a failed response did not end with a provider error"
+    );
 }
 
 #[tokio::test]
@@ -678,9 +704,14 @@ async fn configuration_modelsdev_and_registry_restoration() {
         )
         .unwrap();
         assert_eq!(p.name(), id);
+        // Metadata for xAI gets its Responses host rules (HST-019).
         assert_eq!(
             p.protocol().unwrap().protocol_class_id(),
-            "openai_chat_completions"
+            if id == "xai" {
+                "xai_responses"
+            } else {
+                "openai_chat_completions"
+            }
         );
         if id == "cloudflare-workers-ai" {
             assert!(p.is_configured());

@@ -14,7 +14,7 @@
 
 use super::{
     OpenAIChatCompletionsProtocol, OpenAIResponsesProtocol, errors, protocol,
-    protocol::HostChatProtocol,
+    protocol::{HostChatProtocol, HostResponsesProtocol},
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
@@ -99,6 +99,8 @@ impl OpenAICompatibleProvider {
                 Arc::new(OpenAIResponsesProtocol)
             } else if let Some(profile) = hosts::chat_profile_for(metadata) {
                 Arc::new(HostChatProtocol(profile, None))
+            } else if let Some(profile) = hosts::responses_profile_for(metadata) {
+                Arc::new(HostResponsesProtocol(profile))
             } else {
                 Arc::new(OpenAIChatCompletionsProtocol)
             };

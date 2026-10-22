@@ -14,7 +14,7 @@
 
 use super::{
     dialect,
-    profile::{ChatProfile, Dialect},
+    profile::{ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
     protocol::Wire,
 };
 use crate::{
@@ -32,10 +32,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 fn string<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
-fn metadata(v: Value) -> Option<Metadata> {
-    Some([("openai".into(), v)].into())
+fn metadata(key: &str, v: Value) -> Option<Metadata> {
+    Some([(key.into(), v)].into())
 }
-fn item_metadata(item: &Value) -> Option<Metadata> {
+fn item_metadata(key: &str, item: &Value) -> Option<Metadata> {
     let mut md = json!({"raw_item":item});
     if item["id"].is_string() {
         md["item_id"] = item["id"].clone();
@@ -43,7 +43,7 @@ fn item_metadata(item: &Value) -> Option<Metadata> {
     if !item["encrypted_content"].is_null() {
         md["reasoning_encrypted_content"] = item["encrypted_content"].clone();
     }
-    metadata(md)
+    metadata(key, md)
 }
 fn meta(md: Option<Metadata>) -> ModelEventMeta {
     ModelEventMeta {
@@ -104,6 +104,14 @@ struct Parser {
     responses: bool,
     /// The Chat Completions profile; `None` for Responses.
     chat: Option<&'static ChatProfile>,
+    /// The Responses profile; `None` for Chat Completions.
+    responses_profile: Option<&'static ResponsesProfile>,
+    /// The key of the part metadata this reader writes.
+    metadata_key: &'static str,
+    /// Reasoning blocks whose summary part ended; each ends with its output
+    /// item, which can carry the encrypted content, or when the next part of
+    /// its item starts.
+    reasoning_parted: BTreeSet<String>,
     /// The request has an output schema.
     json_output: bool,
     /// Text arrived in this response.
@@ -151,11 +159,20 @@ pub(super) fn parse(
         input: http::sse_json(*api, provider.clone(), body),
         provider,
         api,
-        responses: matches!(wire, Wire::Responses),
+        responses: matches!(wire, Wire::Responses(_)),
         chat: match wire {
             Wire::Chat(profile) => Some(profile),
-            Wire::Responses => None,
+            Wire::Responses(_) => None,
         },
+        responses_profile: match wire {
+            Wire::Responses(profile) => Some(profile),
+            Wire::Chat(_) => None,
+        },
+        metadata_key: match wire {
+            Wire::Responses(profile) => profile.metadata_key,
+            Wire::Chat(_) => "openai",
+        },
+        reasoning_parted: BTreeSet::new(),
         json_output,
         has_text: false,
         held: Vec::new(),
@@ -197,11 +214,13 @@ pub(super) fn parse(
                         || string(&data, "type") == "error"
                         || string(&data, "object") == "error"
                     {
-                        return Err(dialect::stream_error(p.chat, p.api, &p.provider, &data));
+                        // Every Responses provider classifies its errors.
+                        let kinds = p.chat.is_none_or(|c| c.stream_error_kinds);
+                        return Err(dialect::stream_error(kinds, p.api, &p.provider, &data));
                     }
                     p.start();
                     if p.responses {
-                        p.response(&data);
+                        p.response(&data)?;
                     } else {
                         p.chat(&data)?;
                     }
@@ -417,7 +436,7 @@ impl Parser {
             };
             self.finish = Some(reason.into());
             if reason == "other" {
-                self.metadata = metadata(json!({"finish_reason":raw}));
+                self.metadata = metadata("openai", json!({"finish_reason":raw}));
             }
             for id in std::mem::take(&mut self.reasoning) {
                 self.queue.push_back(block("reasoning_end", &id, None));
@@ -499,16 +518,17 @@ impl Parser {
             chunk: chunk.into(),
         }));
     }
-    fn response(&mut self, data: &Value) {
+    fn response(&mut self, data: &Value) -> Result<(), crate::Error> {
         let kind = string(data, "type");
         match kind {
             "response.created"
             | "response.completed"
+            | "response.done"
             | "response.incomplete"
             | "response.failed" => {
                 let r = &data["response"];
                 if !r.is_object() {
-                    return;
+                    return Ok(());
                 }
                 let mut md = serde_json::Map::new();
                 for (src, dst) in [
@@ -526,14 +546,30 @@ impl Parser {
                         r["incomplete_details"]["reason"].clone(),
                     );
                 }
-                self.metadata = metadata(md.into());
+                self.metadata = metadata(self.metadata_key, md.into());
                 if kind != "response.created" {
-                    if let Some(u) = usage(&r["usage"], true) {
+                    if let Some(mut u) = usage(&r["usage"], true) {
+                        // xAI can count cached tokens apart from input tokens.
+                        if self
+                            .responses_profile
+                            .is_some_and(|p| p.dialect == ResponsesDialect::Xai)
+                            && let Some(cached) = u.cache_read_tokens
+                            && cached > u.input_tokens
+                        {
+                            u.input_tokens = u.input_tokens.saturating_add(cached);
+                        }
                         self.usage = Some(u);
                     }
                     self.response_id = r["id"].as_str().map(str::to_owned);
                     self.response_model = r["model"].as_str().map(str::to_owned);
-                    self.finish = finish_reason(r).map(str::to_owned);
+                    self.finish = match kind {
+                        "response.incomplete" => Some(incomplete_reason(r)),
+                        _ => finish_reason(r),
+                    }
+                    .map(str::to_owned);
+                }
+                if kind == "response.failed" {
+                    return Err(dialect::stream_error(true, self.api, &self.provider, r));
                 }
             }
             "response.output_item.added" => self.item_added(&data["item"], data),
@@ -581,12 +617,14 @@ impl Parser {
             }
             "response.reasoning_summary_part.added" => {
                 let id = reasoning_id(data);
+                self.end_parted_reasoning(&id);
                 if self.reasoning.insert(id.clone()) {
                     self.queue.push_back(block("reasoning_start", &id, None));
                 }
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 let id = reasoning_id(data);
+                self.end_parted_reasoning(&id);
                 if self.reasoning.insert(id.clone()) {
                     self.queue.push_back(block("reasoning_start", &id, None));
                 }
@@ -600,11 +638,12 @@ impl Parser {
                     }));
                 }
             }
+            // The block stays open for its output item, which can carry the
+            // encrypted content after the part ended, as xAI's does.
             "response.reasoning_summary_part.done" => {
                 let id = reasoning_id(data);
-                if self.reasoning.remove(&id) {
-                    self.reasoning_ended.insert(id.clone());
-                    self.queue.push_back(block("reasoning_end", &id, None));
+                if self.reasoning.contains(&id) {
+                    self.reasoning_parted.insert(id);
                 }
             }
             "response.image_generation_call.partial_image" => {
@@ -627,6 +666,25 @@ impl Parser {
             }
             _ => {}
         }
+        Ok(())
+    }
+    /// End the reasoning blocks of the same item whose summary part ended,
+    /// before a block other than them starts or grows.
+    fn end_parted_reasoning(&mut self, next: &str) {
+        let item = next.rsplit_once(':').map_or(next, |(item, _)| item);
+        let parted: Vec<_> = self
+            .reasoning_parted
+            .iter()
+            .filter(|id| id.as_str() != next && id.rsplit_once(':').is_some_and(|(i, _)| i == item))
+            .cloned()
+            .collect();
+        for id in parted {
+            self.reasoning_parted.remove(&id);
+            if self.reasoning.remove(&id) {
+                self.reasoning_ended.insert(id.clone());
+                self.queue.push_back(block("reasoning_end", &id, None));
+            }
+        }
     }
     fn item_added(&mut self, item: &Value, data: &Value) {
         if !item.is_object() {
@@ -634,7 +692,7 @@ impl Parser {
         }
         let kind = string(item, "type");
         let key = state_key(item, data);
-        let md = item_metadata(item);
+        let md = item_metadata(self.metadata_key, item);
         match kind {
             "message" => {
                 let id = nonempty(string(item, "id"), &key, "text");
@@ -706,7 +764,7 @@ impl Parser {
         }
         let kind = string(item, "type");
         let key = state_key(item, data);
-        let md = item_metadata(item);
+        let md = item_metadata(self.metadata_key, item);
         match kind {
             "message" => {
                 let id = nonempty(string(item, "id"), &key, "text");
@@ -809,7 +867,7 @@ impl Parser {
     }
     fn reasoning_done(&mut self, item: &Value, key: &str) {
         let id = nonempty(string(item, "id"), key, "");
-        let md = item_metadata(item);
+        let md = item_metadata(self.metadata_key, item);
         if let Some(summary) = item["summary"].as_array().filter(|s| !s.is_empty()) {
             for (index, summary) in summary.iter().enumerate() {
                 let block_id = format!("{id}:{index}");
@@ -829,6 +887,7 @@ impl Parser {
                     }));
                 }
                 self.reasoning.remove(&block_id);
+                self.reasoning_parted.remove(&block_id);
                 self.reasoning_ended.insert(block_id.clone());
                 self.queue
                     .push_back(block("reasoning_end", &block_id, md.clone()));
@@ -842,10 +901,20 @@ impl Parser {
                 .collect();
             for block_id in matching {
                 self.reasoning.remove(&block_id);
+                self.reasoning_parted.remove(&block_id);
                 self.queue
                     .push_back(block("reasoning_end", &block_id, md.clone()));
             }
         }
+    }
+}
+/// The finish reason of a `response.incomplete` event, whether or not its
+/// response has a status.
+fn incomplete_reason(response: &Value) -> &'static str {
+    match string(&response["incomplete_details"], "reason") {
+        "max_output_tokens" => "length",
+        "content_filter" => "content_filter",
+        _ => "other",
     }
 }
 fn finish_reason(response: &Value) -> Option<&'static str> {

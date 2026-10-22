@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    dialect, errors, messages, params,
-    profile::{self, ChatProfile, Dialect},
+    dialect, messages, params,
+    profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
     streaming,
 };
 use crate::{
@@ -46,22 +46,54 @@ pub fn default_protocol(provider: &str) -> Arc<dyn ProviderProtocol> {
     }
 }
 
-/// The API a request uses: Responses, or Chat Completions as a server's
+/// The API a request uses: Responses or Chat Completions, as a server's
 /// profile describes it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Wire {
-    Responses,
+    Responses(&'static ResponsesProfile),
     Chat(&'static ChatProfile),
 }
 impl Wire {
     pub(crate) fn api(self) -> &'static http::ApiProfile {
         match self {
-            Self::Responses => &errors::API,
+            Self::Responses(profile) => &profile.api,
             Self::Chat(profile) => &profile.api,
         }
     }
     fn responses(self) -> bool {
-        matches!(self, Self::Responses)
+        matches!(self, Self::Responses(_))
+    }
+    /// The Responses dialect, or `None` for Chat Completions.
+    pub(crate) fn responses_dialect(self) -> Option<ResponsesDialect> {
+        match self {
+            Self::Responses(profile) => Some(profile.dialect),
+            Self::Chat(_) => None,
+        }
+    }
+}
+
+/// Responses for a host, as its profile describes it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostResponsesProtocol(pub(crate) &'static ResponsesProfile);
+impl ProviderProtocol for HostResponsesProtocol {
+    fn protocol_class_id(&self) -> &str {
+        self.0.protocol_class_id
+    }
+    fn stream(
+        &self,
+        model: &Model,
+        messages: Vec<Message>,
+        options: StreamOptions,
+        provider: &dyn Provider,
+    ) -> EventStream {
+        start(
+            model,
+            messages,
+            options,
+            provider,
+            Wire::Responses(self.0),
+            None,
+        )
     }
 }
 
@@ -125,7 +157,14 @@ impl ProviderProtocol for OpenAIResponsesProtocol {
         options: StreamOptions,
         provider: &dyn Provider,
     ) -> EventStream {
-        start(model, messages, options, provider, Wire::Responses, None)
+        start(
+            model,
+            messages,
+            options,
+            provider,
+            Wire::Responses(&profile::OPENAI_RESPONSES),
+            None,
+        )
     }
 }
 /// Chat Completions with explicit public-network media downloads.
@@ -235,7 +274,7 @@ pub fn build_request(
     responses: bool,
 ) -> Result<HttpRequest, Error> {
     let wire = if responses {
-        Wire::Responses
+        Wire::Responses(&profile::OPENAI_RESPONSES)
     } else {
         Wire::Chat(&profile::OPENAI)
     };
@@ -252,14 +291,16 @@ pub(crate) fn wire_request(
     let p = options.params.clone().unwrap_or_default();
     let chat = match wire {
         Wire::Chat(profile) => Some(profile),
-        Wire::Responses => None,
+        Wire::Responses(_) => None,
     };
-    if let Some(profile) = chat {
-        dialect::check(profile, model, &p, options)?;
+    match wire {
+        Wire::Chat(profile) => dialect::check(profile, model, &p, options)?,
+        Wire::Responses(profile) => dialect::check_responses(profile, model, &p, options)?,
     }
     let mut body = params::build(&p, wire)?;
-    if let Some(profile) = chat {
-        dialect::request(profile, model, &p, &mut body);
+    match wire {
+        Wire::Chat(profile) => dialect::request(profile, model, &p, &mut body),
+        Wire::Responses(profile) => dialect::responses_request(profile, model, &mut body),
     }
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
@@ -319,6 +360,9 @@ pub(crate) fn wire_request(
     {
         mistral_tools(&mut body, dialect::tool_choice(&p, options))?;
     }
+    if wire.responses_dialect() == Some(ResponsesDialect::HuggingFace) {
+        huggingface_tools(&mut body, dialect::tool_choice(&p, options));
+    }
     if let Some(schema) = &options.output_schema {
         let name = options.output_type_name.as_deref().unwrap_or("output");
         let host_format = match chat {
@@ -329,7 +373,12 @@ pub(crate) fn wire_request(
             _ if host_format.is_some() => {
                 body.insert("response_format".into(), host_format.into());
             }
-            Wire::Responses => {
+            Wire::Responses(profile) if profile.dialect == ResponsesDialect::HuggingFace => {
+                let text = body.entry("text").or_insert_with(|| json!({}));
+                text["format"] =
+                    json!({"type":"json_schema","name":name,"schema":schema,"strict":false});
+            }
+            Wire::Responses(_) => {
                 let schema = strict_output_schema(schema)?;
                 let text = body.entry("text").or_insert_with(|| json!({}));
                 text["format"] =
@@ -395,6 +444,24 @@ fn mistral_tools(
         body.insert("tool_choice".into(), json!("any"));
     }
     Ok(())
+}
+/// Hugging Face's tool choice: a named tool in the Chat Completions shape,
+/// and neither tools nor `tool_choice` for `none`
+/// (`huggingface-responses-prepare-tools.ts`).
+fn huggingface_tools(body: &mut serde_json::Map<String, Value>, choice: Option<&ToolChoice>) {
+    match choice {
+        Some(ToolChoice::None) => {
+            body.remove("tools");
+            body.remove("tool_choice");
+        }
+        Some(ToolChoice::Tool(tool)) => {
+            body.insert(
+                "tool_choice".into(),
+                json!({"type":"function","function":{"name":tool.0}}),
+            );
+        }
+        _ => {}
+    }
 }
 fn tool_choice_name(choice: &ToolChoice) -> &'static str {
     match choice {

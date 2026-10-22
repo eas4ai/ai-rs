@@ -19,7 +19,7 @@
 //! here, before any request.
 use super::{
     params::invalid,
-    profile::{ChatProfile, Dialect, Setting},
+    profile::{ChatProfile, Dialect, ResponsesDialect, ResponsesProfile, Setting},
 };
 use crate::{
     Error, StreamOptions,
@@ -48,8 +48,96 @@ pub(super) fn check(
     p: &InferenceRequestParams,
     options: &StreamOptions,
 ) -> Result<(), Error> {
-    let label = profile.api.label;
-    for setting in profile.unsupported {
+    check_settings(profile.api.label, profile.unsupported, p, options)?;
+    match profile.dialect {
+        Dialect::OpenAI => Ok(()),
+        Dialect::DeepSeek => check_deepseek(model, p),
+        Dialect::Moonshot => check_moonshot(model, p, options),
+        Dialect::Mistral => check_mistral(model, p),
+    }
+}
+
+/// Fail on a setting a Responses host does not take, before any request.
+pub(super) fn check_responses(
+    profile: &ResponsesProfile,
+    model: &str,
+    p: &InferenceRequestParams,
+    options: &StreamOptions,
+) -> Result<(), Error> {
+    check_settings(profile.api.label, profile.unsupported, p, options)?;
+    if profile.dialect == ResponsesDialect::Xai
+        && xai_without_reasoning(model)
+        && effort(p).is_some()
+    {
+        return Err(invalid(format!(
+            "xAI model {model} does not take reasoning settings"
+        )));
+    }
+    Ok(())
+}
+
+/// Change a Responses body built from the parameters to the host's fields.
+pub(super) fn responses_request(
+    profile: &ResponsesProfile,
+    model: &str,
+    body: &mut Map<String, Value>,
+) {
+    if profile.dialect != ResponsesDialect::Xai {
+        return;
+    }
+    if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut)
+        && let Some(effort) = reasoning.get("effort").and_then(Value::as_str)
+    {
+        let sent = match effort {
+            "minimal" => "low",
+            "xhigh" | "max" if model == "grok-4.6" => "xhigh",
+            "xhigh" | "max" => "high",
+            other => other,
+        }
+        .to_owned();
+        reasoning.insert("effort".into(), json!(sent));
+    }
+    // xAI stores responses unless told not to; an unstored response needs its
+    // reasoning back as encrypted content.
+    match body.get("store") {
+        Some(Value::Bool(true)) => {
+            body.remove("store");
+        }
+        Some(Value::Bool(false)) => {
+            let include = body.entry("include").or_insert_with(|| json!([]));
+            if let Some(include) = include.as_array_mut()
+                && !include.iter().any(|v| v == "reasoning.encrypted_content")
+            {
+                include.push(json!("reasoning.encrypted_content"));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An xAI model that takes no reasoning settings: `grok-4.20`, an optional
+/// `-` and four digits, then `-reasoning` or `-non-reasoning`
+/// (`supports-reasoning-effort.ts`).
+fn xai_without_reasoning(model: &str) -> bool {
+    let Some(rest) = model.strip_prefix("grok-4.20") else {
+        return false;
+    };
+    let rest = match rest.strip_prefix('-') {
+        Some(tail) if tail.len() > 4 && tail.as_bytes()[..4].iter().all(u8::is_ascii_digit) => {
+            &rest[5..]
+        }
+        _ => rest,
+    };
+    matches!(rest, "-reasoning" | "-non-reasoning")
+}
+
+fn check_settings(
+    label: &str,
+    unsupported: &[Setting],
+    p: &InferenceRequestParams,
+    options: &StreamOptions,
+) -> Result<(), Error> {
+    for setting in unsupported {
         if sets(*setting, p, options) {
             return Err(invalid(format!(
                 "{label} does not support {}",
@@ -57,12 +145,7 @@ pub(super) fn check(
             )));
         }
     }
-    match profile.dialect {
-        Dialect::OpenAI => Ok(()),
-        Dialect::DeepSeek => check_deepseek(model, p),
-        Dialect::Moonshot => check_moonshot(model, p, options),
-        Dialect::Mistral => check_mistral(model, p),
-    }
+    Ok(())
 }
 
 /// Change the request body built from the parameters to the host's fields.
@@ -180,7 +263,45 @@ fn sets(setting: Setting, p: &InferenceRequestParams, options: &StreamOptions) -
         Setting::ToolSelection => {
             matches!(tool_choice(p, options), Some(ToolChoice::Selection(_)))
         }
+        Setting::TopK => sampler(p, |s| {
+            s.top_k
+                .as_ref()
+                .is_some_and(|t| matches!(t.top_k, ProviderValue::Value(Some(_))))
+        }),
+        Setting::MinP => sampler(p, |s| {
+            s.min_p
+                .as_ref()
+                .is_some_and(|t| matches!(t.min_p, ProviderValue::Value(Some(_))))
+        }),
+        Setting::Seed => sets_seed(p),
+        Setting::FrequencyPenalty => sampling(p).contains(&"frequency_penalty"),
+        Setting::PresencePenalty => sampling(p).contains(&"presence_penalty"),
+        Setting::ReasoningSummary => p
+            .output
+            .as_ref()
+            .is_some_and(|o| matches!(o.reasoning_summary, ProviderValue::Value(Some(_)))),
+        Setting::TextVerbosity => p
+            .output
+            .as_ref()
+            .is_some_and(|o| matches!(o.text_verbosity, ProviderValue::Value(Some(_)))),
+        Setting::OutputInclude => p.output.as_ref().is_some_and(|o| o.include.is_some()),
+        Setting::MaxToolCalls => p
+            .tool_calling
+            .as_ref()
+            .is_some_and(|t| matches!(t.max_tool_calls, ProviderValue::Value(Some(_)))),
+        Setting::ContextManagement => p
+            .context_management
+            .as_ref()
+            .is_some_and(|m| m.compaction.is_some()),
     }
+}
+
+/// Whether the call's sampling settings satisfy `test`.
+fn sampler(
+    p: &InferenceRequestParams,
+    test: impl FnOnce(&crate::models::params::SamplerParams) -> bool,
+) -> bool {
+    matches!(&p.sampling, ProviderValue::Value(s) if test(s))
 }
 
 fn setting_name(setting: Setting) -> &'static str {
@@ -192,6 +313,16 @@ fn setting_name(setting: Setting) -> &'static str {
         Setting::CacheRetention => "a cache retention",
         Setting::ParallelToolCalls => "parallel tool calls",
         Setting::ToolSelection => "a tool selection",
+        Setting::TopK => "top_k",
+        Setting::MinP => "min_p",
+        Setting::Seed => "seed",
+        Setting::FrequencyPenalty => "frequency_penalty",
+        Setting::PresencePenalty => "presence_penalty",
+        Setting::ReasoningSummary => "a reasoning summary",
+        Setting::TextVerbosity => "text verbosity",
+        Setting::OutputInclude => "an output include list",
+        Setting::MaxToolCalls => "max_tool_calls",
+        Setting::ContextManagement => "context management",
     }
 }
 
@@ -504,19 +635,14 @@ const STREAM_ERROR_STATUS: [(&str, u16); 17] = [
     ("invalid_request_error", 400),
 ];
 
-/// The error an error event in a stream ends the call with. With
-/// `stream_error_kinds`, the kind and the retry flag come from the error's
-/// code and type; otherwise the kind is `Response`.
-pub(super) fn stream_error(
-    profile: Option<&ChatProfile>,
-    api: &ApiProfile,
-    provider: &str,
-    data: &Value,
-) -> Error {
+/// The error an error event in a stream ends the call with. With `kinds`,
+/// the kind and the retry flag come from the error's code and type;
+/// otherwise the kind is `Response`.
+pub(super) fn stream_error(kinds: bool, api: &ApiProfile, provider: &str, data: &Value) -> Error {
     let message = http::error_message(api, data)
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{} stream returned an error", api.label));
-    if !profile.is_some_and(|p| p.stream_error_kinds) {
+    if !kinds {
         return http::response_error(provider, message);
     }
     let code = http::error_field(api, data, "code");
@@ -559,6 +685,28 @@ pub(super) fn stream_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xai_models_without_reasoning_follow_the_typescript_pattern() {
+        for id in [
+            "grok-4.20-reasoning",
+            "grok-4.20-non-reasoning",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+        ] {
+            assert!(xai_without_reasoning(id), "{id}");
+        }
+        for id in [
+            "grok-4.20",
+            "grok-4.20-multi-agent-0309",
+            "grok-4.20-03-reasoning",
+            "grok-4.20-0309",
+            "grok-4.6",
+            "grok-4.20-0309-reasoning-x",
+        ] {
+            assert!(!xai_without_reasoning(id), "{id}");
+        }
+    }
 
     #[test]
     fn deepseek_legacy_models_follow_the_typescript_pattern() {

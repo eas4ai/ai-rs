@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for HST-001 to HST-018 in docs/spec/hosts.md. Each test name starts
+//! Tests for HST-001 to HST-025 in docs/spec/hosts.md. Each test name starts
 //! with the requirement it checks; scripts/check-hosts.sh selects them by it.
 //! A recording transport keeps every request the crate sends and answers it
 //! with a reply written in the test, so no request leaves the machine. The
@@ -35,7 +35,8 @@ use suprnova_ai::{
     providers::{
         ModelsDevProvider, anthropic,
         hosts::{
-            cerebras, deepinfra, deepseek, fireworks, minimax, mistral, moonshotai, togetherai, zai,
+            cerebras, deepinfra, deepseek, fireworks, huggingface, minimax, mistral, moonshotai,
+            togetherai, xai, zai,
         },
         openai::{self, OpenAIChatCompletionsProtocol, OpenAICompatibleProvider},
     },
@@ -141,14 +142,16 @@ struct Host {
     url: &'static str,
     key_env: &'static str,
     messages: bool,
+    responses: bool,
 }
-const HOSTS: [Host; 9] = [
+const HOSTS: [Host; 11] = [
     Host {
         name: "cerebras",
         register: cerebras::register,
         url: "https://api.cerebras.ai/v1/chat/completions",
         key_env: "CEREBRAS_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "deepinfra",
@@ -156,6 +159,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.deepinfra.com/v1/openai/chat/completions",
         key_env: "DEEPINFRA_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "fireworks",
@@ -163,6 +167,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.fireworks.ai/inference/v1/chat/completions",
         key_env: "FIREWORKS_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "togetherai",
@@ -170,6 +175,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.together.xyz/v1/chat/completions",
         key_env: "TOGETHER_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "zai",
@@ -177,6 +183,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.z.ai/api/paas/v4/chat/completions",
         key_env: "ZAI_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "minimax",
@@ -184,6 +191,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.minimax.io/anthropic/v1/messages",
         key_env: "MINIMAX_API_KEY",
         messages: true,
+        responses: false,
     },
     Host {
         name: "deepseek",
@@ -191,6 +199,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.deepseek.com/chat/completions",
         key_env: "DEEPSEEK_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "moonshotai",
@@ -198,6 +207,7 @@ const HOSTS: [Host; 9] = [
         url: "https://api.moonshot.ai/v1/chat/completions",
         key_env: "MOONSHOT_API_KEY",
         messages: false,
+        responses: false,
     },
     Host {
         name: "mistral",
@@ -205,8 +215,50 @@ const HOSTS: [Host; 9] = [
         url: "https://api.mistral.ai/v1/chat/completions",
         key_env: "MISTRAL_API_KEY",
         messages: false,
+        responses: false,
+    },
+    Host {
+        name: "xai",
+        register: xai::register,
+        url: "https://api.x.ai/v1/responses",
+        key_env: "XAI_API_KEY",
+        messages: false,
+        responses: true,
+    },
+    Host {
+        name: "huggingface",
+        register: huggingface::register,
+        url: "https://router.huggingface.co/v1/responses",
+        key_env: "HUGGINGFACE_API_KEY",
+        messages: false,
+        responses: true,
     },
 ];
+/// A reply in the host's protocol that answers `hi`.
+fn reply(host: &Host) -> (u16, Vec<u8>) {
+    if host.messages {
+        messages_text()
+    } else if host.responses {
+        responses_text("hi")
+    } else {
+        chat_text("hi", "stop")
+    }
+}
+/// A Responses event stream of these events.
+fn responses_sse(events: &[Value]) -> (u16, Vec<u8>) {
+    let text: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+    (200, text.into_bytes())
+}
+/// A Responses stream that answers `text`.
+fn responses_text(text: &str) -> (u16, Vec<u8>) {
+    responses_sse(&[
+        json!({"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":text}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":text}]}}),
+        json!({"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1}}}),
+    ])
+}
 const CHAT_HOSTS: [&str; 5] = ["cerebras", "deepinfra", "fireworks", "togetherai", "zai"];
 /// The hosts whose messages, schemas and stream content differ from OpenAI's.
 const NEW_HOSTS: [&str; 3] = ["deepseek", "moonshotai", "mistral"];
@@ -292,11 +344,7 @@ struct Answer {
 #[tokio::test]
 async fn hst_001_each_host_streams_its_protocol_from_its_default_url() {
     for host in &HOSTS {
-        let reply = if host.messages {
-            messages_text()
-        } else {
-            chat_text("hi", "stop")
-        };
+        let reply = reply(host);
         let transport = Recorder::new([reply]);
         let registry = registry(host, key_config(), transport.clone());
         let handle = format!("@ai-sdk/{}", host.name);
@@ -334,11 +382,7 @@ async fn hst_001_each_host_streams_its_protocol_from_its_default_url() {
 #[tokio::test]
 async fn hst_001_a_configured_base_url_and_an_env_key_are_used() {
     for host in &HOSTS {
-        let reply = if host.messages {
-            messages_text()
-        } else {
-            chat_text("hi", "stop")
-        };
+        let reply = reply(host);
         let transport = Recorder::new([reply]);
         let config = ProviderConfig {
             default_base_url: "https://proxy.test/base".into(),
@@ -353,6 +397,8 @@ async fn hst_001_a_configured_base_url_and_an_env_key_are_used() {
         ok(&events);
         let path = if host.messages {
             "/v1/messages"
+        } else if host.responses {
+            "/responses"
         } else {
             "/chat/completions"
         };
@@ -421,11 +467,7 @@ fn hst_001_every_host_registers_with_openai_and_anthropic() {
 #[tokio::test]
 async fn hst_001_a_restored_snapshot_streams_from_the_registered_endpoint() {
     for host in &HOSTS {
-        let reply = if host.messages {
-            messages_text()
-        } else {
-            chat_text("hi", "stop")
-        };
+        let reply = reply(host);
         let transport = Recorder::new([reply]);
         let registry = registry(host, key_config(), transport.clone());
         let model = Model::new("test-model", registry.get_provider(host.name).unwrap());
@@ -486,10 +528,10 @@ async fn hst_002_openai_and_hostless_compatible_providers_ask_for_usage() {
     };
     let compatible = |transport: Arc<Recorder>| -> Arc<dyn Provider> {
         let metadata = ModelsDevProvider {
-            id: "xai".into(),
+            id: "ollama".into(),
             npm: Some("@ai-sdk/openai-compatible".into()),
-            api: Some("https://api.x.ai/v1".into()),
-            env: vec!["XAI_API_KEY".into()],
+            api: Some("http://localhost:11434/v1".into()),
+            env: vec![],
         };
         Arc::new(
             OpenAICompatibleProvider::from_modelsdev_provider(&metadata, key_config(), transport)
@@ -2456,4 +2498,703 @@ async fn hst_012_moonshot_normalizes_tuples_in_every_subschema() {
         "{sent}"
     );
     assert_eq!(sent["dependencies"]["other"], json!(["list"]));
+}
+
+// HST-019 to HST-025: xAI, Hugging Face and every Responses provider.
+
+/// The body a Responses host sends; the call must succeed.
+async fn responses_body(
+    name: &str,
+    model_id: &str,
+    messages: Vec<Message>,
+    options: StreamOptions,
+) -> Value {
+    let transport = Recorder::new([responses_text("{\"value\":1}")]);
+    let model = model(name, model_id, transport.clone());
+    let (_, events) = call(&model, messages, options).await;
+    ok(&events);
+    transport.body()
+}
+fn metadata_under(key: &str, value: Value) -> Option<suprnova_ai::types::messages::Metadata> {
+    Some([(key.to_owned(), value)].into())
+}
+fn items(body: &Value) -> &Vec<Value> {
+    body["input"].as_array().unwrap()
+}
+fn holds_reference(body: &Value) -> bool {
+    items(body)
+        .iter()
+        .any(|item| item["type"] == "item_reference")
+}
+
+#[tokio::test]
+async fn hst_019_models_dev_metadata_for_xai_and_hugging_face_gets_their_rules() {
+    for (id, npm, host) in [
+        ("xai", "@ai-sdk/openai-compatible", "xai"),
+        ("hf", "@ai-sdk/huggingface", "huggingface"),
+    ] {
+        let options = || {
+            let mut options = effort(Some("minimal"));
+            options.tools = tools(&["lookup"]);
+            options.tool_choice = Some(ToolChoice::Tool("lookup".into()));
+            options
+        };
+        let transport = Recorder::new([responses_text("hi")]);
+        let metadata = ModelsDevProvider {
+            id: id.into(),
+            npm: Some(npm.into()),
+            api: Some("https://host.test/v1".into()),
+            env: vec![],
+        };
+        let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+            &metadata,
+            key_config(),
+            transport.clone(),
+        )
+        .unwrap();
+        let (_, events) = call(
+            &Model::new("m", Arc::new(provider)),
+            vec![user_message("hello")],
+            options(),
+        )
+        .await;
+        ok(&events);
+        assert_eq!(
+            transport.request().url,
+            "https://host.test/v1/responses",
+            "{id}"
+        );
+        let expected = responses_body(host, "m", vec![user_message("hello")], options()).await;
+        assert_eq!(transport.body(), expected, "{id}");
+    }
+}
+
+#[tokio::test]
+async fn hst_020_xai_sends_its_sampling_settings() {
+    let options = sampling(|s| {
+        s.top_k = Some(TopKSamplerParams {
+            top_k: ProviderValue::Value(Some(40)),
+        });
+        s.min_p = Some(MinPSamplerParams {
+            min_p: ProviderValue::Value(Some(0.1)),
+        });
+        s.seed = Some(SeedSamplerParams {
+            seed: ProviderValue::Value(Some(Seed::Value(7))),
+        });
+    });
+    let body = responses_body("xai", "grok-4.7", vec![user_message("hello")], options).await;
+    assert_eq!(
+        (
+            body["top_k"].clone(),
+            body["min_p"].clone(),
+            body["seed"].clone()
+        ),
+        (json!(40), json!(0.1), json!(7)),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_020_each_responses_host_rejects_the_settings_it_never_sends() {
+    let output = |update: fn(&mut OutputParams)| {
+        params(|p| {
+            let mut output = OutputParams::default();
+            update(&mut output);
+            p.output = Some(output);
+        })
+    };
+    let tool_calling = |update: fn(&mut ToolCallingParams)| {
+        let mut options = params(|p| {
+            let mut calling = ToolCallingParams {
+                tool_choice: ToolChoice::Auto,
+                parallel_tool_calls: ProviderValue::Default,
+                max_tool_calls: ProviderValue::Default,
+            };
+            update(&mut calling);
+            p.tool_calling = Some(calling);
+        });
+        options.tools = tools(&["lookup"]);
+        options
+    };
+    let cases: Vec<(&str, StreamOptions, &[&str])> = vec![
+        (
+            "frequency penalty",
+            sampling(|s| {
+                s.repetition_penalty = Some(RepetitionPenaltyParams {
+                    frequency_penalty: ProviderValue::Value(Some(0.5)),
+                    ..Default::default()
+                })
+            }),
+            &["xai", "huggingface"],
+        ),
+        (
+            "presence penalty",
+            sampling(|s| {
+                s.repetition_penalty = Some(RepetitionPenaltyParams {
+                    presence_penalty: ProviderValue::Value(Some(0.5)),
+                    ..Default::default()
+                })
+            }),
+            &["xai", "huggingface"],
+        ),
+        (
+            "reasoning summary",
+            output(|o| o.reasoning_summary = ProviderValue::Value(Some("auto".into()))),
+            &["xai", "huggingface"],
+        ),
+        (
+            "text verbosity",
+            output(|o| o.text_verbosity = ProviderValue::Value(Some("low".into()))),
+            &["xai", "huggingface"],
+        ),
+        (
+            "max tool calls",
+            tool_calling(|t| t.max_tool_calls = ProviderValue::Value(Some(3))),
+            &["xai", "huggingface"],
+        ),
+        (
+            "context management",
+            params(|p| {
+                p.context_management = Some(ContextManagementParams {
+                    compaction: Some(TokenThreshold(1000)),
+                })
+            }),
+            &["xai", "huggingface"],
+        ),
+        (
+            "cache retention",
+            params(|p| {
+                p.cache = Some(CacheParams {
+                    retention: ProviderValue::Value("24h".into()),
+                    ..Default::default()
+                })
+            }),
+            &["xai", "huggingface"],
+        ),
+        (
+            "metadata",
+            params(|p| p.metadata = Some([("k".to_owned(), "v".to_owned())].into())),
+            &["xai"],
+        ),
+        (
+            "tool selection",
+            StreamOptions {
+                tools: tools(&["lookup"]),
+                tool_choice: Some(ToolChoice::Selection(ToolSelection::new(
+                    ["lookup"],
+                    ToolChoiceMode::Auto,
+                ))),
+                ..Default::default()
+            },
+            &["xai", "huggingface"],
+        ),
+        (
+            "top-k",
+            sampling(|s| {
+                s.top_k = Some(TopKSamplerParams {
+                    top_k: ProviderValue::Value(Some(40)),
+                })
+            }),
+            &["huggingface"],
+        ),
+        (
+            "min-p",
+            sampling(|s| {
+                s.min_p = Some(MinPSamplerParams {
+                    min_p: ProviderValue::Value(Some(0.1)),
+                })
+            }),
+            &["huggingface"],
+        ),
+        (
+            "seed",
+            sampling(|s| {
+                s.seed = Some(SeedSamplerParams {
+                    seed: ProviderValue::Value(Some(Seed::Value(7))),
+                })
+            }),
+            &["huggingface"],
+        ),
+        (
+            "include",
+            output(|o| o.include = Some(["reasoning.encrypted_content".to_owned()].into())),
+            &["huggingface"],
+        ),
+        (
+            "parallel tool calls",
+            tool_calling(|t| t.parallel_tool_calls = ProviderValue::Value(false)),
+            &["huggingface"],
+        ),
+        (
+            "service tier",
+            params(|p| {
+                p.provider_service = Some(ProviderServiceParams {
+                    service_tier: ProviderValue::Value("priority".into()),
+                })
+            }),
+            &["huggingface"],
+        ),
+        (
+            "safety identifier",
+            params(|p| p.safety_identifier = Some("user-1".into())),
+            &["huggingface"],
+        ),
+        (
+            "cache key",
+            params(|p| {
+                p.cache = Some(CacheParams {
+                    key: Some("k1".into()),
+                    ..Default::default()
+                })
+            }),
+            &["huggingface"],
+        ),
+    ];
+    for (case, options, rejecting) in cases {
+        for name in ["xai", "huggingface"] {
+            if rejecting.contains(&name) {
+                let message = validation(name, "m", options.clone()).await;
+                assert!(
+                    message.contains("does not support"),
+                    "{case} {name}: {message}"
+                );
+            } else {
+                responses_body(name, "m", vec![user_message("hello")], options.clone()).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn hst_021_xai_reasoning_store_and_tools() {
+    for (model_id, level, sent) in [
+        ("grok-4.7", Some("minimal"), "low"),
+        ("grok-4.7", Some("medium"), "medium"),
+        ("grok-4.7", Some("xhigh"), "high"),
+        ("grok-4.7", Some("max"), "high"),
+        ("grok-4.6", Some("xhigh"), "xhigh"),
+        ("grok-4.6", Some("max"), "xhigh"),
+        ("grok-4.7", None, "none"),
+    ] {
+        let body =
+            responses_body("xai", model_id, vec![user_message("hello")], effort(level)).await;
+        assert_eq!(body["reasoning"]["effort"], sent, "{model_id} {level:?}");
+    }
+    for model_id in ["grok-4.20-0309-reasoning", "grok-4.20-non-reasoning"] {
+        for level in [Some("high"), None] {
+            validation("xai", model_id, effort(level)).await;
+        }
+    }
+    let store = |value: Option<bool>| {
+        params(|p| {
+            if let Some(value) = value {
+                p.provider_params = Some([("xai".to_owned(), json!({"store": value}))].into());
+            }
+        })
+    };
+    let body = responses_body(
+        "xai",
+        "grok-4.7",
+        vec![user_message("hello")],
+        store(Some(false)),
+    )
+    .await;
+    assert_eq!(body["store"], false, "{body}");
+    assert!(
+        body["include"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("reasoning.encrypted_content")),
+        "{body}"
+    );
+    for value in [Some(true), None] {
+        let body =
+            responses_body("xai", "grok-4.7", vec![user_message("hello")], store(value)).await;
+        assert!(body.get("store").is_none(), "{value:?}: {body}");
+    }
+    let named = StreamOptions {
+        tools: tools(&["lookup"]),
+        tool_choice: Some(ToolChoice::Tool("lookup".into())),
+        ..Default::default()
+    };
+    let body = responses_body("xai", "grok-4.7", vec![user_message("hello")], named).await;
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "function", "name": "lookup"})
+    );
+    let provider_tool = StreamOptions {
+        tools: vec![openai::tools::web_search(json!({})).unwrap()],
+        ..Default::default()
+    };
+    let error = rejected(
+        "xai",
+        "grok-4.7",
+        vec![user_message("hello")],
+        provider_tool,
+    )
+    .await;
+    assert!(matches!(error, Error::UnsupportedOperation(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn hst_022_xai_history_has_its_own_items() {
+    let reasoning = Part::Reasoning(ReasoningPart {
+        id: "r1".into(),
+        text: "R".into(),
+        provider_metadata: metadata_under(
+            "xai",
+            json!({"item_id":"rs_1","reasoning_encrypted_content":"enc"}),
+        ),
+    });
+    let bare_reasoning = reasoning_part("no id");
+    let text = Part::Text(TextPart {
+        id: "t1".into(),
+        text: "T".into(),
+        provider_metadata: metadata_under("xai", json!({"item_id":"msg_1"})),
+    });
+    let mut call = ToolCallPart::new("call_1", "lookup", "{\"q\":1}");
+    call.provider_metadata = metadata_under("xai", json!({"item_id":"fc_1"}));
+    let history = vec![
+        user_message("hello"),
+        assistant(vec![bare_reasoning, reasoning, text, Part::ToolCall(call)]),
+        tool_message(ToolResultPart::new("call_1", "lookup", json!({"value": 1}))),
+    ];
+    let options = StreamOptions {
+        tools: tools(&["lookup"]),
+        ..Default::default()
+    };
+    let body = responses_body("xai", "grok-4.7", history, options).await;
+    assert!(!holds_reference(&body), "{body}");
+    let input = items(&body);
+    assert_eq!(
+        input[1],
+        json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"R"}],"status":"completed","encrypted_content":"enc"})
+    );
+    assert_eq!(
+        input[2],
+        json!({"role":"assistant","content":"T","id":"msg_1"})
+    );
+    assert_eq!(
+        input[3],
+        json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}","status":"completed"})
+    );
+    assert_eq!(input[4]["type"], "function_call_output");
+    assert_eq!(input.len(), 5, "{body}");
+
+    let csv = FilePart::from_url("https://data.test/table.csv", Some("text/csv")).unwrap();
+    let body = responses_body("xai", "grok-4.7", vec![user_file(csv)], Default::default()).await;
+    assert_eq!(
+        items(&body)[0]["content"][1],
+        json!({"type":"input_file","file_url":"https://data.test/table.csv"})
+    );
+    let pdf = FilePart::from_bytes(vec![1, 2, 3], Some("application/pdf"), None).unwrap();
+    let error = rejected(
+        "xai",
+        "grok-4.7",
+        vec![user_file(pdf.clone())],
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    let result = ToolResultPart::new(
+        "call_1",
+        "lookup",
+        ToolResultValue::Special(SpecialToolResult::Content(ContentOutput {
+            output_type: ContentOutputType::Content,
+            value: vec![ContentPart::File(pdf)],
+        })),
+    );
+    let options = StreamOptions {
+        tools: tools(&["lookup"]),
+        ..Default::default()
+    };
+    let body = responses_body("xai", "grok-4.7", tool_round(result), options).await;
+    let output = items(&body)
+        .iter()
+        .find(|i| i["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(
+        output["output"],
+        json!([{"type":"input_text","text":"[file: application/pdf]"}])
+    );
+}
+
+/// An xAI stream with reasoning whose summary part ends before its item,
+/// which carries the encrypted content, then a message.
+fn xai_reasoning_stream(terminal: &str) -> (u16, Vec<u8>) {
+    responses_sse(&[
+        json!({"type":"response.created","response":{"id":"resp_1","model":"grok-4.7","status":"in_progress"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"thinking"}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":0}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc-1"}}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"answer"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}),
+        json!({"type":terminal,"response":{"id":"resp_1","model":"grok-4.7","status":"completed","output":[],"usage":{"input_tokens":4142,"input_tokens_details":{"cached_tokens":4328},"output_tokens":10}}}),
+    ])
+}
+
+#[tokio::test]
+async fn hst_023_xai_keeps_its_item_ids_and_counts_cached_input() {
+    let transport = Recorder::new([
+        xai_reasoning_stream("response.completed"),
+        responses_text("ok"),
+    ]);
+    let model = model("xai", "grok-4.7", transport.clone());
+    let (handle, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+    ok(&events);
+    let usage = handle.usage().unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.cache_read_tokens),
+        (8470, Some(4328))
+    );
+    for part in &handle.message().parts {
+        let md = match part {
+            Part::Reasoning(r) => r.provider_metadata.as_ref(),
+            Part::Text(t) => t.provider_metadata.as_ref(),
+            _ => None,
+        };
+        let md = md.unwrap_or_else(|| panic!("a part has no metadata: {part:?}"));
+        assert!(
+            md.contains_key("xai") && !md.contains_key("openai"),
+            "{md:?}"
+        );
+    }
+    let history = vec![
+        user_message("hello"),
+        handle.message().clone(),
+        user_message("again"),
+    ];
+    let (_, events) = call(&model, history, Default::default()).await;
+    ok(&events);
+    let requests = transport.requests.lock().unwrap();
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let input = items(&body);
+    assert!(
+        input.iter().any(|i| i["type"] == "reasoning"
+            && i["encrypted_content"] == "enc-1"
+            && i["id"] == "rs_1"),
+        "{body}"
+    );
+    assert!(
+        input
+            .iter()
+            .any(|i| i["role"] == "assistant" && i["id"] == "msg_1" && i["content"] == "answer"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_023_xai_error_bodies_put_the_code_first() {
+    let body =
+        json!({"code":"Client specified an invalid argument","error":"Invalid request content"});
+    let transport = Recorder::new([(400, body.to_string().into_bytes())]);
+    let model = model("xai", "grok-4.7", transport);
+    let (_, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+    let Some(Error::Provider(error)) = events.into_iter().find_map(Result::err) else {
+        panic!("the call did not fail with a provider error");
+    };
+    assert_eq!(
+        error.message,
+        "Client specified an invalid argument: Invalid request content"
+    );
+    assert_eq!(
+        error.code.as_deref(),
+        Some("Client specified an invalid argument")
+    );
+    assert_eq!(error.kind, ProviderErrorKind::BadRequest);
+}
+
+#[tokio::test]
+async fn hst_024_hugging_face_requests() {
+    let schema = json!({"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}},"required":["a"]});
+    let options = StreamOptions {
+        output_schema: Some(schema.clone().try_into().unwrap()),
+        output_type_name: Some("answer".into()),
+        ..Default::default()
+    };
+    let body = responses_body("huggingface", "m", vec![user_message("hello")], options).await;
+    assert_eq!(
+        body["text"]["format"],
+        json!({"type":"json_schema","name":"answer","strict":false,"schema":schema})
+    );
+    let choose = |choice: ToolChoice| StreamOptions {
+        tools: tools(&["lookup"]),
+        tool_choice: Some(choice),
+        ..Default::default()
+    };
+    let body = responses_body(
+        "huggingface",
+        "m",
+        vec![user_message("hello")],
+        choose(ToolChoice::Required),
+    )
+    .await;
+    assert_eq!(body["tool_choice"], "required");
+    let body = responses_body(
+        "huggingface",
+        "m",
+        vec![user_message("hello")],
+        choose(ToolChoice::Tool("lookup".into())),
+    )
+    .await;
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type":"function","function":{"name":"lookup"}})
+    );
+    let body = responses_body(
+        "huggingface",
+        "m",
+        vec![user_message("hello")],
+        choose(ToolChoice::None),
+    )
+    .await;
+    assert!(
+        body.get("tools").is_none() && body.get("tool_choice").is_none(),
+        "{body}"
+    );
+    let provider_tool = StreamOptions {
+        tools: vec![openai::tools::web_search(json!({})).unwrap()],
+        ..Default::default()
+    };
+    let error = rejected(
+        "huggingface",
+        "m",
+        vec![user_message("hello")],
+        provider_tool,
+    )
+    .await;
+    assert!(matches!(error, Error::UnsupportedOperation(_)), "{error:?}");
+    let pdf = FilePart::from_bytes(vec![1, 2, 3], Some("application/pdf"), None).unwrap();
+    let error = rejected("huggingface", "m", vec![user_file(pdf)], Default::default()).await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn hst_024_hugging_face_history() {
+    let mut call = ToolCallPart::new("call_1", "lookup", "{\"q\":1}");
+    call.provider_metadata = metadata_under("huggingface", json!({"item_id":"fc_1"}));
+    let history = vec![
+        user_message("hello"),
+        assistant(vec![
+            reasoning_part("R"),
+            text_part("T"),
+            Part::ToolCall(call),
+        ]),
+        tool_message(ToolResultPart::new("call_1", "lookup", json!({"value": 1}))),
+    ];
+    let options = StreamOptions {
+        tools: tools(&["lookup"]),
+        ..Default::default()
+    };
+    let body = responses_body("huggingface", "m", history, options).await;
+    assert!(!holds_reference(&body), "{body}");
+    let input = items(&body);
+    assert_eq!(
+        input[1],
+        json!({"role":"assistant","content":[{"type":"output_text","text":"R"}]})
+    );
+    assert_eq!(
+        input[2],
+        json!({"role":"assistant","content":[{"type":"output_text","text":"T"}]})
+    );
+    assert_eq!(
+        input[3],
+        json!({"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"})
+    );
+    assert_eq!(
+        input[4],
+        json!({"type":"function_call_output","call_id":"call_1","output":"{\"value\":1}"})
+    );
+}
+
+/// An OpenAI model on the Responses API with this transport.
+fn openai_responses(transport: Arc<Recorder>) -> Model {
+    Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(
+            ProviderConfig {
+                default_base_url: "https://openai.test/v1".into(),
+                ..key_config()
+            },
+            transport,
+        )),
+    )
+}
+/// The provider error a Responses stream of these events ends with.
+async fn responses_error(model: Model) -> suprnova_ai::errors::ProviderError {
+    let mut options = StreamOptions::default();
+    options.retry.max_retries = 0;
+    let (_, events) = call(&model, vec![user_message("hello")], options).await;
+    match events.into_iter().find_map(Result::err) {
+        Some(Error::Provider(error)) => *error,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hst_025_failed_and_error_events_end_the_call_with_a_classified_error() {
+    let created = json!({"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}});
+    let failed = json!({"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_error","message":"m"}}});
+    let error_event =
+        json!({"type":"error","code":"rate_limit_exceeded","message":"slow down","param":null});
+    for build in [
+        (|t: Arc<Recorder>| openai_responses(t)) as fn(Arc<Recorder>) -> Model,
+        |t| model("xai", "grok-4.7", t),
+    ] {
+        let error = responses_error(build(Recorder::new([responses_sse(&[
+            created.clone(),
+            failed.clone(),
+        ])])))
+        .await;
+        assert_eq!(error.message, "m");
+        assert_eq!(error.code.as_deref(), Some("server_error"));
+        assert_eq!(error.kind, ProviderErrorKind::InternalServer);
+        let error = responses_error(build(Recorder::new([responses_sse(&[
+            created.clone(),
+            error_event.clone(),
+        ])])))
+        .await;
+        assert_eq!(error.message, "slow down");
+        assert_eq!(error.kind, ProviderErrorKind::RateLimit);
+    }
+}
+
+#[tokio::test]
+async fn hst_025_done_incomplete_and_parted_reasoning() {
+    let outcome = |reply: (u16, Vec<u8>)| async move {
+        let model = model("xai", "grok-4.7", Recorder::new([reply]));
+        let (handle, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+        ok(&events);
+        (
+            handle.finish_reason().map(str::to_owned),
+            handle.usage().cloned(),
+            handle.message().clone(),
+        )
+    };
+    let (finish_done, usage_done, message) = outcome(xai_reasoning_stream("response.done")).await;
+    let (finish_completed, usage_completed, _) =
+        outcome(xai_reasoning_stream("response.completed")).await;
+    assert_eq!(finish_done, finish_completed);
+    assert_eq!(finish_done.as_deref(), Some("stop"));
+    assert_eq!(usage_done, usage_completed);
+    let encrypted = message.parts.iter().find_map(|part| match part {
+        Part::Reasoning(r) => r
+            .provider_metadata
+            .as_ref()
+            .map(|m| m["xai"]["reasoning_encrypted_content"].clone()),
+        _ => None,
+    });
+    assert_eq!(encrypted, Some(json!("enc-1")), "{message:?}");
+    let incomplete = responses_sse(&[
+        json!({"type":"response.created","response":{"id":"resp_1","model":"m"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"cut"}),
+        json!({"type":"response.incomplete","response":{"id":"resp_1","incomplete_details":{"reason":"max_output_tokens"}}}),
+    ]);
+    let model = openai_responses(Recorder::new([incomplete]));
+    let (handle, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+    ok(&events);
+    assert_eq!(handle.finish_reason(), Some("length"));
 }

@@ -14,8 +14,8 @@
 
 //! Hosted providers that speak a protocol the crate implements: Cerebras,
 //! DeepInfra, DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI and Z.ai
-//! over OpenAI Chat Completions, and MiniMax over the Anthropic Messages
-//! protocol.
+//! over OpenAI Chat Completions, xAI and Hugging Face over OpenAI Responses,
+//! and MiniMax over the Anthropic Messages protocol.
 //!
 //! Each host is the protocol's adapter with a host profile: its endpoint, its
 //! key and the request and response differences the AI SDK for TypeScript
@@ -51,7 +51,10 @@ use crate::{
     providers::{
         ModelsDevProvider,
         anthropic::protocol::{HostMessagesProtocol, MessagesProfile},
-        openai::{profile::ChatProfile, protocol::HostChatProtocol},
+        openai::{
+            profile::{ChatProfile, ResponsesProfile},
+            protocol::{HostChatProtocol, HostResponsesProtocol},
+        },
     },
     transport::HttpTransport,
 };
@@ -62,14 +65,16 @@ pub mod cerebras;
 pub mod deepinfra;
 pub mod deepseek;
 pub mod fireworks;
+pub mod huggingface;
 pub mod minimax;
 pub mod mistral;
 pub mod moonshotai;
 pub mod togetherai;
+pub mod xai;
 pub mod zai;
 
 /// Every host, for lookups by package or name.
-static HOSTS: [&Host; 9] = [
+static HOSTS: [&Host; 11] = [
     &cerebras::HOST,
     &deepinfra::HOST,
     &fireworks::HOST,
@@ -79,18 +84,33 @@ static HOSTS: [&Host; 9] = [
     &deepseek::HOST,
     &moonshotai::HOST,
     &mistral::HOST,
+    &xai::HOST,
+    &huggingface::HOST,
 ];
 
-/// The Chat Completions profile of the host that models.dev metadata names,
-/// by its package handle first and then by its id.
-pub(crate) fn chat_profile_for(metadata: &ModelsDevProvider) -> Option<&'static ChatProfile> {
-    let host = HOSTS
+/// The host that models.dev metadata names, by its package handle first and
+/// then by its id.
+fn host_for(metadata: &ModelsDevProvider) -> Option<&'static Host> {
+    HOSTS
         .iter()
         .find(|host| metadata.npm.as_deref() == Some(host.handle))
-        .or_else(|| HOSTS.iter().find(|host| host.name == metadata.id))?;
-    match host.protocol {
+        .or_else(|| HOSTS.iter().find(|host| host.name == metadata.id))
+        .copied()
+}
+/// The Chat Completions profile of the host that models.dev metadata names.
+pub(crate) fn chat_profile_for(metadata: &ModelsDevProvider) -> Option<&'static ChatProfile> {
+    match host_for(metadata)?.protocol {
         HostProtocol::Chat(profile) => Some(profile),
-        HostProtocol::Messages(_) => None,
+        HostProtocol::Responses(_) | HostProtocol::Messages(_) => None,
+    }
+}
+/// The Responses profile of the host that models.dev metadata names.
+pub(crate) fn responses_profile_for(
+    metadata: &ModelsDevProvider,
+) -> Option<&'static ResponsesProfile> {
+    match host_for(metadata)?.protocol {
+        HostProtocol::Responses(profile) => Some(profile),
+        HostProtocol::Chat(_) | HostProtocol::Messages(_) => None,
     }
 }
 
@@ -108,18 +128,21 @@ pub(crate) struct Host {
 #[derive(Debug)]
 pub(crate) enum HostProtocol {
     Chat(&'static ChatProfile),
+    Responses(&'static ResponsesProfile),
     Messages(&'static MessagesProfile),
 }
 impl HostProtocol {
     fn protocol(&self, downloads: Option<Arc<dyn DownloadTransport>>) -> Arc<dyn ProviderProtocol> {
         match self {
             Self::Chat(profile) => Arc::new(HostChatProtocol(profile, downloads)),
+            Self::Responses(profile) => Arc::new(HostResponsesProtocol(profile)),
             Self::Messages(profile) => Arc::new(HostMessagesProtocol(profile)),
         }
     }
     fn class_id(&self) -> &'static str {
         match self {
             Self::Chat(profile) => profile.protocol_class_id,
+            Self::Responses(profile) => profile.protocol_class_id,
             Self::Messages(profile) => profile.protocol_class_id,
         }
     }
@@ -164,9 +187,10 @@ impl HostProvider {
         }
     }
     /// Download the media URLs that a Chat Completions host cannot fetch
-    /// before each request: images and videos for Moonshot AI, audio and PDFs
-    /// for the hosts that take them as OpenAI does. Without one, such a URL
-    /// fails with `Error::Validation`. Download transports must honor the
+    /// before each request: images, videos and text for Moonshot AI, audio
+    /// and PDFs for the hosts that take them as OpenAI does. Without one, such
+    /// a URL fails with `Error::Validation`. Responses and Messages hosts send
+    /// no downloaded media and ignore it. Download transports must honor the
     /// core DNS-pinning contract. A snapshot does not keep the transport; a
     /// restore through a registry made with `register_with_downloads` gets it
     /// back.

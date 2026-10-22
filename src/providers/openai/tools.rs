@@ -71,7 +71,7 @@ pub fn apply_patch() -> Tool {
     }
 }
 pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
-    let responses = matches!(wire, Wire::Responses);
+    let responses = matches!(wire, Wire::Responses(_));
     let mut result = vec![];
     for tool in tools {
         tool.validate_shape().map_err(|e| invalid(e.to_string()))?;
@@ -84,7 +84,7 @@ pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
                 Wire::Chat(profile) => {
                     dialect::tool_parameters(profile, serde_json::to_value(&spec.params)?)?
                 }
-                Wire::Responses => serde_json::to_value(&spec.params)?,
+                Wire::Responses(_) => serde_json::to_value(&spec.params)?,
             };
             let function = json!({"name":tool.name,"description":spec.description.as_deref().unwrap_or(""),"parameters":parameters});
             if responses {
@@ -100,6 +100,14 @@ pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
             return Err(Error::UnsupportedOperation(
                 "OpenAI built-in tools require the Responses API".into(),
             ));
+        }
+        if let Wire::Responses(profile) = wire
+            && profile.dialect != super::profile::ResponsesDialect::OpenAI
+        {
+            return Err(Error::UnsupportedOperation(format!(
+                "{} does not support provider tools",
+                profile.api.label
+            )));
         }
         let config = tool
             .tool_config
