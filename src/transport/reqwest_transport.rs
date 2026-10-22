@@ -33,7 +33,7 @@ impl ReqwestTransport {
     pub fn new() -> Result<Self, TransportError> {
         let client = reqwest::Client::builder()
             .no_proxy()
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(30))
             .tcp_keepalive_interval(Duration::from_secs(10))
             .tcp_keepalive_retries(6)
