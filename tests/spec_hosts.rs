@@ -3324,3 +3324,31 @@ fn hst_019_the_openai_package_does_not_hide_a_responses_host_id() {
         );
     }
 }
+
+#[tokio::test]
+async fn hst_022_and_hst_024_send_every_text_part() {
+    let empty = Part::Text(TextPart {
+        id: "t0".into(),
+        text: String::new(),
+        provider_metadata: metadata_under("xai", json!({"item_id":"msg_0"})),
+    });
+    let history = || {
+        vec![
+            user_message("hello"),
+            assistant(vec![empty.clone(), text_part("T")]),
+            user_message("again"),
+        ]
+    };
+    let body = responses_body("xai", "grok-4.7", history(), Default::default()).await;
+    assert_eq!(
+        items(&body)[1],
+        json!({"role":"assistant","content":"","id":"msg_0"}),
+        "{body}"
+    );
+    let body = responses_body("huggingface", "m", history(), Default::default()).await;
+    assert_eq!(
+        items(&body)[1],
+        json!({"role":"assistant","content":[{"type":"output_text","text":""}]}),
+        "{body}"
+    );
+}
