@@ -11,22 +11,23 @@ calls. These rules apply to the default loop; a custom loop
 (`Agent::with_loop`) that does not run the default loop decides for itself
 when to stop, and its `stop_reason()` is `None`.
 
-[AGT-001] After each step, including a step that ends with a final answer,
-the default loop MUST run the checks in `RunOptions::step_checks` in order.
-Each check is async, receives the run's progress (the step count, the
-history and the total usage) and answers `Continue`, `Steer(message)` or
-`Stop(reason)`; the first answer other than `Continue` decides, and later
-checks do not run. On `Stop`, the run MUST stop with that step's tool
-results in the history. On `Steer`, the loop MUST add the message, which
-must have the user role, to the history and call the model again, even
-after a final answer. When every check answers `Continue`, the run goes on
-until it is done. `StepCheck::step_count(n)` and
-`StepCheck::tool_called(names)` MUST be provided; they answer `Stop` with
-the reasons `step count <n> reached` and `tool <name> was called`. The
-default list MUST be empty.
-Falsifier: With the default options, a run whose scripted model asks for a tool in each of 25 steps and then gives a final answer stops before that answer; a `step_count(2)` run makes a third model call; a `tool_called(["submit"])` run makes another model call after the step that called `submit`; a check that steers once after the final answer does not lead to one more model call whose request ends with the steering message; a check runs after an earlier one answered `Stop`; a check does not receive the current step count, history and total usage; or a steering message with another role does not end the run with `Error::Validation`.
+[AGT-001] After each step, including a step that ends with a final answer
+but not a step that ends on a deferred hook, the default loop MUST run the
+checks in `RunOptions::step_checks` in order. Each check is async, receives
+the run's progress (the step count, the history and the total usage, counted
+across every run of the loop in the agent run) and answers `Continue`,
+`Steer(message)` or `Stop(reason)`; the first answer other than `Continue`
+decides, and later checks do not run. On `Stop`, the run MUST stop with that
+step's tool results in the history. On `Steer`, the loop MUST add the
+message, which must have the user role, to the history and call the model
+again, even after a final answer. When every check answers `Continue`, the
+run goes on until it is done. `StepCheck::step_count(n)` and
+`StepCheck::tool_called(names)` MUST be provided; they answer `Stop` with the
+reasons `step count <n> reached` and `tool <name> was called`. The default
+list MUST be empty.
+Falsifier: With the default options, a run whose scripted model asks for a tool in each of 25 steps and then gives a final answer stops before that answer; a `step_count(2)` run makes a third model call, also when a run middleware runs the loop again after an error; a `tool_called(["submit"])` run makes another model call after the step that called `submit`; a check that steers once after the final answer does not lead to one more model call whose request ends with the steering message; a check runs after an earlier one answered `Stop`, or after a step that ends on a deferred hook; a check does not receive the current step count, history and total usage; or a steering message with another role does not end the run with `Error::Validation`.
 Mechanism: core
-Rationale: Python sets no limit, and the TypeScript tool loop agent stops at 20 steps (`packages/ai/src/agent/tool-loop-agent.ts:132`). Checks that can steer as well as stop let a progress monitor or a done gate (next-feature item `workflow-done-gate`) act between steps; a long job sets its budget with a check.
+Rationale: Python sets no limit and the TypeScript tool loop agent stops at 20 steps (`packages/ai/src/agent/tool-loop-agent.ts:132`); a run that ends on a deferred hook ends Deferred with the deferred result last so it can resume, which a steering message would break (developer's ok to escalation 78c406a).
 Status: Agreed 2026-10-22
 
 [AGT-002] When the model calls a tool that has no executor, the run MUST add
@@ -62,4 +63,17 @@ a hook, such as a tool approval, was deferred. Before the stream ends, and
 after it ends with an error, it MUST return `None`.
 Falsifier: A run that ends with a final answer, a run that `step_count(1)` stops while the model still asks for tools, and a run whose approval hook is deferred do not report `Done`, `Stopped` with the reason `step count 1 reached`, and `Deferred`; or `stop_reason()` is `Some` before the stream has ended or after it ended with an error.
 Mechanism: core
+Status: Agreed 2026-10-22
+
+[AGT-006] `AgentStream::interrupted_messages()` MUST return the run's
+history plus the step in progress, if any, as a history a next run can use:
+the step's model response as delivered so far (its text and reasoning, and
+only the tool calls whose `ToolEnd` event was delivered), then a tool
+message holding the results delivered for those calls and, for each of them
+without a result, an error result with the text `Cancelled: the run stopped
+before this tool call finished.` When no step is in progress it MUST return
+`messages()`.
+Falsifier: After a lockstep run is read up to a text delta of `Hel`, `interrupted_messages()` does not end with an assistant message whose text is `Hel`; after a step that asked for two tools, with one result delivered and the other tool still running, the returned history lacks the delivered result, lacks the cancelled error result for the other call, or keeps a tool call whose `ToolEnd` was not delivered; or a new run started from the returned history runs the finished tool again.
+Mechanism: core
+Rationale: Dropping a run stops it (MOD-007), and a stop button in a chat app then saves what the user saw; a resumed job must not repeat finished, possibly paid, tool calls.
 Status: Agreed 2026-10-22
