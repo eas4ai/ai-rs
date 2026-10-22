@@ -78,7 +78,14 @@ pub(super) fn parse(body: Body, provider: String, api: &'static ApiProfile) -> E
             let value = match parser.source.next().await {
                 Some(Ok(SseJson::Object(value))) => value,
                 Some(Err(error)) => return Err(error),
-                Some(Ok(SseJson::Done)) | None => {
+                // The Messages protocol has no `[DONE]` marker; it is not JSON.
+                Some(Ok(SseJson::Done)) => {
+                    return Err(http::response_error(
+                        &parser.provider,
+                        format!("{} stream event is not valid JSON", parser.api.label),
+                    ));
+                }
+                None => {
                     return Err(ProviderError::incomplete_response(
                         format!("{} stream ended without message_stop", parser.api.label),
                         Some(parser.provider),

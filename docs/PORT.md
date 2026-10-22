@@ -157,9 +157,12 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.m
   host profile, Fireworks and Together AI only.
 - The OpenAI and Anthropic adapters share one HTTP layer. Both report a
   transport failure with a fixed message that keeps the original error as its
-  source, and a broken response body as a connection error. Both read an error
-  body's message from `error.message`, a string `error` or `message`, and its
-  code, parameter and type from the `error` object first.
+  source, and a broken response body as a connection error; an error response
+  whose body cannot be read keeps the kind of its HTTP status. Both read an
+  error body's message from `error.message`, a string `error` or `message`.
+  OpenAI reads the code, parameter and type from the `error` object first and
+  Anthropic from the top level first, as the Python SDKs do. An array in
+  `extra_query` sends one pair per item, as httpx does.
 - `OpenAICompatibleProvider::from_modelsdev_provider` selects Responses when the
   metadata names `@ai-sdk/openai`, not when the id is `openai`.
 

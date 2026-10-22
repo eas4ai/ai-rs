@@ -23,6 +23,7 @@ pub(crate) const API: http::ApiProfile = http::ApiProfile {
     request_id_header: "x-request-id",
     collapse_server_errors: true,
     keep_error_object: true,
+    top_level_first: false,
 };
 
 /// Map a transport failure to a provider error that keeps it as the source.

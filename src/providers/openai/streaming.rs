@@ -173,7 +173,7 @@ pub(super) fn parse(
                     if data.get("error").is_some_and(|e| !e.is_null())
                         || string(&data, "type") == "error"
                     {
-                        let message = http::error_message(&data)
+                        let message = http::error_message(p.api, &data)
                             .map(str::to_owned)
                             .unwrap_or_else(|| format!("{} stream returned an error", p.api.label));
                         return Err(http::response_error(&p.provider, message));

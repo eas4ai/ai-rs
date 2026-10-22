@@ -1267,3 +1267,35 @@ async fn image_pdf_and_text_inputs_use_endpoint_shapes() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_unreadable_error_body_keeps_the_status_kind() {
+    use suprnova_ai::errors::ProviderErrorKind as K;
+    for (status, kind, retryable) in [(400, K::BadRequest, false), (503, K::InternalServer, true)] {
+        let fake = Arc::new(Scripted {
+            requests: Mutex::new(vec![]),
+            replies: Mutex::new(vec![Ok(HttpResponse {
+                status,
+                headers: vec![("x-request-id".into(), "req-openai".into())],
+                body: stream::iter([
+                    Ok(Bytes::from_static(b"{\"error\"")),
+                    Err(TransportError::Body("reset".into())),
+                ])
+                .boxed(),
+            })]),
+        });
+        let model = Model::new("gpt-5.4", provider(fake, false));
+        let suprnova_ai::Error::Provider(e) = model.provider.probe(&model).await.unwrap_err()
+        else {
+            panic!("wrong error")
+        };
+        assert_eq!(e.kind, kind, "{status}");
+        assert_eq!(e.is_retryable, retryable, "{status}");
+        assert_eq!(e.status_code(), Some(status));
+        assert_eq!(e.request_id.as_deref(), Some("req-openai"));
+        assert_eq!(
+            e.message,
+            format!("OpenAI request failed with HTTP {status}")
+        );
+    }
+}

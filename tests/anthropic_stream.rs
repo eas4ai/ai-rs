@@ -481,3 +481,25 @@ async fn structured_output_lowers_nested_definitions_nullable_types_and_constrai
         "{minimum: 0}"
     );
 }
+#[tokio::test]
+async fn a_done_marker_before_message_stop_is_invalid_json() {
+    let fake = ScriptedTransport::new(vec![Ok(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: body(vec![
+            format!("event: message_start\ndata: {}\n\n", start()).into_bytes(),
+            b"data: [DONE]\n\n".to_vec(),
+        ]),
+    })]);
+    let m = model(fake);
+    let values = m
+        .provider
+        .stream(&m, vec![], StreamOptions::default())
+        .collect::<Vec<_>>()
+        .await;
+    let Error::Provider(err) = values.into_iter().find_map(Result::err).unwrap() else {
+        panic!()
+    };
+    assert_eq!(err.kind, ProviderErrorKind::Response);
+    assert!(!err.is_retryable);
+}

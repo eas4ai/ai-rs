@@ -37,6 +37,7 @@ static PROFILE: ChatProfile = ChatProfile {
         request_id_header: "x-request-id",
         collapse_server_errors: false,
         keep_error_object: false,
+        top_level_first: false,
     },
     include_usage: false,
     max_tokens_field: "max_completion_tokens",
