@@ -842,6 +842,36 @@ async fn mod_008_scripted_errors_reach_the_caller_unchanged() {
 }
 
 #[tokio::test]
+async fn mod_008_retryable_scripted_errors_reach_the_caller_with_retries_off() {
+    for error in [
+        status_error(429, "limited", &[]),
+        status_error(503, "busy", &[]),
+    ] {
+        let message = provider_error(&error).message.clone();
+        let provider = ScriptedProvider::new("scripted", [ScriptedResponse::error(error)]);
+        let failure = generate(&provider.model("m"), vec![], no_retry())
+            .await
+            .unwrap_err();
+        assert_eq!(provider_error(&failure).message, message);
+        assert_eq!(provider.requests().len(), 1);
+    }
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [ScriptedResponse::error(TransportError::Connection(
+            "reset".into(),
+        ))],
+    );
+    let (_, failure) = drain(&provider.model("m"), no_retry()).await;
+    assert!(
+        matches!(
+            failure,
+            Some(Error::Transport(TransportError::Connection(_)))
+        ),
+        "{failure:?}"
+    );
+}
+
+#[tokio::test]
 async fn mod_008_calls_after_the_script_fail_with_a_configuration_error() {
     let provider = ScriptedProvider::new("scripted", [ScriptedResponse::text("only")]);
     let model = provider.model("m");
