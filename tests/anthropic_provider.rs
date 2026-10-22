@@ -142,7 +142,9 @@ fn registration_restores_model_and_custom_version() {
     let p = provider(fake)
         .with_name("custom-anthropic")
         .with_anthropic_version("2024-01-01");
-    let model = Model::new("custom", Arc::new(p));
+    let p: Arc<dyn suprnova_ai::Provider> = Arc::new(p);
+    registry.register("custom-anthropic", p.clone()).unwrap();
+    let model = Model::new("custom", p);
     let snapshot = model.to_value().unwrap();
     let restored = Model::from_value(snapshot.clone(), &registry).unwrap();
     assert_eq!(restored.to_value().unwrap(), snapshot);

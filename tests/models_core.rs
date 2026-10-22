@@ -193,26 +193,15 @@ fn model_with(protocol: Arc<ScriptedProtocol>) -> Model {
 }
 
 #[test]
-fn model_ids_use_gateway_by_default_and_split_only_once() {
-    let gateway_protocol = Arc::new(ScriptedProtocol::new(
-        "gateway",
-        text_events("gateway"),
-        GenerateBehavior::Unsupported,
-    ));
+fn model_ids_split_only_once() {
     let direct_protocol = Arc::new(ScriptedProtocol::new(
         "direct",
         text_events("direct"),
         GenerateBehavior::Unsupported,
     ));
-    let gateway: Arc<dyn Provider> = Arc::new(TestProvider::new("ai-gateway", gateway_protocol));
     let direct: Arc<dyn Provider> = Arc::new(TestProvider::new("openai", direct_protocol));
     let mut registry = ProviderRegistry::new();
-    registry.register("gateway", gateway.clone()).unwrap();
     registry.register("openai", direct.clone()).unwrap();
-
-    let model = get_model("anthropic/claude", &registry).unwrap();
-    assert_eq!(model.id, "anthropic/claude");
-    assert!(Arc::ptr_eq(&model.provider, &gateway));
 
     let model = get_model("openai:org:model", &registry).unwrap();
     assert_eq!(model.id, "org:model");
@@ -239,9 +228,11 @@ fn model_snapshots_round_trip_through_registered_factories() {
         Vec::new(),
         GenerateBehavior::Unsupported,
     ));
-    let model = Model::new("test-model", provider).with_protocol(override_protocol);
+    let model = Model::new("test-model", provider.clone()).with_protocol(override_protocol);
 
     let mut registry = ProviderRegistry::new();
+    // A restore takes credentials from the provider registered under the snapshot's name.
+    registry.register("test", provider).unwrap();
     registry
         .register_provider_factory("test", |_value, _registry| {
             let protocol = Arc::new(ScriptedProtocol::new(

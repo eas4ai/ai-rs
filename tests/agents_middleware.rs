@@ -219,6 +219,11 @@ async fn run_middleware_can_retry_by_calling_next_again() {
         vec![user_message("go")],
         RunOptions {
             middleware: vec![Arc::new(RetryRun)],
+            // Call retries are off, so the middleware's retry is the only one.
+            stream_options: suprnova_ai::StreamOptions {
+                retry: suprnova_ai::RetryPolicy::none(),
+                ..Default::default()
+            },
             ..Default::default()
         },
     );

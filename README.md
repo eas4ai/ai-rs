@@ -64,9 +64,24 @@ assistant message. They use native provider generation when available and fall
 back to streaming when that operation is unsupported.
 
 Provider configuration is explicit. The library does not read process environment
-variables. Model IDs use `provider:model`; IDs without a colon use the registered
-`gateway` provider. The aliases `gateway`, `ai-gateway`, and `vercel` share a
-registry entry.
+variables. Model IDs use `provider:model` and split at the first colon; an ID
+without a colon is an error. Each registry handle names one provider.
+
+Each `stream` or `generate` call retries a retryable error that arrives before
+its first event. By default it retries twice, waiting 2 s and then 4 s, or the
+provider's `retry-after` wait when that is under 60 s. Set `StreamOptions::retry`
+to change this, or use `RetryPolicy::none()` to turn it off.
+`StreamOptions::timeout` bounds the whole call and `StreamOptions::idle_timeout`
+bounds the silence before each event; both are unset by default. Retries and
+timeouts use the Tokio timer. Dropping a call stops it, including a pending
+retry wait.
+
+`Model::to_value` leaves out credentials: the API key value, the `env` map and
+the headers. `Model::from_value` takes them from the provider that the registry
+holds under the snapshot's provider name, so register providers before restoring.
+
+Enable the `testing` feature for `testing::ScriptedProvider`. It answers each call
+with the next scripted response and records each request, with no network.
 
 The default feature set contains no HTTP client. Implement `HttpTransport` to
 use an existing client, or enable the optional `reqwest` feature. Media downloads

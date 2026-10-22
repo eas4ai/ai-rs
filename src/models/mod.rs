@@ -20,6 +20,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use futures::{Stream, StreamExt, stream as futures_stream};
@@ -39,9 +40,11 @@ use crate::{
     },
 };
 
+pub mod call;
 pub mod files;
 pub mod params;
 
+pub use call::RetryPolicy;
 pub use params::*;
 
 /// A lightweight reference to one provider model.
@@ -156,7 +159,8 @@ impl fmt::Debug for Model {
     }
 }
 
-/// Options passed unchanged to a provider protocol for one model response.
+/// Options for one model call. The call applies `retry`, `timeout` and
+/// `idle_timeout`; it passes the rest unchanged to the provider protocol.
 #[derive(Clone, Debug, Default)]
 pub struct StreamOptions {
     pub tools: Vec<Tool>,
@@ -164,6 +168,14 @@ pub struct StreamOptions {
     pub output_schema: Option<Schema>,
     pub output_type_name: Option<String>,
     pub params: Option<InferenceRequestParams>,
+    /// Retries for a retryable error before the first event. The default
+    /// makes 2 retries, waiting 2 s and then 4 s.
+    pub retry: RetryPolicy,
+    /// Bound on the whole call, retries and waits included. Unset by default.
+    pub timeout: Option<Duration>,
+    /// Bound on the silence before each event of an attempt, or on the wait
+    /// for a buffered response. Unset by default.
+    pub idle_timeout: Option<Duration>,
 }
 
 impl StreamOptions {
@@ -182,19 +194,17 @@ impl StreamOptions {
     }
 }
 
-/// Resolve `provider:model`; ids without a colon route through `gateway`.
+/// Resolve a `provider:model` id. The id splits at its first colon, and an id
+/// without a colon is an error.
 ///
 /// Configuration is supplied by the registry and its provider objects. This
 /// function deliberately never reads process environment variables.
 pub fn get_model(model_id: &str, registry: &ProviderRegistry) -> Result<Model> {
-    if model_id.is_empty() {
-        return Err(Error::Configuration(
-            "get_model: malformed model_id: \"\"".to_owned(),
-        ));
-    }
-    let (provider_id, provider_model_id) = model_id
-        .split_once(':')
-        .map_or(("gateway", model_id), |(provider, model)| (provider, model));
+    let Some((provider_id, provider_model_id)) = model_id.split_once(':') else {
+        return Err(Error::Configuration(format!(
+            "get_model: model id {model_id:?} has no provider; use the form provider:model"
+        )));
+    };
     if provider_id.is_empty() || provider_model_id.is_empty() {
         return Err(Error::Configuration(format!(
             "get_model: malformed model_id: {model_id:?}"
@@ -367,32 +377,21 @@ pub fn stream(model: &Model, messages: Vec<Message>, options: StreamOptions) -> 
     }
 
     StreamHandle::new(
-        model.provider.stream(model, messages, options),
+        call::call_stream(model, messages, options),
         None,
         Some(model.provider.name().to_owned()),
     )
 }
 
 /// Return a complete provider message, falling back to draining its stream only
-/// when native buffered generation is explicitly unsupported.
+/// when native buffered generation is explicitly unsupported. Retries and
+/// timeouts apply as they do to `stream`.
 pub async fn generate(
     model: &Model,
     messages: Vec<Message>,
     options: StreamOptions,
 ) -> Result<Message> {
-    match model
-        .provider
-        .generate(model, messages.clone(), options.clone())
-        .await
-    {
-        Ok(message) => Ok(message),
-        Err(Error::UnsupportedOperation(_)) => {
-            let mut response = stream(model, messages, options);
-            while response.next().await.transpose()?.is_some() {}
-            Ok(response.message().clone())
-        }
-        Err(error) => Err(error),
-    }
+    call::call_generate(model, messages, options).await
 }
 
 /// Python-compatible name for the buffered generation API.

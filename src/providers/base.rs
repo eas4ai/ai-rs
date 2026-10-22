@@ -37,6 +37,9 @@ use crate::{
 
 pub type EventStream = BoxStream<'static, Result<Event, Error>>;
 
+/// Configuration fields that can hold a credential. Snapshots leave them out.
+const CREDENTIAL_FIELDS: [&str; 3] = ["api_key_value", "env", "headers"];
+
 /// An explicit configuration snapshot. The library never reads the process environment.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderConfig {
@@ -91,6 +94,18 @@ impl ProviderConfig {
     pub fn is_configured(&self) -> bool {
         (self.api_key_env.is_none() || self.api_key().is_some_and(|v| !v.is_empty()))
             && self.config_envs.iter().all(|key| self.value(key).is_some())
+    }
+
+    /// Serialize the configuration without its credentials: the API key value,
+    /// the `env` map and the headers. A restore takes them from the registry.
+    pub fn snapshot(&self) -> Result<Value, Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let Value::Object(fields) = &mut value {
+            for field in CREDENTIAL_FIELDS {
+                fields.remove(field);
+            }
+        }
+        Ok(value)
     }
 
     fn value(&self, key: &str) -> Option<&str> {
@@ -222,9 +237,10 @@ pub trait Provider: Send + Sync + AsProvider {
     fn provider_class_id(&self) -> &str {
         self.name()
     }
-    /// Serialize configuration only. Transports and open connections are excluded.
+    /// Serialize configuration only. Credentials, transports and open
+    /// connections are excluded; see `ProviderConfig::snapshot`.
     fn to_value(&self) -> Result<Value, Error> {
-        let mut value = serde_json::to_value(self.config())?;
+        let mut value = self.config().snapshot()?;
         value["name"] = Value::String(self.name().to_owned());
         value["provider_class_id"] = Value::String(self.provider_class_id().to_owned());
         if let Some(protocol) = self.protocol_override() {
@@ -481,12 +497,7 @@ impl ConfiguredProvider {
             config.api_key_env = key;
             config.config_envs = envs;
         }
-        Self::new(
-            canonical_provider_id(&metadata.id),
-            config,
-            protocol,
-            transport,
-        )
+        Self::new(metadata.id.clone(), config, protocol, transport)
     }
 }
 #[async_trait]
@@ -537,17 +548,16 @@ impl ProviderRegistry {
                 "provider handle must not be empty".into(),
             ));
         }
-        let key = canonical_provider_id(&id).to_owned();
         if self
             .providers
-            .get(&key)
+            .get(&id)
             .is_some_and(|existing| !Arc::ptr_eq(existing, &provider))
         {
             return Err(Error::Configuration(format!(
                 "duplicate provider handle: {id:?}"
             )));
         }
-        self.providers.insert(key, provider);
+        self.providers.insert(id, provider);
         Ok(())
     }
     /// Register restoration for a concrete provider class, including its custom fields.
@@ -586,17 +596,41 @@ impl ProviderRegistry {
         self.protocol_factories.insert(class_id, Arc::new(factory));
         Ok(())
     }
-    pub fn restore_provider(&self, value: Value) -> Result<Arc<dyn Provider>, Error> {
+    /// Restore a provider snapshot. The credentials (API key value, `env` map
+    /// and headers) come from the provider registered under the snapshot's
+    /// name, never from the snapshot.
+    pub fn restore_provider(&self, mut value: Value) -> Result<Arc<dyn Provider>, Error> {
         let id = value
             .get("provider_class_id")
             .and_then(Value::as_str)
             .ok_or_else(|| {
                 Error::Configuration("provider data must include provider_class_id".into())
-            })?;
+            })?
+            .to_owned();
         let factory = self
             .provider_factories
-            .get(id)
+            .get(&id)
             .ok_or_else(|| Error::Configuration(format!("unknown provider_class_id: {id:?}")))?;
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| Error::Configuration("provider data must include a name".into()))?;
+        let registered = self.providers.get(name).ok_or_else(|| {
+            Error::Configuration(format!(
+                "cannot restore provider {name:?}: the registry holds no provider under that name to supply its credentials"
+            ))
+        })?;
+        let credentials = serde_json::to_value(registered.config())?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| Error::Configuration("provider data must be a JSON object".into()))?;
+        for field in CREDENTIAL_FIELDS {
+            match credentials.get(field).filter(|value| !value.is_null()) {
+                Some(credential) => fields.insert(field.to_owned(), credential.clone()),
+                None => fields.remove(field),
+            };
+        }
         factory(value, self)
     }
     pub fn restore_protocol(&self, value: Value) -> Result<Arc<dyn ProviderProtocol>, Error> {
@@ -613,7 +647,7 @@ impl ProviderRegistry {
     }
     pub fn get_provider(&self, id: &str) -> Result<Arc<dyn Provider>, Error> {
         self.providers
-            .get(canonical_provider_id(id))
+            .get(id)
             .cloned()
             .ok_or_else(|| Error::UnsupportedProvider(id.to_owned()))
     }
@@ -634,12 +668,6 @@ impl ProviderRegistry {
 
 pub fn get_provider(id: &str, registry: &ProviderRegistry) -> Result<Arc<dyn Provider>, Error> {
     registry.get_provider(id)
-}
-pub fn canonical_provider_id(id: &str) -> &str {
-    match id {
-        "vercel" | "gateway" | "ai-gateway" => "ai-gateway",
-        _ => id,
-    }
 }
 pub fn provider_base_url(metadata: &ModelsDevProvider) -> Option<&str> {
     metadata.api.as_deref()

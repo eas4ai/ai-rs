@@ -155,72 +155,6 @@ pub struct CacheParams {
     pub key: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-pub struct GeoRegion(pub String);
-
-impl From<&str> for GeoRegion {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-pub struct CloudRegion(pub String);
-
-impl From<&str> for CloudRegion {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingTarget {
-    Global,
-    Geo(GeoRegion),
-    Cloud(CloudRegion),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RoutingTargetChain {
-    pub gateway: RoutingTarget,
-    pub provider: RoutingTarget,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum RoutingTargetParam {
-    Target(RoutingTarget),
-    Chain(RoutingTargetChain),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderRankingStrategy {
-    Cost,
-    Ttft,
-    Tps,
-    Price,
-    Latency,
-    Throughput,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct RoutingParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub routing_target: Option<RoutingTargetParam>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_allowlist: Option<BTreeSet<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_order: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_ranking: Option<ProviderRankingStrategy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fallback_models: Option<Vec<String>>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ExtraHeaderValue {
@@ -244,13 +178,9 @@ pub struct InferenceRequestParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<BTreeSet<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheParams>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_management: Option<ContextManagementParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
