@@ -851,6 +851,59 @@ async fn hst_006_cerebras_drops_tool_calls_after_text_under_an_output_schema() {
 }
 
 #[tokio::test]
+async fn hst_006_cerebras_drops_a_tool_call_that_started_before_the_text() {
+    let transport = Recorder::new([chat_sse(&[
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}),
+        json!({"choices":[{"index":0,"delta":{"content":"{\"value\":1}"}}]}),
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}),
+        json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+    ])]);
+    let model = model("cerebras", "gpt-oss-120b", transport);
+    let options = StreamOptions {
+        tools: vec![lookup_tool()],
+        ..Default::default()
+    }
+    .with_output::<Answer>();
+    let (handle, events) = call(&model, vec![user_message("hello")], options).await;
+    ok(&events);
+    for event in &events {
+        assert!(
+            !matches!(
+                event,
+                Ok(Event::ToolStart(_) | Event::ToolDelta(_) | Event::ToolEnd(_))
+            ),
+            "{event:?}"
+        );
+    }
+    assert!(handle.tool_calls().is_empty());
+    assert_eq!(handle.finish_reason(), Some("stop"));
+}
+
+#[tokio::test]
+async fn hst_006_cerebras_keeps_tool_calls_without_text_under_an_output_schema() {
+    let transport = Recorder::new([chat_sse(&[
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":1}"}}]}}]}),
+        json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+    ])]);
+    let model = model("cerebras", "gpt-oss-120b", transport);
+    let options = StreamOptions {
+        tools: vec![lookup_tool()],
+        ..Default::default()
+    }
+    .with_output::<Answer>();
+    let (handle, events) = call(&model, vec![user_message("hello")], options).await;
+    ok(&events);
+    let ends = events
+        .iter()
+        .filter(|e| matches!(e, Ok(Event::ToolEnd(_))))
+        .count();
+    assert_eq!(ends, 1);
+    assert_eq!(handle.tool_calls().len(), 1);
+    assert_eq!(handle.tool_calls()[0].tool_args, "{\"q\":1}");
+    assert_eq!(handle.finish_reason(), Some("tool_call"));
+}
+
+#[tokio::test]
 async fn hst_006_without_an_output_schema_cerebras_keeps_the_tool_call() {
     let transport = Recorder::new([text_then_tool_call()]);
     let model = model("cerebras", "gpt-oss-120b", transport);

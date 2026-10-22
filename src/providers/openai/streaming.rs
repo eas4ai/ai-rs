@@ -104,6 +104,8 @@ struct Parser {
     json_output: bool,
     /// Text arrived in this response.
     has_text: bool,
+    /// Tool events held until the finish, while text can still void them.
+    held: Vec<Event>,
     ended: bool,
     queue: VecDeque<Event>,
     texts: BTreeSet<String>,
@@ -142,6 +144,7 @@ pub(super) fn parse(
         },
         json_output,
         has_text: false,
+        held: Vec::new(),
         ended: false,
         queue,
         texts: BTreeSet::new(),
@@ -202,6 +205,10 @@ impl Parser {
             for id in std::mem::take(&mut self.reasoning) {
                 self.queue.push_back(block("reasoning_end", &id, None));
             }
+        }
+        let held = std::mem::take(&mut self.held);
+        if !self.has_text {
+            self.queue.extend(held);
         }
         self.queue.push_back(Event::StreamEnd(StreamEnd {
             event: ModelEventMeta {
@@ -269,20 +276,16 @@ impl Parser {
                 chunk: text.into(),
             }));
         }
-        // Under an output schema, Cerebras can repeat its answer as a tool
-        // call after the text; the text is the answer.
-        let drop_new_calls = self.has_text
-            && self.json_output
+        // Under an output schema, Cerebras can repeat its answer as tool calls
+        // around the text; the text is the answer. Hold the tool events until
+        // the finish shows whether text came.
+        let hold = self.json_output
             && self
                 .chat
                 .is_some_and(|c| c.json_drops_tool_calls_after_text);
         if let Some(calls) = delta["tool_calls"].as_array() {
             for tc in calls {
                 let index = tc["index"].to_string();
-                if drop_new_calls && !self.calls.get(&index).is_some_and(|c| c.started) {
-                    self.calls.remove(&index);
-                    continue;
-                }
                 let state = self.calls.entry(index).or_default();
                 if !string(tc, "id").is_empty() {
                     state.id = string(tc, "id").into();
@@ -292,27 +295,34 @@ impl Parser {
                 }
                 let args = string(&tc["function"], "arguments");
                 if !args.is_empty() && !state.id.is_empty() {
+                    let mut events = Vec::with_capacity(2);
                     if !state.started {
                         state.started = true;
-                        self.queue.push_back(Event::ToolStart(ToolStart {
+                        events.push(Event::ToolStart(ToolStart {
                             tool_call_id: state.id.clone(),
                             tool_name: state.name.clone(),
                             ..Default::default()
                         }));
                     }
                     state.args.push_str(args);
-                    self.queue.push_back(Event::ToolDelta(ToolDelta {
+                    events.push(Event::ToolDelta(ToolDelta {
                         event: Default::default(),
                         tool_call_id: state.id.clone(),
                         chunk: args.into(),
                     }));
+                    if hold {
+                        self.held.extend(events);
+                    } else {
+                        self.queue.extend(events);
+                    }
                 }
             }
         }
         if let Some(raw) = choice["finish_reason"].as_str() {
+            let void_calls = hold && self.has_text;
             let reason = match (raw, self.chat.and_then(|c| c.finish_reason(raw))) {
                 (_, Some(reason)) => reason,
-                ("tool_calls", _) if drop_new_calls => "stop",
+                ("tool_calls", _) if void_calls => "stop",
                 ("stop", _) => "stop",
                 ("length", _) => "length",
                 ("content_filter", _) => "content_filter",
@@ -328,6 +338,12 @@ impl Parser {
             }
             for id in std::mem::take(&mut self.texts) {
                 self.queue.push_back(block("text_end", &id, None));
+            }
+            let held = std::mem::take(&mut self.held);
+            if void_calls {
+                self.calls.clear();
+            } else {
+                self.queue.extend(held);
             }
             for state in self.calls.values_mut() {
                 if state.started {

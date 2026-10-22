@@ -15,8 +15,9 @@
 //! Cerebras over Chat Completions. Requests send the output token limit as
 //! `max_completion_tokens` and reasoning history as `reasoning`, and no
 //! `stream_options`. Under an output schema, Cerebras can repeat its answer as
-//! a tool call after the text; such tool calls are dropped and a
-//! `tool_calls` finish reports `stop`.
+//! tool calls next to the text, so tool events wait for the finish: when text
+//! came, every tool call of the response is dropped and a `tool_calls` finish
+//! reports `stop`.
 use super::{Host, HostProtocol, HostProvider};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
