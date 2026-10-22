@@ -9,12 +9,34 @@ failed=0
 report() {
   if [ "$2" -eq 0 ]; then echo "sudus: $1: pass"; else echo "sudus: $1: fail"; failed=1; fi
 }
-# Old names, matched so that `suprnova-ai-rs` and `ai_sdk::` do not count.
+# Old crate paths, matched so that `ai_sdk::` and `openai::` do not count.
 old_path='\bai::'
-old_repo='(^|[^[:alnum:]_-])ai-rs'
 files=(src tests scripts Cargo.toml NOTICE README.md docs/PORT.md)
 # True when grep finds a match or cannot read a file; false only on a clean miss.
 found() { grep "$@"; [ $? -ne 1 ]; }
+# Prints every old repository name: each word ending in `ai-rs`, in any case,
+# that is not `suprnova-ai-rs`. A missing file already fails the ai:: scan.
+old_repo() {
+  grep -rnIoiE --exclude=check-identity.sh '[[:alnum:]_.-]*ai-rs' "$@" | grep -vi ':suprnova-ai-rs$'
+}
+# Prints every row of the docs/PORT.md module map whose Rust module cell
+# lists the crate root `ai`, with or without backticks, and fails when the map
+# is missing.
+port_ai() {
+  awk -F'|' '
+    /^\|[[:space:]]*Python module[[:space:]]*\|[[:space:]]*Rust module[[:space:]]*\|/ { map = 1; seen = 1; next }
+    map && !/^\|/ { map = 0 }
+    map {
+      count = split($3, entries, ",")
+      for (i = 1; i <= count; i++) {
+        entry = entries[i]
+        gsub(/[`[:space:]]/, "", entry)
+        if (entry == "ai") { print "docs/PORT.md:" NR ": " $0; break }
+      }
+    }
+    END { if (!seen) print "docs/PORT.md: no module map" }
+  ' docs/PORT.md
+}
 
 if meta=$(cargo metadata --no-deps --offline --format-version 1) &&
   pkg=$(jq -r '.packages[0].name' <<<"$meta") &&
@@ -33,14 +55,14 @@ fi
 
 n=0
 found -rnIE --exclude=check-identity.sh "$old_path" "${files[@]}" && n=1
-found -rnIE --exclude=check-identity.sh "$old_repo" "${files[@]}" && n=1
+old_repo "${files[@]}" && n=1
 [ "$(head -n 1 README.md)" = '# suprnova-ai' ] || { echo "README.md:1: $(head -n 1 README.md)"; n=1; }
-found -nE '^\| `[^`]*` \| `ai` \|' docs/PORT.md && n=1
+[ -z "$(port_ai)" ] || { port_ai; n=1; }
 report PKG-002 "$n"
 
 n=0
 grep -qF 'suprnova-ai-rs' NOTICE || { echo "NOTICE does not name suprnova-ai-rs"; n=1; }
-found -nE "$old_repo" NOTICE && n=1
+old_repo NOTICE && n=1
 for credit in 'AI SDK for Python 0.8.0' 'https://github.com/vercel-labs/ai-python' \
   'Copyright 2026 Vercel, Inc.' 'Apache License, Version 2.0'; do
   grep -qF "$credit" NOTICE || { echo "NOTICE lacks: $credit"; n=1; }
