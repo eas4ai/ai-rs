@@ -40,6 +40,15 @@ pub type EventStream = BoxStream<'static, Result<Event, Error>>;
 /// Configuration fields that can hold a credential. Snapshots leave them out.
 const CREDENTIAL_FIELDS: [&str; 3] = ["api_key_value", "env", "headers"];
 
+/// Configuration fields that decide where a provider sends its requests. A
+/// restore takes them from the registered provider, with the credentials.
+const ENDPOINT_FIELDS: [&str; 4] = [
+    "default_base_url",
+    "base_url_env",
+    "api_key_env",
+    "config_envs",
+];
+
 /// An explicit configuration snapshot. The library never reads the process environment.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderConfig {
@@ -597,10 +606,10 @@ impl ProviderRegistry {
         Ok(())
     }
     /// Restore a provider snapshot. The credentials (API key value, `env` map
-    /// and headers) come from the provider registered under the snapshot's
-    /// name, never from the snapshot. The snapshot's provider class and
-    /// endpoint fields (`default_base_url`, `base_url_env`, `api_key_env` and
-    /// `config_envs`) must equal that provider's.
+    /// and headers) and the endpoint fields (`default_base_url`,
+    /// `base_url_env`, `api_key_env` and `config_envs`) come from the provider
+    /// registered under the snapshot's name, never from the snapshot. A
+    /// snapshot of another provider class is refused.
     pub fn restore_provider(&self, mut value: Value) -> Result<Arc<dyn Provider>, Error> {
         let id = value
             .get("provider_class_id")
@@ -623,42 +632,25 @@ impl ProviderRegistry {
                 "cannot restore provider {name:?}: the registry holds no provider under that name to supply its credentials"
             ))
         })?;
-        // Credentials go only where the registered provider sends them, so a
-        // tampered snapshot cannot point them at another host.
+        // The registered provider decides where requests go and how they
+        // authenticate: a changed snapshot cannot send its credentials to
+        // another host, and an endpoint change applies to older snapshots.
         if registered.provider_class_id() != id {
             return Err(Error::Configuration(format!(
                 "cannot restore provider {name:?}: its snapshot class {id:?} differs from the registered provider's class {:?}",
                 registered.provider_class_id()
             )));
         }
-        let endpoint: ProviderConfig = serde_json::from_value(value.clone())?;
-        let expected = registered.config();
-        let differs = [
-            (
-                "default_base_url",
-                endpoint.default_base_url == expected.default_base_url,
-            ),
-            (
-                "base_url_env",
-                endpoint.base_url_env == expected.base_url_env,
-            ),
-            ("api_key_env", endpoint.api_key_env == expected.api_key_env),
-            ("config_envs", endpoint.config_envs == expected.config_envs),
-        ]
-        .into_iter()
-        .find_map(|(field, same)| (!same).then_some(field));
-        if let Some(field) = differs {
-            return Err(Error::Configuration(format!(
-                "cannot restore provider {name:?}: its snapshot {field} differs from the registered provider's; register that provider under its own name"
-            )));
-        }
-        let credentials = serde_json::to_value(expected)?;
+        let registered_config = serde_json::to_value(registered.config())?;
         let fields = value
             .as_object_mut()
             .ok_or_else(|| Error::Configuration("provider data must be a JSON object".into()))?;
-        for field in CREDENTIAL_FIELDS {
-            match credentials.get(field).filter(|value| !value.is_null()) {
-                Some(credential) => fields.insert(field.to_owned(), credential.clone()),
+        for field in CREDENTIAL_FIELDS.into_iter().chain(ENDPOINT_FIELDS) {
+            match registered_config
+                .get(field)
+                .filter(|value| !value.is_null())
+            {
+                Some(setting) => fields.insert(field.to_owned(), setting.clone()),
                 None => fields.remove(field),
             };
         }

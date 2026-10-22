@@ -298,17 +298,19 @@ fn factories_reject_duplicate_ids_and_missing_or_unknown_discriminators() {
 }
 
 #[test]
-fn restore_refuses_snapshots_that_would_send_credentials_elsewhere() {
+fn restore_takes_the_endpoint_and_credentials_from_the_registered_provider() {
+    let registered = ProviderConfig {
+        default_base_url: "https://api.example".into(),
+        api_key_value: Some("sk-live".into()),
+        api_key_env: Some("EXAMPLE_KEY".into()),
+        ..Default::default()
+    };
     let mut registry = ProviderRegistry::new();
     registry
         .register(
             "empty",
             Arc::new(EmptyProvider {
-                config: ProviderConfig {
-                    default_base_url: "https://api.example".into(),
-                    api_key_value: Some("sk-live".into()),
-                    ..Default::default()
-                },
+                config: registered.clone(),
             }),
         )
         .unwrap();
@@ -321,41 +323,31 @@ fn restore_refuses_snapshots_that_would_send_credentials_elsewhere() {
             })
             .unwrap();
     }
-    let restored = registry
-        .restore_provider(serde_json::json!({
+    // A changed snapshot, or one saved before the provider moved, restores
+    // against the registered endpoint, never its own.
+    for snapshot in [
+        serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","api_key_env":"EXAMPLE_KEY"}),
+        serde_json::json!({
             "provider_class_id": "empty",
             "name": "empty",
-            "default_base_url": "https://api.example"
-        }))
-        .unwrap();
-    assert_eq!(restored.api_key(), Some("sk-live"));
-    for (snapshot, field) in [
-        (
-            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://attacker.example"}),
-            "default_base_url",
-        ),
-        (
-            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","base_url_env":"OTHER_URL"}),
-            "base_url_env",
-        ),
-        (
-            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","api_key_env":"OTHER_KEY"}),
-            "api_key_env",
-        ),
-        (
-            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","config_envs":["HOST"]}),
-            "config_envs",
-        ),
-        (
-            serde_json::json!({"provider_class_id":"other","name":"empty","default_base_url":"https://api.example"}),
-            "class",
-        ),
+            "default_base_url": "https://attacker.example",
+            "base_url_env": "OTHER_URL",
+            "api_key_env": "OTHER_KEY",
+            "config_envs": ["HOST"],
+            "api_key_value": "sk-snapshot"
+        }),
     ] {
-        match registry.restore_provider(snapshot) {
-            Err(Error::Configuration(message)) => assert!(message.contains(field), "{message}"),
-            Err(other) => panic!("{field}: expected a configuration error, got {other:?}"),
-            Ok(_) => panic!("{field}: a mismatched snapshot was restored with the live key"),
-        }
+        let restored = registry.restore_provider(snapshot).unwrap();
+        assert_eq!(*restored.config(), registered);
+        assert_eq!(restored.base_url(), "https://api.example");
+        assert_eq!(restored.api_key(), Some("sk-live"));
+    }
+    match registry.restore_provider(
+        serde_json::json!({"provider_class_id":"other","name":"empty","default_base_url":"https://api.example"}),
+    ) {
+        Err(Error::Configuration(message)) => assert!(message.contains("class"), "{message}"),
+        Err(other) => panic!("expected a configuration error, got {other:?}"),
+        Ok(_) => panic!("a snapshot of another provider class was restored with the live key"),
     }
 }
 
