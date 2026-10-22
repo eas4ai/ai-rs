@@ -149,9 +149,10 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.m
 - `RunOptions::tool_concurrency` caps the tools a step runs at once,
   `AgentStream::usage` sums the run's usage and `AgentStream::stop_reason` says
   why the run stopped. Python has none of them.
-- `AgentStream::interrupted_messages` returns the history plus the step a
-  stopped or failed run was in, as delivered, with cancelled error results for
-  its unfinished tool calls. Python loses that step.
+- `AgentStream::stop` stops a run and waits until its work has ended.
+  `AgentStream::interrupted_messages` returns the history plus the step a
+  stopped or failed run was in, with the results of the tools that finished
+  and cancelled error results for the rest. Python loses that step.
 - The `testing` feature adds a scripted provider for tests without a network.
 - `providers::hosts` adds Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral,
   Moonshot AI, Together AI, Z.ai and MiniMax, which Python lacks, with the

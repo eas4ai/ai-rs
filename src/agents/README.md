@@ -99,20 +99,20 @@ run the default loop decides for itself.
 Once the stream ends, `stop_reason()` returns `StopReason::Done`, `Stopped(reason)`
 or `Deferred`; it is `None` while the run goes on and after an error.
 `usage()` returns the summed usage of the delivered model responses.
-`interrupted_messages()` returns the history plus the step in progress, as its
-events were delivered, so an application can save what the user saw when it
-stops a run by dropping it, or when the run fails. The step adds the model
-response so far, keeping only the tool calls whose `ToolEnd` was delivered, and
-a tool message with the delivered results; each of those calls without a result
-gets the error result `Cancelled: the run stopped before this tool call
-finished.` A next run started from it repeats no finished call. After a step
-whose events were all delivered, it is the history up to the next model
-response, with what the loop added before that call, such as a steering
-message. With no step in progress it equals `messages()`. It keeps only what was
-delivered: with the default buffered loop a tool can finish before its events
-reach the stream, and a stop at that moment leaves the call out or reports it
-cancelled, so a resumed run may call it again. Run in lockstep
-(`loop_buffer: Some(0)`) when tools are costly or change things.
+`stop().await` stops a run as dropping it does and returns once its work has
+ended: the model call and the running tools are dropped, and the stream yields
+no more events. `interrupted_messages()` then returns the history plus the step
+in progress, so an application can save the run when it stops it, or when the
+run fails, and continue it later. The history holds every step the loop
+finished, which with the default buffered loop can be ahead of the events the
+consumer read. When the loop has received a tool call of the step in progress,
+the step adds the model response as the loop received it, up to its last such
+call, with its reasoning, and a tool message with the result of each tool that
+finished; each call whose tool had not finished gets the error result
+`Cancelled: the run stopped before this tool call finished.` A next run started
+from it repeats no finished call. Otherwise the step adds the response's text
+and reasoning as delivered. With no step in progress it equals `messages()`.
+Read it after `stop()`: a running loop can finish a tool after the read.
 `RunOptions::tool_concurrency` caps how many tool executions of one step run at
 once; the others start in call order as slots free up. A call waiting for its
 approval holds no slot, so approvals and `blocked()` work as without a cap.

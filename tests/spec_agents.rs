@@ -745,7 +745,7 @@ async fn agt_006_a_lockstep_run_keeps_the_partial_text() {
 }
 
 #[tokio::test]
-async fn agt_006_a_run_ahead_keeps_only_what_was_delivered() {
+async fn agt_006_a_run_ahead_keeps_the_steps_the_loop_finished() {
     let provider = ScriptedProvider::new("scripted", [hello_in_two_deltas()]);
     let mut run = Agent::default().run(provider.model("m"), vec![user_message("go")]);
     read_until(&mut run, |event| is_delta(event, "Hel")).await;
@@ -758,9 +758,9 @@ async fn agt_006_a_run_ahead_keeps_only_what_was_delivered() {
     .await
     .expect("the loop never ran ahead");
     assert_eq!(run.messages().last().unwrap().text(), "Hello");
+    // The finished step is the run's history; no step is in progress.
     let history = run.interrupted_messages();
-    assert_eq!(history.len(), 2, "{history:?}");
-    assert_eq!(history.last().unwrap().text(), "Hel");
+    assert_eq!(history, run.messages());
 }
 
 #[tokio::test]
@@ -963,4 +963,173 @@ async fn agt_006_a_steer_after_a_delivered_step_stays_in_the_history() {
             assert_eq!(history, run.messages(), "{buffer:?} {with_tool}");
         }
     }
+}
+
+/// A protocol that sends these events and then nothing, as a model that
+/// stalls mid-response.
+struct StallsAfter(Vec<Event>);
+impl suprnova_ai::ProviderProtocol for StallsAfter {
+    fn protocol_class_id(&self) -> &str {
+        "stalls"
+    }
+    fn stream(
+        &self,
+        _model: &suprnova_ai::Model,
+        _messages: Vec<Message>,
+        _options: suprnova_ai::StreamOptions,
+        _provider: &dyn suprnova_ai::Provider,
+    ) -> suprnova_ai::providers::EventStream {
+        futures::stream::iter(self.0.clone().into_iter().map(Ok))
+            .chain(futures::stream::pending())
+            .boxed()
+    }
+}
+
+/// Sets its flag when dropped.
+struct DropFlag(Arc<AtomicBool>);
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn agt_006_a_stopped_buffered_run_keeps_what_the_loop_received() {
+    // Reasoning R, complete calls a and b, text T, then the start of call c.
+    let response = Message::new(
+        MessageRole::Assistant,
+        vec![
+            Part::Reasoning(suprnova_ai::types::messages::ReasoningPart {
+                id: "r1".into(),
+                text: "R".into(),
+                provider_metadata: None,
+            }),
+            Part::ToolCall(ToolCallPart::new("a", "work", r#"{"i":1}"#)),
+            Part::ToolCall(ToolCallPart::new("b", "work", r#"{"i":0}"#)),
+            TextPart {
+                id: "t1".into(),
+                text: "T".into(),
+                provider_metadata: None,
+            }
+            .into(),
+            Part::ToolCall(ToolCallPart::new("c", "work", r#"{"i":3}"#)),
+        ],
+    );
+    let mut events = replay_message_events(&response);
+    let cut = events
+        .iter()
+        .position(|event| matches!(event, Event::ToolEnd(end) if end.tool_call_id == "c"))
+        .unwrap();
+    events.truncate(cut);
+    let provider = Arc::new(suprnova_ai::providers::ConfiguredProvider::new(
+        "stalls",
+        Default::default(),
+        Arc::new(StallsAfter(events)),
+        None,
+    ));
+    let (finished, finished_rx) = tokio::sync::oneshot::channel::<()>();
+    let finished = Arc::new(Mutex::new(Some(finished)));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let tool = {
+        let (finished, dropped, starts) = (finished.clone(), dropped.clone(), starts.clone());
+        AgentTool::new::<Index, u32, _, _>("work", "Return the index", move |input, _| {
+            let (finished, dropped, starts) = (finished.clone(), dropped.clone(), starts.clone());
+            async move {
+                starts.lock().unwrap().push(input.i);
+                if input.i == 0 {
+                    let _guard = DropFlag(dropped);
+                    std::future::pending::<()>().await;
+                }
+                if let Some(finished) = finished.lock().unwrap().take() {
+                    let _ = finished.send(());
+                }
+                Ok(input.i)
+            }
+        })
+        .unwrap()
+    };
+    let agent = Agent::new(vec![tool]);
+    let mut run = agent.run(
+        suprnova_ai::Model::new("m", provider),
+        vec![user_message("go")],
+    );
+    let first = run.next().await;
+    assert!(matches!(first, Some(Ok(_))), "{first:?}");
+    tokio::time::timeout(Duration::from_secs(10), finished_rx)
+        .await
+        .expect("tool a never finished")
+        .unwrap();
+    run.stop().await;
+    assert!(dropped.load(Ordering::SeqCst), "b's future was not dropped");
+    assert!(run.next().await.is_none(), "the stream yielded after stop");
+
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 3, "{history:?}");
+    let parts: Vec<_> = history[1]
+        .parts
+        .iter()
+        .map(|part| match part {
+            Part::Reasoning(r) => format!("reasoning {}", r.text),
+            Part::ToolCall(c) => format!("call {}", c.tool_call_id),
+            Part::Text(t) => format!("text {}", t.text),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(parts, ["reasoning R", "call a", "call b"]);
+    let results = history[2].tool_results();
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| (r.tool_call_id.as_str(), r.is_error()))
+            .collect::<Vec<_>>(),
+        [("a", false), ("b", true)]
+    );
+    assert_eq!(result_text(results[1]), CANCELLED);
+
+    // A next run continues from the history and runs neither call again.
+    let next = ScriptedProvider::new("scripted", [ScriptedResponse::text("done")]);
+    let mut run = agent.run(next.model("m"), history);
+    finish(&mut run).await;
+    assert_eq!(run.text().unwrap(), "done");
+    assert_eq!(*starts.lock().unwrap(), [1, 0]);
+}
+
+#[tokio::test]
+async fn agt_006_stop_ends_a_lockstep_run_and_drops_its_tools() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let tool = {
+        let dropped = dropped.clone();
+        AgentTool::new::<Index, u32, _, _>("work", "Never finish", move |_, _| {
+            let dropped = dropped.clone();
+            async move {
+                let _guard = DropFlag(dropped);
+                std::future::pending::<()>().await;
+                Ok(0)
+            }
+        })
+        .unwrap()
+    };
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [ScriptedResponse::tool_call("a", "work", json!({"i": 0}))],
+    );
+    let mut run = Agent::new(vec![tool]).run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        lockstep(),
+    );
+    read_until(&mut run, |event| matches!(event, Event::StreamEnd(_))).await;
+    // The tool starts while the loop waits for its result.
+    let pending = tokio::time::timeout(Duration::from_millis(50), run.next()).await;
+    assert!(pending.is_err(), "{pending:?}");
+    run.stop().await;
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the tool's future was not dropped"
+    );
+    assert!(run.next().await.is_none());
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 3, "{history:?}");
+    assert_eq!(result_text(history[2].tool_results()[0]), CANCELLED);
 }
