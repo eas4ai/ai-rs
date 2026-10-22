@@ -23,7 +23,7 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, JsonSchemaModels},
+        openai::profile::{ChatProfile, Dialect, JsonSchemaModels},
     },
     transport::HttpTransport,
 };
@@ -55,6 +55,9 @@ static PROFILE: ChatProfile = ChatProfile {
     ],
     reasoning_outside_completion: false,
     json_drops_tool_calls_after_text: false,
+    unsupported: &[],
+    dialect: Dialect::OpenAI,
+    stream_error_kinds: false,
 };
 
 pub(super) static HOST: Host = Host {
@@ -78,5 +81,5 @@ pub fn register(
     config: ProviderConfig,
     transport: Arc<dyn HttpTransport>,
 ) -> Result<(), Error> {
-    super::register(&HOST, registry, config, transport)
+    super::register(&HOST, registry, config, transport, None)
 }

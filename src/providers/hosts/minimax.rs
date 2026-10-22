@@ -90,7 +90,7 @@ pub fn register(
     config: ProviderConfig,
     transport: Arc<dyn HttpTransport>,
 ) -> Result<(), Error> {
-    super::register(&HOST, registry, config, transport)
+    super::register(&HOST, registry, config, transport, None)
 }
 
 #[cfg(test)]

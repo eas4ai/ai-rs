@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    errors, messages, params,
-    profile::{self, ChatProfile},
+    dialect, errors, messages, params,
+    profile::{self, ChatProfile, Dialect},
     streaming,
 };
 use crate::{
@@ -65,9 +65,13 @@ impl Wire {
     }
 }
 
-/// Chat Completions for a host, as its profile describes it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct HostChatProtocol(pub(crate) &'static ChatProfile);
+/// Chat Completions for a host, as its profile describes it, with the
+/// transport that downloads the media URLs the host cannot fetch, if any.
+#[derive(Clone)]
+pub(crate) struct HostChatProtocol(
+    pub(crate) &'static ChatProfile,
+    pub(crate) Option<Arc<dyn crate::models::files::DownloadTransport>>,
+);
 impl ProviderProtocol for HostChatProtocol {
     fn protocol_class_id(&self) -> &str {
         self.0.protocol_class_id
@@ -79,7 +83,14 @@ impl ProviderProtocol for HostChatProtocol {
         options: StreamOptions,
         provider: &dyn Provider,
     ) -> EventStream {
-        start(model, messages, options, provider, Wire::Chat(self.0), None)
+        start(
+            model,
+            messages,
+            options,
+            provider,
+            Wire::Chat(self.0),
+            self.1.clone(),
+        )
     }
 }
 impl ProviderProtocol for OpenAIChatCompletionsProtocol {
@@ -166,7 +177,7 @@ fn start(
     let model_id = model.id.clone();
     let transport = provider.shared_transport();
     stream::once(async move {
-        let messages = messages::download_files(messages, downloads.as_deref()).await?;
+        let messages = messages::download_files(messages, wire, downloads.as_deref()).await?;
         let request = wire_request(wire, &model_id, &config, messages, &options)?;
         let transport = transport.ok_or_else(|| {
             Error::Configuration(format!(
@@ -232,13 +243,29 @@ pub(crate) fn wire_request(
 ) -> Result<HttpRequest, Error> {
     let responses = wire.responses();
     let p = options.params.clone().unwrap_or_default();
+    let chat = match wire {
+        Wire::Chat(profile) => Some(profile),
+        Wire::Responses => None,
+    };
+    if let Some(profile) = chat {
+        dialect::check(profile, model, &p, options)?;
+    }
     let mut body = params::build(&p, wire)?;
+    if let Some(profile) = chat {
+        dialect::request(profile, model, &p, &mut body);
+    }
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
     body.insert("stream".into(), json!(true));
+    let mut converted = messages::convert(messages, wire, model, use_references)?;
+    if let (Some(profile), Some(schema)) = (chat, &options.output_schema)
+        && let Some(message) = dialect::schema_message(profile, schema)?
+    {
+        converted.insert(0, message);
+    }
     body.insert(
         if responses { "input" } else { "messages" }.into(),
-        messages::convert(messages, wire, use_references)?.into(),
+        converted.into(),
     );
     if let Wire::Chat(profile) = wire
         && profile.include_usage
@@ -274,15 +301,27 @@ pub(crate) fn wire_request(
     if send_tools && !options.tools.is_empty() {
         body.insert(
             "tools".into(),
-            super::tools::convert(&options.tools, responses)?.into(),
+            super::tools::convert(&options.tools, wire)?.into(),
         );
     }
     if send_tools && let Some(choice) = &options.tool_choice {
         body.insert("tool_choice".into(), params::tool_choice(choice, wire)?);
     }
+    if let Some(profile) = chat
+        && profile.dialect == Dialect::Mistral
+    {
+        mistral_tools(&mut body, dialect::tool_choice(&p, options));
+    }
     if let Some(schema) = &options.output_schema {
         let name = options.output_type_name.as_deref().unwrap_or("output");
+        let host_format = match chat {
+            Some(profile) => dialect::response_format(profile, name, schema)?,
+            None => None,
+        };
         match wire {
+            _ if host_format.is_some() => {
+                body.insert("response_format".into(), host_format.into());
+            }
             Wire::Responses => {
                 let schema = strict_output_schema(schema)?;
                 let text = body.entry("text").or_insert_with(|| json!({}));
@@ -315,6 +354,29 @@ pub(crate) fn wire_request(
         Some(Value::Object(body)),
         Some(&p),
     )
+}
+/// Mistral's tool choice: `any` for required or a named tool, whose name
+/// filters the tools, and neither `tool_choice` nor `parallel_tool_calls`
+/// without tools (`mistral-prepare-tools.ts`).
+fn mistral_tools(body: &mut serde_json::Map<String, Value>, choice: Option<&ToolChoice>) {
+    if let (Some(ToolChoice::Tool(tool)), Some(Value::Array(tools))) =
+        (choice, body.get_mut("tools"))
+    {
+        tools.retain(|t| t["function"]["name"].as_str() == Some(tool.0.as_str()));
+    }
+    let has_tools = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    if !has_tools {
+        body.remove("tools");
+        body.remove("tool_choice");
+        body.remove("parallel_tool_calls");
+        return;
+    }
+    if matches!(choice, Some(ToolChoice::Required | ToolChoice::Tool(_))) {
+        body.insert("tool_choice".into(), json!("any"));
+    }
 }
 fn tool_choice_name(choice: &ToolChoice) -> &'static str {
     match choice {

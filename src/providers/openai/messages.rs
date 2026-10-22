@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{params::invalid, protocol::Wire};
+use super::{dialect, params::invalid, profile::Dialect, protocol::Wire};
 use crate::{
     Error,
     types::{
@@ -31,12 +31,25 @@ fn media_ref(data: &FileData) -> MediaDataRef<'_> {
         FileData::Bytes(b) => MediaDataRef::Bytes(b),
     }
 }
-fn file(part: &FilePart, responses: bool) -> Result<Value, Error> {
+fn dialect_of(wire: Wire) -> Dialect {
+    match wire {
+        Wire::Chat(profile) => profile.dialect,
+        Wire::Responses => Dialect::OpenAI,
+    }
+}
+fn file(part: &FilePart, wire: Wire) -> Result<Value, Error> {
+    let responses = matches!(wire, Wire::Responses);
     let mt = if part.media_type == "image/*" {
         "image/jpeg"
     } else {
         &part.media_type
     };
+    match dialect_of(wire) {
+        Dialect::OpenAI => {}
+        Dialect::DeepSeek => return deepseek_file(part, mt),
+        Dialect::Moonshot => return moonshot_file(part, mt),
+        Dialect::Mistral => return mistral_file(part, mt),
+    }
     let data = media_ref(&part.data);
     if mt.starts_with("image/") {
         let url = media::data_to_data_url(data, mt);
@@ -78,25 +91,127 @@ fn file(part: &FilePart, responses: bool) -> Result<Value, Error> {
         );
     }
     if mt.starts_with("text/") {
-        let text = match &part.data {
-            FileData::Bytes(b) => String::from_utf8(b.clone())
-                .map_err(|_| invalid("OpenAI text input is not UTF-8"))?,
-            FileData::Text(s) if media::is_url(s) => s.clone(),
-            FileData::Text(s) => String::from_utf8(
-                STANDARD
-                    .decode(s)
-                    .map_err(|_| invalid("OpenAI text input is not base64"))?,
-            )
-            .map_err(|_| invalid("OpenAI text input is not UTF-8"))?,
-        };
+        let text = text_file(part)?;
         return Ok(json!({"type":if responses {"input_text"}else {"text"},"text":text}));
     }
     Err(invalid(format!("Unsupported media type for OpenAI: {mt}")))
 }
-fn tool_result(value: &ToolResultValue, responses: bool) -> Result<Value, Error> {
+fn text_file(part: &FilePart) -> Result<String, Error> {
+    Ok(match &part.data {
+        FileData::Bytes(b) => {
+            String::from_utf8(b.clone()).map_err(|_| invalid("OpenAI text input is not UTF-8"))?
+        }
+        FileData::Text(s) if media::is_url(s) => s.clone(),
+        FileData::Text(s) => String::from_utf8(
+            STANDARD
+                .decode(s)
+                .map_err(|_| invalid("OpenAI text input is not base64"))?,
+        )
+        .map_err(|_| invalid("OpenAI text input is not UTF-8"))?,
+    })
+}
+/// The media URL of a file, which a host that cannot fetch URLs cannot take.
+fn fetch_url(part: &FilePart) -> Option<&str> {
+    part.data
+        .as_text()
+        .filter(|s| media::is_downloadable_url(s))
+}
+/// DeepSeek takes GIF, JPEG, PNG and WebP images only
+/// (`convert-to-deepseek-chat-messages.ts`).
+fn deepseek_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
+    if ![
+        "image/gif",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+    ]
+    .contains(&mt)
+    {
+        return Err(invalid(format!(
+            "DeepSeek takes only GIF, JPEG, PNG and WebP images, not {mt}"
+        )));
+    }
+    let mt = if mt == "image/jpg" { "image/jpeg" } else { mt };
+    let url = media::data_to_data_url(media_ref(&part.data), mt);
+    Ok(json!({"type":"image_url","image_url":{"url":url}}))
+}
+/// Moonshot AI takes images, videos and text, inline: it does not fetch
+/// URLs, so a provider downloads them first when it has a download transport
+/// (`convert-to-moonshotai-chat-messages.ts`).
+fn moonshot_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
+    const IMAGES: [&str; 7] = [
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "image/heic",
+        "image/heif",
+    ];
+    const VIDEOS: [&str; 9] = [
+        "video/mp4",
+        "video/mpeg",
+        "video/mov",
+        "video/avi",
+        "video/x-flv",
+        "video/mpg",
+        "video/webm",
+        "video/wmv",
+        "video/3gpp",
+    ];
+    if mt.starts_with("text/") {
+        return Ok(json!({"type":"text","text":text_file(part)?}));
+    }
+    let kind = if IMAGES.contains(&mt) {
+        "image_url"
+    } else if VIDEOS.contains(&mt) {
+        "video_url"
+    } else {
+        return Err(invalid(format!("Moonshot AI does not take {mt} files")));
+    };
+    if fetch_url(part).is_some() {
+        return Err(invalid(
+            "Moonshot AI does not fetch media URLs; supply the file bytes or build the provider with a download transport",
+        ));
+    }
+    let url = media::data_to_data_url(media_ref(&part.data), mt);
+    Ok(json!({"type":kind,kind:{"url":url}}))
+}
+/// Mistral takes images and PDFs (`convert-to-mistral-chat-messages.ts`).
+fn mistral_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
+    let url = media::data_to_data_url(media_ref(&part.data), mt);
+    if mt.starts_with("image/") {
+        return Ok(json!({"type":"image_url","image_url":url}));
+    }
+    if mt == "application/pdf" {
+        if fetch_url(part).is_some_and(|url| !url.starts_with("https://")) {
+            return Err(invalid(
+                "Mistral fetches PDF URLs over https only; supply the file bytes",
+            ));
+        }
+        return Ok(json!({"type":"document_url","document_url":url}));
+    }
+    Err(invalid(format!("Mistral does not take {mt} files")))
+}
+fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
+    let responses = matches!(wire, Wire::Responses);
     match value {
         ToolResultValue::Json(Value::Null) => Ok(json!("")),
         ToolResultValue::Json(Value::String(s)) => Ok(json!(s)),
+        // Moonshot AI and Mistral take only text; DeepSeek takes parts only
+        // with an image.
+        ToolResultValue::Special(SpecialToolResult::Content(content))
+            if match dialect_of(wire) {
+                Dialect::OpenAI => false,
+                Dialect::DeepSeek => !content.value.iter().any(
+                    |p| matches!(p, ContentPart::File(f) if f.media_type.starts_with("image/")),
+                ),
+                Dialect::Moonshot | Dialect::Mistral => true,
+            } =>
+        {
+            Ok(json!(serde_json::to_string(&content.value)?))
+        }
         ToolResultValue::Special(SpecialToolResult::Content(content)) => {
             let mut parts = vec![];
             for p in &content.value {
@@ -231,6 +346,7 @@ fn flush_content(out: &mut Vec<Value>, content: &mut Vec<Value>) {
 pub(super) fn convert(
     messages: Vec<Message>,
     wire: Wire,
+    model: &str,
     references: bool,
 ) -> Result<Vec<Value>, Error> {
     let responses = matches!(wire, Wire::Responses);
@@ -238,8 +354,12 @@ pub(super) fn convert(
         Wire::Chat(profile) => profile.reasoning_field,
         Wire::Responses => "reasoning",
     };
+    let dialect = dialect_of(wire);
+    let messages = repair(messages)?;
+    let last = messages.len().saturating_sub(1);
+    let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
     let mut out = vec![];
-    for msg in repair(messages)? {
+    for (index, msg) in messages.into_iter().enumerate() {
         match msg.role {
             MessageRole::System => {
                 let text = msg.text();
@@ -258,7 +378,7 @@ pub(super) fn convert(
                         Part::Text(t) => content.push(
                             json!({"type":if responses {"input_text"}else {"text"},"text":t.text}),
                         ),
-                        Part::File(f) => content.push(file(&f, responses)?),
+                        Part::File(f) => content.push(file(&f, wire)?),
                         _ => {}
                     }
                 }
@@ -271,8 +391,29 @@ pub(super) fn convert(
                 if !text.is_empty() {
                     entry["content"] = json!(text);
                 }
-                if !reasoning.is_empty() {
-                    entry[reasoning_field] = json!(reasoning);
+                match dialect {
+                    // V4 needs the field on every assistant turn; earlier
+                    // models get no reasoning from before the last user turn.
+                    Dialect::DeepSeek if !dialect::deepseek_legacy(model) => {
+                        entry[reasoning_field] = json!(reasoning);
+                    }
+                    Dialect::DeepSeek if last_user.is_some_and(|user| index < user) => {}
+                    // Mistral sends reasoning as thinking chunks of the content,
+                    // in the turn's order, and always sends `content`.
+                    Dialect::Mistral => {
+                        entry["content"] = if reasoning.is_empty() {
+                            json!(text)
+                        } else {
+                            mistral_content(&msg)
+                        };
+                        if index == last {
+                            entry["prefix"] = json!(true);
+                        }
+                    }
+                    _ if !reasoning.is_empty() => {
+                        entry[reasoning_field] = json!(reasoning);
+                    }
+                    _ => {}
                 }
                 let mut calls = vec![];
                 for p in &msg.parts {
@@ -282,6 +423,9 @@ pub(super) fn convert(
                 }
                 }
                 if !calls.is_empty() {
+                    if dialect == Dialect::Moonshot && text.is_empty() {
+                        entry["content"] = Value::Null;
+                    }
                     entry["tool_calls"] = calls.into();
                 }
                 out.push(entry);
@@ -330,8 +474,16 @@ pub(super) fn convert(
             MessageRole::Tool => {
                 for p in &msg.parts {
                     if let Part::ToolResult(r) = p {
-                        let value = tool_result(r.get_model_input(), responses)?;
-                        out.push(if responses {json!({"type":"function_call_output","call_id":r.tool_call_id,"output":value})}else {json!({"role":"tool","tool_call_id":r.tool_call_id,"content":value})});
+                        let value = tool_result(r.get_model_input(), wire)?;
+                        let mut entry = if responses {
+                            json!({"type":"function_call_output","call_id":r.tool_call_id,"output":value})
+                        } else {
+                            json!({"role":"tool","tool_call_id":r.tool_call_id,"content":value})
+                        };
+                        if dialect == Dialect::Mistral {
+                            entry["name"] = json!(r.tool_name);
+                        }
+                        out.push(entry);
                     }
                 }
             }
@@ -341,8 +493,34 @@ pub(super) fn convert(
     Ok(out)
 }
 
+/// A Mistral assistant turn's text and reasoning as content chunks, in order.
+fn mistral_content(msg: &Message) -> Value {
+    let mut content = vec![];
+    for part in &msg.parts {
+        match part {
+            Part::Text(t) if !t.text.is_empty() => {
+                content.push(json!({"type":"text","text":t.text}));
+            }
+            Part::Reasoning(r) if !r.text.is_empty() => content.push(
+                json!({"type":"thinking","thinking":[{"type":"text","text":r.text}],"closed":true}),
+            ),
+            _ => {}
+        }
+    }
+    content.into()
+}
+/// Whether the host needs a file of this media type inline, so that a media
+/// URL is downloaded first when the protocol has a download transport.
+fn downloads(wire: Wire, media_type: &str) -> bool {
+    match dialect_of(wire) {
+        Dialect::OpenAI => media_type.starts_with("audio/") || media_type == "application/pdf",
+        Dialect::Moonshot => media_type.starts_with("image/") || media_type.starts_with("video/"),
+        Dialect::DeepSeek | Dialect::Mistral => false,
+    }
+}
 pub(super) async fn download_files(
     mut messages: Vec<Message>,
+    wire: Wire,
     transport: Option<&dyn crate::models::files::DownloadTransport>,
 ) -> Result<Vec<Message>, Error> {
     let Some(transport) = transport else {
@@ -356,7 +534,7 @@ pub(super) async fn download_files(
             let Part::File(file) = part else {
                 continue;
             };
-            if !(file.media_type.starts_with("audio/") || file.media_type == "application/pdf") {
+            if !downloads(wire, &file.media_type) {
                 continue;
             }
             let Some(url) = file
@@ -375,7 +553,7 @@ pub(super) async fn download_files(
             .map_err(|e| {
                 crate::errors::ProviderError::new(
                     crate::errors::ProviderErrorKind::Response,
-                    "OpenAI input download failed",
+                    format!("{} input download failed", wire.api().label),
                 )
                 .with_source(e)
             })?;

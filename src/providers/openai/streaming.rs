@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{profile::ChatProfile, protocol::Wire};
+use super::{
+    dialect,
+    profile::{ChatProfile, Dialect},
+    protocol::Wire,
+};
 use crate::{
     providers::{
         EventStream,
@@ -106,6 +110,10 @@ struct Parser {
     has_text: bool,
     /// Tool events held until the finish, while text can still void them.
     held: Vec<Event>,
+    /// `StreamStart` was queued. It waits for the first chunk that is not an
+    /// error, so an error the server sends first comes before any event and
+    /// a call retries it when it is retryable.
+    started: bool,
     ended: bool,
     queue: VecDeque<Event>,
     texts: BTreeSet<String>,
@@ -114,6 +122,14 @@ struct Parser {
     reasoning_ended: BTreeSet<String>,
     calls: BTreeMap<String, Call>,
     indices: BTreeMap<String, String>,
+    /// Chat Completions tool calls in the order they started, and the slot
+    /// of each call's index or place in its chunk.
+    chat_calls: Vec<Call>,
+    chat_call_keys: BTreeMap<String, usize>,
+    /// How many Chat Completions blocks of each kind have started.
+    chat_blocks: BTreeMap<String, usize>,
+    /// A chunk had a top-level `usage`.
+    top_level_usage: bool,
     builtins: BTreeMap<String, Call>,
     builtin_indices: BTreeMap<String, String>,
     usage: Option<Usage>,
@@ -130,8 +146,6 @@ pub(super) fn parse(
     image_type: String,
     json_output: bool,
 ) -> EventStream {
-    let mut queue = VecDeque::new();
-    queue.push_back(Event::StreamStart(StreamStart::default()));
     let api = wire.api();
     let state = Parser {
         input: http::sse_json(*api, provider.clone(), body),
@@ -145,14 +159,19 @@ pub(super) fn parse(
         json_output,
         has_text: false,
         held: Vec::new(),
+        started: false,
         ended: false,
-        queue,
+        queue: VecDeque::new(),
         texts: BTreeSet::new(),
         reasoning: BTreeSet::new(),
         reasoning_delta: BTreeSet::new(),
         reasoning_ended: BTreeSet::new(),
         calls: BTreeMap::new(),
         indices: BTreeMap::new(),
+        chat_calls: Vec::new(),
+        chat_call_keys: BTreeMap::new(),
+        chat_blocks: BTreeMap::new(),
+        top_level_usage: false,
         builtins: BTreeMap::new(),
         builtin_indices: BTreeMap::new(),
         usage: None,
@@ -173,18 +192,18 @@ pub(super) fn parse(
             match p.input.next().await {
                 Some(Ok(SseJson::Done)) | None => p.complete(),
                 Some(Ok(SseJson::Object(data))) => {
+                    // Mistral sends an error as an object of type `error`.
                     if data.get("error").is_some_and(|e| !e.is_null())
                         || string(&data, "type") == "error"
+                        || string(&data, "object") == "error"
                     {
-                        let message = http::error_message(p.api, &data)
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| format!("{} stream returned an error", p.api.label));
-                        return Err(http::response_error(&p.provider, message));
+                        return Err(dialect::stream_error(p.chat, p.api, &p.provider, &data));
                     }
+                    p.start();
                     if p.responses {
                         p.response(&data);
                     } else {
-                        p.chat(&data);
+                        p.chat(&data)?;
                     }
                 }
                 Some(Err(error)) => return Err(error),
@@ -194,10 +213,18 @@ pub(super) fn parse(
     .boxed()
 }
 impl Parser {
+    fn start(&mut self) {
+        if !self.started {
+            self.started = true;
+            self.queue
+                .push_back(Event::StreamStart(StreamStart::default()));
+        }
+    }
     fn complete(&mut self) {
         if self.ended {
             return;
         }
+        self.start();
         if self.responses {
             for id in std::mem::take(&mut self.texts) {
                 self.queue.push_back(block("text_end", &id, None));
@@ -222,14 +249,40 @@ impl Parser {
         }));
         self.ended = true;
     }
-    fn chat(&mut self, data: &Value) {
+    fn chat(&mut self, data: &Value) -> Result<(), crate::Error> {
         if !string(data, "id").is_empty() {
             self.response_id = Some(string(data, "id").into());
         }
         if !string(data, "model").is_empty() {
             self.response_model = Some(string(data, "model").into());
         }
-        if let Some(mut u) = usage(&data["usage"], false) {
+        let dialect = self.chat.map_or(Dialect::OpenAI, |c| c.dialect);
+        let first = data["choices"].as_array().and_then(|c| c.first());
+        // Moonshot AI can put usage in the choice; a top-level usage wins
+        // whichever comes first.
+        let usage_value = if data["usage"].is_object() {
+            self.top_level_usage = true;
+            Some(&data["usage"])
+        } else {
+            first
+                .map(|choice| &choice["usage"])
+                .filter(|u| u.is_object())
+                .filter(|_| dialect == Dialect::Moonshot && !self.top_level_usage)
+        };
+        if let Some(value) = usage_value
+            && let Some(mut u) = usage(value, false)
+        {
+            let cached = match dialect {
+                Dialect::OpenAI => None,
+                Dialect::DeepSeek => value["prompt_cache_hit_tokens"].as_u64(),
+                Dialect::Moonshot => value["cached_tokens"].as_u64(),
+                Dialect::Mistral => value["num_cached_tokens"]
+                    .as_u64()
+                    .or_else(|| value["prompt_token_details"]["cached_tokens"].as_u64()),
+            };
+            if cached.is_some() {
+                u.cache_read_tokens = cached;
+            }
             // DeepInfra can count reasoning tokens apart from completion tokens.
             if self.chat.is_some_and(|c| c.reasoning_outside_completion)
                 && let Some(reasoning) = u.reasoning_tokens
@@ -239,8 +292,8 @@ impl Parser {
             }
             self.usage = Some(u);
         }
-        let Some(choice) = data["choices"].as_array().and_then(|c| c.first()) else {
-            return;
+        let Some(choice) = first else {
+            return Ok(());
         };
         let delta = &choice["delta"];
         let reasoning = delta
@@ -250,31 +303,32 @@ impl Parser {
             .or_else(|| delta.get("reasoning_content").and_then(Value::as_str))
             .unwrap_or("");
         if !reasoning.is_empty() {
-            if self.reasoning.insert("reasoning".into()) {
-                self.queue
-                    .push_back(block("reasoning_start", "reasoning", None));
-            }
-            self.queue.push_back(Event::ReasoningDelta(ReasoningDelta {
-                event: Default::default(),
-                block_id: "reasoning".into(),
-                chunk: reasoning.into(),
-            }));
+            self.reasoning_chunk(reasoning);
         }
-        let text = string(delta, "content");
-        if !text.is_empty() {
-            self.has_text = true;
-            if self.reasoning.remove("reasoning") {
-                self.queue
-                    .push_back(block("reasoning_end", "reasoning", None));
+        match &delta["content"] {
+            Value::String(text) if !text.is_empty() => self.text_chunk(text),
+            // Mistral sends content as parts: text, thinking that holds text
+            // parts, and parts with no text for the reader, such as references.
+            Value::Array(parts) => {
+                for part in parts {
+                    match string(part, "type") {
+                        "text" if !string(part, "text").is_empty() => {
+                            self.text_chunk(string(part, "text"));
+                        }
+                        "thinking" => {
+                            for inner in part["thinking"].as_array().into_iter().flatten() {
+                                if string(inner, "type") == "text"
+                                    && !string(inner, "text").is_empty()
+                                {
+                                    self.reasoning_chunk(string(inner, "text"));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
-            if self.texts.insert("text".into()) {
-                self.queue.push_back(block("text_start", "text", None));
-            }
-            self.queue.push_back(Event::TextDelta(TextDelta {
-                event: Default::default(),
-                block_id: "text".into(),
-                chunk: text.into(),
-            }));
+            _ => {}
         }
         // Under an output schema, Cerebras can repeat its answer as tool calls
         // around the text; the text is the answer. Hold the tool events until
@@ -284,11 +338,43 @@ impl Parser {
                 .chat
                 .is_some_and(|c| c.json_drops_tool_calls_after_text);
         if let Some(calls) = delta["tool_calls"].as_array() {
-            for tc in calls {
-                let index = tc["index"].to_string();
-                let state = self.calls.entry(index).or_default();
-                if !string(tc, "id").is_empty() {
-                    state.id = string(tc, "id").into();
+            for (position, tc) in calls.iter().enumerate() {
+                // A call without an index, as Mistral and Moonshot AI send
+                // them, is keyed by its place in the chunk; a new id under a
+                // key is a new call.
+                let key = match tc.get("index") {
+                    None | Some(Value::Null) => format!("position {position}"),
+                    Some(index) => match index.as_u64() {
+                        Some(index) => format!("index {index}"),
+                        None => {
+                            return Err(http::response_error(
+                                &self.provider,
+                                format!(
+                                    "{} stream sent a tool call index that is not a non-negative integer: {index}",
+                                    self.api.label
+                                ),
+                            ));
+                        }
+                    },
+                };
+                let id = string(tc, "id");
+                let slot = match self.chat_call_keys.get(&key) {
+                    Some(&slot)
+                        if id.is_empty()
+                            || self.chat_calls[slot].id.is_empty()
+                            || self.chat_calls[slot].id == id =>
+                    {
+                        slot
+                    }
+                    _ => {
+                        self.chat_calls.push(Call::default());
+                        self.chat_call_keys.insert(key, self.chat_calls.len() - 1);
+                        self.chat_calls.len() - 1
+                    }
+                };
+                let state = &mut self.chat_calls[slot];
+                if !id.is_empty() {
+                    state.id = id.into();
                 }
                 if !string(&tc["function"], "name").is_empty() {
                     state.name = string(&tc["function"], "name").into();
@@ -341,11 +427,12 @@ impl Parser {
             }
             let held = std::mem::take(&mut self.held);
             if void_calls {
-                self.calls.clear();
+                self.chat_calls.clear();
+                self.chat_call_keys.clear();
             } else {
                 self.queue.extend(held);
             }
-            for state in self.calls.values_mut() {
+            for state in &mut self.chat_calls {
                 if state.started {
                     state.started = false;
                     self.queue.push_back(Event::ToolEnd(ToolEnd {
@@ -356,6 +443,61 @@ impl Parser {
                 }
             }
         }
+        Ok(())
+    }
+    /// The id of a new Chat Completions text or reasoning block: `text` or
+    /// `reasoning` for the first, then numbered, so a block that starts after
+    /// another of its kind ended is a new block.
+    fn chat_block(&mut self, kind: &str) -> String {
+        let count = self.chat_blocks.entry(kind.to_owned()).or_default();
+        *count += 1;
+        if *count == 1 {
+            kind.to_owned()
+        } else {
+            format!("{kind}-{count}")
+        }
+    }
+    /// A reasoning chunk: open text ends first, because reasoning after text
+    /// is a new block.
+    fn reasoning_chunk(&mut self, chunk: &str) {
+        for id in std::mem::take(&mut self.texts) {
+            self.queue.push_back(block("text_end", &id, None));
+        }
+        let id = match self.reasoning.iter().next() {
+            Some(id) => id.clone(),
+            None => {
+                let id = self.chat_block("reasoning");
+                self.reasoning.insert(id.clone());
+                self.queue.push_back(block("reasoning_start", &id, None));
+                id
+            }
+        };
+        self.queue.push_back(Event::ReasoningDelta(ReasoningDelta {
+            event: Default::default(),
+            block_id: id,
+            chunk: chunk.into(),
+        }));
+    }
+    /// A text chunk: open reasoning ends first.
+    fn text_chunk(&mut self, chunk: &str) {
+        self.has_text = true;
+        for id in std::mem::take(&mut self.reasoning) {
+            self.queue.push_back(block("reasoning_end", &id, None));
+        }
+        let id = match self.texts.iter().next() {
+            Some(id) => id.clone(),
+            None => {
+                let id = self.chat_block("text");
+                self.texts.insert(id.clone());
+                self.queue.push_back(block("text_start", &id, None));
+                id
+            }
+        };
+        self.queue.push_back(Event::TextDelta(TextDelta {
+            event: Default::default(),
+            block_id: id,
+            chunk: chunk.into(),
+        }));
     }
     fn response(&mut self, data: &Value) {
         let kind = string(data, "type");

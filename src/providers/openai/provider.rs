@@ -98,7 +98,7 @@ impl OpenAICompatibleProvider {
             if metadata.npm.as_deref() == Some("@ai-sdk/openai") {
                 Arc::new(OpenAIResponsesProtocol)
             } else if let Some(profile) = hosts::chat_profile_for(metadata) {
-                Arc::new(HostChatProtocol(profile))
+                Arc::new(HostChatProtocol(profile, None))
             } else {
                 Arc::new(OpenAIChatCompletionsProtocol)
             };

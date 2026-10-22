@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Provider-executed tool factories. Arguments use the Python wire snake_case keys.
-use super::params::invalid;
+use super::{dialect, params::invalid, protocol::Wire};
 use crate::{
     Error,
     types::tools::{Tool, ToolConfig, ToolKind},
@@ -70,7 +70,8 @@ pub fn apply_patch() -> Tool {
         ..local_shell()
     }
 }
-pub(super) fn convert(tools: &[Tool], responses: bool) -> Result<Vec<Value>, Error> {
+pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
+    let responses = matches!(wire, Wire::Responses);
     let mut result = vec![];
     for tool in tools {
         tool.validate_shape().map_err(|e| invalid(e.to_string()))?;
@@ -79,7 +80,13 @@ pub(super) fn convert(tools: &[Tool], responses: bool) -> Result<Vec<Value>, Err
                 .spec
                 .as_ref()
                 .ok_or_else(|| invalid("function tool has no spec"))?;
-            let function = json!({"name":tool.name,"description":spec.description.as_deref().unwrap_or(""),"parameters":spec.params});
+            let parameters = match wire {
+                Wire::Chat(profile) => {
+                    dialect::tool_parameters(profile, serde_json::to_value(&spec.params)?)?
+                }
+                Wire::Responses => serde_json::to_value(&spec.params)?,
+            };
+            let function = json!({"name":tool.name,"description":spec.description.as_deref().unwrap_or(""),"parameters":parameters});
             if responses {
                 let mut function = function;
                 function["type"] = json!("function");
