@@ -4,7 +4,8 @@ Rust port of the inference core in AI SDK for Python 0.8.0.
 
 The crate provides messages, events, tool schemas, stream aggregation, provider
 contracts, streaming HTTP transport, the OpenAI-compatible and Anthropic provider
-adapters (`providers::openai`, `providers::anthropic`), the agent loop with tools,
+adapters (`providers::openai`, `providers::anthropic`), hosted providers on those
+protocols (`providers::hosts`), the agent loop with tools,
 approval hooks and middleware (`agents`), and the AI SDK UI message stream adapter
 (`ui::ai_sdk`). The provider registry starts empty; register the adapters you use.
 The Vercel AI Gateway, OIDC, telemetry and the MCP client are not ported.
@@ -87,6 +88,16 @@ It also takes that provider's endpoint settings (the base URL and the names of i
 key and URL variables), so a changed snapshot cannot send the key to another host
 and an endpoint change applies to snapshots saved before it. A snapshot of another
 provider class is refused.
+
+`providers::hosts` has Cerebras, DeepInfra, Fireworks, Together AI and Z.ai on
+Chat Completions and MiniMax on the Anthropic Messages protocol. Register one with
+its module's `register`, for example
+`hosts::cerebras::register(&mut registry, config, transport)`, under its name
+(`cerebras`) and package handle (`@ai-sdk/cerebras`). Each host follows its
+package in the AI SDK for TypeScript 7.0.148. An option a host does not take fails
+with `Error::Validation` instead of being dropped with a warning, and an output
+schema goes to a host without JSON schema support as JSON mode, which does not
+enforce the schema.
 
 Enable the `testing` feature for `testing::ScriptedProvider`. It answers each call
 with the next scripted response and records each request, with no network.

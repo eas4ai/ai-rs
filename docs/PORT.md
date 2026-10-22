@@ -27,6 +27,7 @@ source lacks follows the AI SDK for TypeScript 7.0.148 where `docs/spec/` says s
 | `ai.errors` | `errors` | Framework errors, provider categories, HTTP context |
 | `ai.util` | `util`, `futures`, Tokio | Stream composition and task/resource ownership |
 | Upstream SDK HTTP clients | `transport` | Application-supplied HTTP transport and SSE framing |
+| None; TypeScript `@ai-sdk/cerebras`, `deepinfra`, `fireworks`, `togetherai`, `zai`, `minimax` | `providers::hosts` | Hosted providers on the Chat Completions and Messages protocols |
 | `ai.ui.ai_sdk` | `ui::ai_sdk` | Inbound UI requests, persisted UI histories, approvals, identity metadata and outbound SSE |
 
 ## Wire format
@@ -120,7 +121,7 @@ to the later agent runtime. Rust `Drop` handles stream and resource cancellation
 
 ## Departures from Python
 
-These follow `docs/spec/models.md` and `docs/spec/agents.md`.
+These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.md`.
 
 - Model ids must name their provider. Python routes an id without a colon to its
   gateway provider and folds `gateway`, `ai-gateway` and `vercel` into one
@@ -149,6 +150,18 @@ These follow `docs/spec/models.md` and `docs/spec/agents.md`.
   stopped or failed run was in, as delivered, with cancelled error results for
   its unfinished tool calls. Python loses that step.
 - The `testing` feature adds a scripted provider for tests without a network.
+- `providers::hosts` adds Cerebras, DeepInfra, Fireworks, Together AI, Z.ai and
+  MiniMax, which Python lacks, with the request and response differences of
+  their TypeScript 7.0.148 packages. Chat Completions sends
+  `stream_options.include_usage` for OpenAI, OpenAI-compatible servers without a
+  host profile, Fireworks and Together AI only.
+- The OpenAI and Anthropic adapters share one HTTP layer. Both report a
+  transport failure with a fixed message that keeps the original error as its
+  source, and a broken response body as a connection error. Both read an error
+  body's message from `error.message`, a string `error` or `message`, and its
+  code, parameter and type from the `error` object first.
+- `OpenAICompatibleProvider::from_modelsdev_provider` selects Responses when the
+  metadata names `@ai-sdk/openai`, not when the id is `openai`.
 
 ## UI adapter
 
@@ -206,6 +219,7 @@ rules follow the source.
 | UI transport integration | `tests/ui_transport.rs`, `tests/ui_aggregator.rs` | Scripted `HttpTransport`, byte-split SSE, hydration, lazy conversion, error termination and typed reducer compatibility |
 | `docs/spec/models.md` (no Python source) | `tests/spec_models.rs` | MOD-001 to MOD-008: model ids, gateway removal, credential-free snapshots, retries, timeouts, drop cancellation, the scripted provider |
 | `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-006: step checks, unknown tools, tool concurrency, run usage, stop reasons, interrupted history |
+| `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-007: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
 not reproduce Python test counts. Python garbage-collector closure behavior,
@@ -228,7 +242,8 @@ Rust streaming tests because they cannot be stored in JSON fixtures.
 
 Implemented after the core cut: `providers::openai` (Responses and Chat Completions
 protocols, built-in tools, streaming, errors), `providers::anthropic` (messages,
-tools, reasoning, streaming, errors), `agents` (Agent, tools, hooks, aggregators,
+tools, reasoning, streaming, errors), `providers::hosts` (hosted providers on those
+two protocols), `agents` (Agent, tools, hooks, aggregators,
 runtime, middleware, buffering) and `ui::ai_sdk`. Each keeps the core contracts and
 the Python tests' semantics; see its module documentation and tests.
 

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{default_protocol, errors, protocol};
+use super::{OpenAIChatCompletionsProtocol, OpenAIResponsesProtocol, errors, protocol};
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
-    providers::{ModelsDevProvider, base::provider_config},
+    providers::{ModelsDevProvider, base::provider_config, http},
     transport::HttpTransport,
 };
 use async_trait::async_trait;
@@ -27,6 +27,8 @@ pub struct OpenAICompatibleProvider {
     name: String,
     config: ProviderConfig,
     transport: Arc<dyn HttpTransport>,
+    /// Chosen when the provider is built, from the API it targets.
+    default_protocol: Arc<dyn ProviderProtocol>,
     protocol_override: Option<Arc<dyn ProviderProtocol>>,
 }
 impl std::fmt::Debug for OpenAICompatibleProvider {
@@ -54,9 +56,13 @@ impl OpenAICompatibleProvider {
             name: "openai".into(),
             config,
             transport,
+            default_protocol: Arc::new(OpenAIResponsesProtocol),
             protocol_override: None,
         }
     }
+    /// Build a provider from models.dev metadata. It speaks Responses when
+    /// the metadata names OpenAI's own adapter package, `@ai-sdk/openai`, and
+    /// Chat Completions otherwise.
     pub fn from_modelsdev_provider(
         metadata: &ModelsDevProvider,
         mut config: ProviderConfig,
@@ -83,10 +89,17 @@ impl OpenAICompatibleProvider {
         if metadata.id == "openai" && !explicit_url && config.base_url_env.is_none() {
             config.base_url_env = Some("OPENAI_BASE_URL".into());
         }
+        let default_protocol: Arc<dyn ProviderProtocol> =
+            if metadata.npm.as_deref() == Some("@ai-sdk/openai") {
+                Arc::new(OpenAIResponsesProtocol)
+            } else {
+                Arc::new(OpenAIChatCompletionsProtocol)
+            };
         Ok(Self {
             name: metadata.id.clone(),
             config,
             transport,
+            default_protocol,
             protocol_override: None,
         })
     }
@@ -95,17 +108,16 @@ impl OpenAICompatibleProvider {
         self.protocol_override = Some(protocol);
         self
     }
-    async fn get(&self, suffix: &str, model: Option<&str>) -> Result<Value, Error> {
-        let request = protocol::http_request("GET", &self.config, suffix, None, None)?;
-        let response = self
-            .transport
-            .send(request.clone())
-            .await
-            .map_err(|e| errors::map_transport(e, &self.name))?;
-        let response = errors::check_status(response, &request, &self.name, model).await?;
-        let bytes = errors::read_body(response, &self.name).await?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| errors::response_error(&self.name, "invalid OpenAI model response"))
+    async fn get(&self, path: &[&str], model: Option<&str>) -> Result<Value, Error> {
+        let request = protocol::http_request(&errors::API, "GET", &self.config, path, None, None)?;
+        http::json(
+            &errors::API,
+            self.transport.as_ref(),
+            request,
+            &self.name,
+            model,
+        )
+        .await
     }
 }
 #[async_trait]
@@ -126,7 +138,7 @@ impl Provider for OpenAICompatibleProvider {
         Some(self.transport.clone())
     }
     fn default_protocol(&self) -> Option<Arc<dyn ProviderProtocol>> {
-        Some(default_protocol(&self.name))
+        Some(self.default_protocol.clone())
     }
     fn protocol_override(&self) -> Option<Arc<dyn ProviderProtocol>> {
         self.protocol_override.clone()
@@ -135,10 +147,11 @@ impl Provider for OpenAICompatibleProvider {
         self.api_key().is_some_and(|k| !k.is_empty()) && self.config.is_configured()
     }
     async fn list_models(&self) -> Result<Vec<String>, Error> {
-        let value = self.get("models", None).await?;
-        let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
-            errors::response_error(&self.name, "OpenAI model list is missing data")
-        })?;
+        let value = self.get(&["models"], None).await?;
+        let data = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| http::response_error(&self.name, "OpenAI model list is missing data"))?;
         let mut ids = data
             .iter()
             .map(|m| {
@@ -146,7 +159,7 @@ impl Provider for OpenAICompatibleProvider {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                     .ok_or_else(|| {
-                        errors::response_error(&self.name, "OpenAI model entry is missing id")
+                        http::response_error(&self.name, "OpenAI model entry is missing id")
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -162,14 +175,7 @@ impl Provider for OpenAICompatibleProvider {
             .with_provider(&self.name)
             .into());
         }
-        let mut url = url::Url::parse("https://placeholder.test/models/")
-            .map_err(|_| Error::Configuration("invalid model URL".into()))?;
-        url.path_segments_mut()
-            .map_err(|_| Error::Configuration("invalid model URL".into()))?
-            .pop_if_empty()
-            .push(&model.id);
-        self.get(url.path().trim_start_matches('/'), Some(&model.id))
-            .await?;
+        self.get(&["models", &model.id], Some(&model.id)).await?;
         Ok(())
     }
 }
@@ -210,10 +216,21 @@ pub fn register_factories(
             .filter(|p| !p.is_null())
             .map(|p| registry.restore_protocol(p.clone()))
             .transpose()?;
+        // The registered provider of this name decides the API, as it
+        // decides the endpoint.
+        let default_protocol = registry
+            .get_provider(&name)?
+            .default_protocol()
+            .ok_or_else(|| {
+                Error::Configuration(format!(
+                    "cannot restore provider {name:?}: the registered provider has no default protocol"
+                ))
+            })?;
         Ok(Arc::new(OpenAICompatibleProvider {
             name,
             config,
             transport: transport.clone(),
+            default_protocol,
             protocol_override,
         }))
     })

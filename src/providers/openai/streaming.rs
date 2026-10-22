@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::errors;
+use super::{profile::ChatProfile, protocol::Wire};
 use crate::{
-    providers::EventStream,
-    transport::{Body, sse},
+    providers::{
+        EventStream,
+        http::{self, ApiProfile, SseJson},
+    },
+    transport::Body,
     types::{events::*, messages::*, usage::Usage},
 };
 use futures::{StreamExt, stream};
@@ -91,12 +94,16 @@ struct Call {
     delta: bool,
 }
 struct Parser {
-    input: futures::stream::BoxStream<
-        'static,
-        Result<sse::SseEvent, crate::transport::TransportError>,
-    >,
+    input: futures::stream::BoxStream<'static, Result<SseJson, crate::Error>>,
     provider: String,
+    api: &'static ApiProfile,
     responses: bool,
+    /// The Chat Completions profile; `None` for Responses.
+    chat: Option<&'static ChatProfile>,
+    /// The request has an output schema.
+    json_output: bool,
+    /// Text arrived in this response.
+    has_text: bool,
     ended: bool,
     queue: VecDeque<Event>,
     texts: BTreeSet<String>,
@@ -117,15 +124,24 @@ struct Parser {
 pub(super) fn parse(
     body: Body,
     provider: String,
-    responses: bool,
+    wire: Wire,
     image_type: String,
+    json_output: bool,
 ) -> EventStream {
     let mut queue = VecDeque::new();
     queue.push_back(Event::StreamStart(StreamStart::default()));
+    let api = wire.api();
     let state = Parser {
-        input: sse::parse(body),
+        input: http::sse_json(*api, provider.clone(), body),
         provider,
-        responses,
+        api,
+        responses: matches!(wire, Wire::Responses),
+        chat: match wire {
+            Wire::Chat(profile) => Some(profile),
+            Wire::Responses => None,
+        },
+        json_output,
+        has_text: false,
         ended: false,
         queue,
         texts: BTreeSet::new(),
@@ -152,30 +168,15 @@ pub(super) fn parse(
                 return Ok(None);
             }
             match p.input.next().await {
-                Some(Ok(event)) => {
-                    if event.data.trim() == "[DONE]" {
-                        p.complete();
-                        continue;
-                    }
-                    let data: Value = serde_json::from_str(&event.data).map_err(|_| {
-                        errors::response_error(&p.provider, "invalid JSON in OpenAI event stream")
-                    })?;
-                    if !data.is_object() {
-                        return Err(errors::response_error(
-                            &p.provider,
-                            "OpenAI event must be an object",
-                        ));
-                    }
+                Some(Ok(SseJson::Done)) | None => p.complete(),
+                Some(Ok(SseJson::Object(data))) => {
                     if data.get("error").is_some_and(|e| !e.is_null())
                         || string(&data, "type") == "error"
                     {
-                        return Err(errors::response_error(
-                            &p.provider,
-                            data["error"]["message"]
-                                .as_str()
-                                .or_else(|| data["message"].as_str())
-                                .unwrap_or("OpenAI stream returned an error"),
-                        ));
+                        let message = http::error_message(&data)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("{} stream returned an error", p.api.label));
+                        return Err(http::response_error(&p.provider, message));
                     }
                     if p.responses {
                         p.response(&data);
@@ -183,8 +184,7 @@ pub(super) fn parse(
                         p.chat(&data);
                     }
                 }
-                Some(Err(e)) => return Err(errors::map_transport(e, &p.provider)),
-                None => p.complete(),
+                Some(Err(error)) => return Err(error),
             }
         }
     })
@@ -222,7 +222,14 @@ impl Parser {
         if !string(data, "model").is_empty() {
             self.response_model = Some(string(data, "model").into());
         }
-        if let Some(u) = usage(&data["usage"], false) {
+        if let Some(mut u) = usage(&data["usage"], false) {
+            // DeepInfra can count reasoning tokens apart from completion tokens.
+            if self.chat.is_some_and(|c| c.reasoning_outside_completion)
+                && let Some(reasoning) = u.reasoning_tokens
+                && reasoning > u.output_tokens
+            {
+                u.output_tokens = u.output_tokens.saturating_add(reasoning);
+            }
             self.usage = Some(u);
         }
         let Some(choice) = data["choices"].as_array().and_then(|c| c.first()) else {
@@ -248,6 +255,7 @@ impl Parser {
         }
         let text = string(delta, "content");
         if !text.is_empty() {
+            self.has_text = true;
             if self.reasoning.remove("reasoning") {
                 self.queue
                     .push_back(block("reasoning_end", "reasoning", None));
@@ -261,9 +269,20 @@ impl Parser {
                 chunk: text.into(),
             }));
         }
+        // Under an output schema, Cerebras can repeat its answer as a tool
+        // call after the text; the text is the answer.
+        let drop_new_calls = self.has_text
+            && self.json_output
+            && self
+                .chat
+                .is_some_and(|c| c.json_drops_tool_calls_after_text);
         if let Some(calls) = delta["tool_calls"].as_array() {
             for tc in calls {
                 let index = tc["index"].to_string();
+                if drop_new_calls && !self.calls.get(&index).is_some_and(|c| c.started) {
+                    self.calls.remove(&index);
+                    continue;
+                }
                 let state = self.calls.entry(index).or_default();
                 if !string(tc, "id").is_empty() {
                     state.id = string(tc, "id").into();
@@ -291,11 +310,13 @@ impl Parser {
             }
         }
         if let Some(raw) = choice["finish_reason"].as_str() {
-            let reason = match raw {
-                "stop" => "stop",
-                "length" => "length",
-                "content_filter" => "content_filter",
-                "tool_calls" | "function_call" => "tool_call",
+            let reason = match (raw, self.chat.and_then(|c| c.finish_reason(raw))) {
+                (_, Some(reason)) => reason,
+                ("tool_calls", _) if drop_new_calls => "stop",
+                ("stop", _) => "stop",
+                ("length", _) => "length",
+                ("content_filter", _) => "content_filter",
+                ("tool_calls" | "function_call", _) => "tool_call",
                 _ => "other",
             };
             self.finish = Some(reason.into());
