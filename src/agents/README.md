@@ -85,7 +85,9 @@ not retry; each model call retries a retryable error before its first event, as
 wrapper reset aggregation and run tracking.
 
 `RunOptions::step_checks` run after each step, in order. A check is async and
-receives `RunProgress`: the step count, the history and the total usage. It
+receives `RunProgress`: the step count, the history and the total usage,
+counted across every run of the loop, so a middleware that runs the loop again
+after an error keeps the budget. It
 answers `StepDecision::Continue`, `Steer(message)` to add a user message and call
 the model again (even after a final answer), or `Stop(reason)`. The first answer
 other than continue decides. `StepCheck::step_count(n)` and

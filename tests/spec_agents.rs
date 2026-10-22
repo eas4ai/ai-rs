@@ -317,6 +317,47 @@ async fn agt_001_a_rerun_of_the_loop_keeps_the_step_count_and_usage() {
 }
 
 #[tokio::test]
+async fn agt_001_checks_do_not_run_after_a_step_that_ends_on_a_deferred_hook() {
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [ScriptedResponse::tool_call("c1", "gated", json!({}))],
+    );
+    let checked = Arc::new(AtomicUsize::new(0));
+    // A check that ran would steer, and the run could not end deferred.
+    let steer = {
+        let checked = checked.clone();
+        StepCheck::new(move |_| {
+            checked.fetch_add(1, Ordering::SeqCst);
+            async { Ok(StepDecision::Steer(user_message("keep going"))) }
+        })
+    };
+    let gated = noop("gated").require_approval(true);
+    let mut run = Agent::new(vec![gated]).run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        options(vec![steer]),
+    );
+    while let Some(event) = run.next().await {
+        if let Event::Hook(hook) = event.unwrap()
+            && hook.hook.status == HookStatus::Pending
+        {
+            run.hook_registry()
+                .defer_hook(&hook.hook.hook_id, hook.hook.clone())
+                .unwrap();
+        }
+    }
+    assert_eq!(checked.load(Ordering::SeqCst), 0);
+    assert_eq!(run.stop_reason(), Some(StopReason::Deferred));
+    let history = run.messages();
+    let last = history.last().unwrap();
+    assert!(
+        last.tool_results().iter().all(|r| r.is_hook_deferred),
+        "{last:?}"
+    );
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn agt_001_steering_with_another_role_ends_the_run_with_a_validation_error() {
     let provider = ScriptedProvider::new("scripted", [ScriptedResponse::text("draft")]);
     let check =
