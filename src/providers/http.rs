@@ -45,6 +45,9 @@ pub(crate) struct ApiProfile {
     /// Read an error body's message, code, parameter and type from its top
     /// level before its `error` object, as the Python Anthropic SDK does.
     pub top_level_first: bool,
+    /// An error body `{"code": <text>, "error": <text>}` has the message
+    /// `<code>: <error>`, as xAI's does.
+    pub code_prefixes_error: bool,
 }
 
 /// Where a request carries the API key.
@@ -273,8 +276,15 @@ pub(crate) fn status_error(
 ) -> Error {
     let body = serde_json::from_slice::<Value>(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).into_owned()));
-    let message = error_message(api, &body)
-        .map(str::to_owned)
+    let prefixed = api
+        .code_prefixes_error
+        .then(|| (body["code"].as_str(), body["error"].as_str()))
+        .and_then(|pair| match pair {
+            (Some(code), Some(text)) => Some(format!("{code}: {text}")),
+            _ => None,
+        });
+    let message = prefixed
+        .or_else(|| error_message(api, &body).map(str::to_owned))
         .unwrap_or_else(|| format!("{} request failed with HTTP {status}", api.label));
     let mut error = ProviderError::new(ProviderErrorKind::from_status(status), message)
         .with_provider(provider)

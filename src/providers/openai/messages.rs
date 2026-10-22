@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{dialect, params::invalid, profile::Dialect, protocol::Wire};
+use super::{
+    dialect,
+    params::invalid,
+    profile::{Dialect, ResponsesDialect},
+    protocol::Wire,
+};
 use crate::{
     Error,
     types::{
@@ -34,16 +39,21 @@ fn media_ref(data: &FileData) -> MediaDataRef<'_> {
 fn dialect_of(wire: Wire) -> Dialect {
     match wire {
         Wire::Chat(profile) => profile.dialect,
-        Wire::Responses => Dialect::OpenAI,
+        Wire::Responses(_) => Dialect::OpenAI,
     }
 }
 fn file(part: &FilePart, wire: Wire) -> Result<Value, Error> {
-    let responses = matches!(wire, Wire::Responses);
+    let responses = matches!(wire, Wire::Responses(_));
     let mt = if part.media_type == "image/*" {
         "image/jpeg"
     } else {
         &part.media_type
     };
+    match wire.responses_dialect() {
+        Some(ResponsesDialect::Xai) => return xai_file(part, mt),
+        Some(ResponsesDialect::HuggingFace) => return huggingface_file(part, mt),
+        _ => {}
+    }
     match dialect_of(wire) {
         Dialect::OpenAI => {}
         Dialect::DeepSeek => return deepseek_file(part, mt),
@@ -178,6 +188,29 @@ fn moonshot_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
     let url = media::data_to_data_url(media_ref(&part.data), mt);
     Ok(json!({"type":kind,kind:{"url":url}}))
 }
+/// xAI takes images, and other files only as URLs
+/// (`convert-to-xai-responses-input.ts`).
+fn xai_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
+    if mt.starts_with("image/") {
+        let url = media::data_to_data_url(media_ref(&part.data), mt);
+        return Ok(json!({"type":"input_image","image_url":url}));
+    }
+    match fetch_url(part) {
+        Some(url) => Ok(json!({"type":"input_file","file_url":url})),
+        None => Err(invalid(format!(
+            "xAI takes {mt} files only as URLs; supply the file as an http or https URL"
+        ))),
+    }
+}
+/// Hugging Face takes images only
+/// (`convert-to-huggingface-responses-messages.ts`).
+fn huggingface_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
+    if !mt.starts_with("image/") {
+        return Err(invalid(format!("Hugging Face does not take {mt} files")));
+    }
+    let url = media::data_to_data_url(media_ref(&part.data), mt);
+    Ok(json!({"type":"input_image","image_url":url}))
+}
 /// Mistral takes images and PDFs (`convert-to-mistral-chat-messages.ts`).
 fn mistral_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
     let url = media::data_to_data_url(media_ref(&part.data), mt);
@@ -195,7 +228,9 @@ fn mistral_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
     Err(invalid(format!("Mistral does not take {mt} files")))
 }
 fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
-    let responses = matches!(wire, Wire::Responses);
+    let responses = matches!(wire, Wire::Responses(_));
+    // Only OpenAI's Responses API takes files other than images in a result.
+    let result_files = wire.responses_dialect() == Some(ResponsesDialect::OpenAI);
     match value {
         ToolResultValue::Json(Value::Null) => Ok(json!("")),
         ToolResultValue::Json(Value::String(s)) => Ok(json!(s)),
@@ -227,14 +262,14 @@ fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
                             } else {
                                 json!({"type":"image_url","image_url":{"url":url}})
                             }
-                        } else if responses {
+                        } else if result_files {
                             let mut value = json!({"type":"input_file","file_data":url});
                             if let Some(name) = &f.filename {
                                 value["filename"] = json!(name);
                             }
                             value
                         } else {
-                            json!({"type":"text","text":format!("[file: {}]",f.media_type)})
+                            json!({"type":if responses {"input_text"} else {"text"},"text":format!("[file: {}]",f.media_type)})
                         }
                     }
                 });
@@ -325,7 +360,8 @@ fn flush_pending(output: &mut Vec<Message>, pending: &mut Vec<ToolCallPart>) {
         ));
     }
 }
-fn metadata(part: &Part) -> Option<&Value> {
+/// A part's metadata under the host's key, such as `openai` or `xai`.
+fn metadata<'a>(part: &'a Part, key: &str) -> Option<&'a Value> {
     (match part {
         Part::Text(p) => p.provider_metadata.as_ref(),
         Part::Reasoning(p) => p.provider_metadata.as_ref(),
@@ -336,7 +372,80 @@ fn metadata(part: &Part) -> Option<&Value> {
         Part::ToolResult(p) => p.provider_metadata.as_ref(),
         _ => None,
     })
-    .and_then(|m| m.get("openai"))
+    .and_then(|m| m.get(key))
+}
+/// A part's item id and encrypted reasoning, from its metadata.
+fn item_id(md: Option<&Value>) -> Option<&str> {
+    md.and_then(|m| m.get("item_id").or_else(|| m.get("itemId")))
+        .and_then(Value::as_str)
+}
+fn encrypted_reasoning(md: Option<&Value>) -> Option<&Value> {
+    md.and_then(|m| {
+        m.get("reasoning_encrypted_content")
+            .or_else(|| m.get("reasoningEncryptedContent"))
+    })
+    .filter(|value| !value.is_null())
+}
+/// An xAI assistant turn: an item for each text part, tool call and
+/// reasoning part that has an item id or encrypted content, with the xAI
+/// item ids and no references to stored items
+/// (`convert-to-xai-responses-input.ts`).
+fn xai_assistant(msg: &Message, key: &str, out: &mut Vec<Value>) {
+    for part in &msg.parts {
+        let md = metadata(part, key);
+        let id = item_id(md);
+        match part {
+            Part::Text(t) if !t.text.is_empty() => {
+                let mut item = json!({"role":"assistant","content":t.text});
+                if let Some(id) = id {
+                    item["id"] = json!(id);
+                }
+                out.push(item);
+            }
+            Part::ToolCall(c) => out.push(json!({
+                "type":"function_call",
+                "id":id.unwrap_or(&c.tool_call_id),
+                "call_id":c.tool_call_id,
+                "name":c.tool_name,
+                "arguments":c.tool_args,
+                "status":"completed",
+            })),
+            Part::Reasoning(r) => {
+                let encrypted = encrypted_reasoning(md);
+                if id.is_none() && encrypted.is_none() {
+                    continue;
+                }
+                let summary = if r.text.is_empty() {
+                    json!([])
+                } else {
+                    json!([{"type":"summary_text","text":r.text}])
+                };
+                let mut item = json!({"type":"reasoning","id":id.unwrap_or(""),"summary":summary,"status":"completed"});
+                if let Some(encrypted) = encrypted {
+                    item["encrypted_content"] = encrypted.clone();
+                }
+                out.push(item);
+            }
+            _ => {}
+        }
+    }
+}
+/// A Hugging Face assistant turn: each text and reasoning part as an
+/// assistant message of output text, and tool calls as `function_call`
+/// items (`convert-to-huggingface-responses-messages.ts`, which drops the
+/// tool calls; HST-024 keeps them).
+fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
+    for part in &msg.parts {
+        match part {
+            Part::Text(TextPart { text, .. }) | Part::Reasoning(ReasoningPart { text, .. })
+                if !text.is_empty() =>
+            {
+                out.push(json!({"role":"assistant","content":[{"type":"output_text","text":text}]}));
+            }
+            Part::ToolCall(c) => out.push(json!({"type":"function_call","call_id":c.tool_call_id,"name":c.tool_name,"arguments":c.tool_args})),
+            _ => {}
+        }
+    }
 }
 fn flush_content(out: &mut Vec<Value>, content: &mut Vec<Value>) {
     if !content.is_empty() {
@@ -349,10 +458,10 @@ pub(super) fn convert(
     model: &str,
     references: bool,
 ) -> Result<Vec<Value>, Error> {
-    let responses = matches!(wire, Wire::Responses);
+    let responses = matches!(wire, Wire::Responses(_));
     let reasoning_field = match wire {
         Wire::Chat(profile) => profile.reasoning_field,
-        Wire::Responses => "reasoning",
+        Wire::Responses(_) => "reasoning",
     };
     let dialect = dialect_of(wire);
     let messages = repair(messages)?;
@@ -430,10 +539,20 @@ pub(super) fn convert(
                 }
                 out.push(entry);
             }
+            MessageRole::Assistant if wire.responses_dialect() == Some(ResponsesDialect::Xai) => {
+                if let Wire::Responses(profile) = wire {
+                    xai_assistant(&msg, profile.metadata_key, &mut out);
+                }
+            }
+            MessageRole::Assistant
+                if wire.responses_dialect() == Some(ResponsesDialect::HuggingFace) =>
+            {
+                huggingface_assistant(&msg, &mut out);
+            }
             MessageRole::Assistant => {
                 let mut content = vec![];
                 for p in &msg.parts {
-                    let md = metadata(p);
+                    let md = metadata(p, "openai");
                     let id = md
                         .and_then(|m| m.get("item_id").or_else(|| m.get("itemId")))
                         .and_then(Value::as_str);

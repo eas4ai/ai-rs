@@ -36,6 +36,7 @@ static PROFILE: ChatProfile = ChatProfile {
         collapse_server_errors: false,
         keep_error_object: false,
         top_level_first: false,
+        code_prefixes_error: false,
     },
     include_usage: false,
     max_tokens_field: "max_tokens",

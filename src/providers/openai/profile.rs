@@ -66,6 +66,16 @@ pub(crate) enum Setting {
     CacheRetention,
     ParallelToolCalls,
     ToolSelection,
+    TopK,
+    MinP,
+    Seed,
+    FrequencyPenalty,
+    PresencePenalty,
+    ReasoningSummary,
+    TextVerbosity,
+    OutputInclude,
+    MaxToolCalls,
+    ContextManagement,
 }
 
 /// A server whose messages, schemas or stream content differ from OpenAI's
@@ -109,6 +119,45 @@ impl ChatProfile {
             .map(|(_, to)| *to)
     }
 }
+
+/// How a server's Responses API differs from OpenAI's. The host profiles
+/// follow the AI SDK for TypeScript 7.0.148 host packages.
+#[derive(Debug)]
+pub(crate) struct ResponsesProfile {
+    /// The protocol's class id in snapshots.
+    pub protocol_class_id: &'static str,
+    pub api: ApiProfile,
+    /// The key of the part metadata that carries the server's item ids and
+    /// encrypted reasoning.
+    pub metadata_key: &'static str,
+    /// The key of the provider parameters that hold `store`, if the server
+    /// reads them.
+    pub params_key: Option<&'static str>,
+    /// Request settings the server's TypeScript provider never sends; a call
+    /// that sets one fails with `Error::Validation`.
+    pub unsupported: &'static [Setting],
+    /// How the server writes requests and history.
+    pub dialect: ResponsesDialect,
+}
+
+/// A Responses server whose requests or history differ from OpenAI's. Each
+/// one's rules are in `dialect.rs` and `messages.rs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResponsesDialect {
+    OpenAI,
+    Xai,
+    HuggingFace,
+}
+
+/// OpenAI's Responses API.
+pub(crate) static OPENAI_RESPONSES: ResponsesProfile = ResponsesProfile {
+    protocol_class_id: "openai_responses",
+    api: errors::API,
+    metadata_key: "openai",
+    params_key: Some("openai"),
+    unsupported: &[],
+    dialect: ResponsesDialect::OpenAI,
+};
 
 /// OpenAI's Chat Completions, also used by OpenAI-compatible servers without
 /// a host profile.

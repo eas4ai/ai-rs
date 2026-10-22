@@ -52,7 +52,7 @@ fn reject<T>(label: &str, value: &ProviderValue<Option<T>>, name: &str) -> Resul
     Ok(())
 }
 pub(super) fn tool_choice(choice: &ToolChoice, wire: Wire) -> Result<Value, Error> {
-    let responses = matches!(wire, Wire::Responses);
+    let responses = matches!(wire, Wire::Responses(_));
     let named = |name: String| {
         if responses {
             json!({"type":"function","name":name})
@@ -82,13 +82,15 @@ pub(super) fn tool_choice(choice: &ToolChoice, wire: Wire) -> Result<Value, Erro
     })
 }
 pub(super) fn build(p: &InferenceRequestParams, wire: Wire) -> Result<Map<String, Value>, Error> {
-    let responses = matches!(wire, Wire::Responses);
+    let responses = matches!(wire, Wire::Responses(_));
     let chat = match wire {
         Wire::Chat(profile) => Some(profile),
-        Wire::Responses => None,
+        Wire::Responses(_) => None,
     };
     let label = wire.api().label;
     let rejects_penalties_and_seed = chat.is_some_and(|c| c.rejects_penalties_and_seed);
+    // xAI's Responses API takes top-k, min-p and seeds.
+    let sampling_extras = wire.responses_dialect() == Some(super::profile::ResponsesDialect::Xai);
     let mut out = Map::new();
     if let ProviderValue::Value(s) = &p.sampling {
         if let Some(t) = &s.temperature {
@@ -98,17 +100,25 @@ pub(super) fn build(p: &InferenceRequestParams, wire: Wire) -> Result<Map<String
             put(&mut out, "top_p", &t.top_p)?;
         }
         if let Some(t) = &s.top_k {
-            reject(label, &t.top_k, "top_k")?;
+            if sampling_extras {
+                put(&mut out, "top_k", &t.top_k)?;
+            } else {
+                reject(label, &t.top_k, "top_k")?;
+            }
         }
         if let Some(t) = &s.min_p {
-            reject(label, &t.min_p, "min_p")?;
+            if sampling_extras {
+                put(&mut out, "min_p", &t.min_p)?;
+            } else {
+                reject(label, &t.min_p, "min_p")?;
+            }
         }
         if let Some(t) = &s.seed
             && let ProviderValue::Value(Some(Seed::Value(seed))) = &t.seed
             && *seed != -1
         {
-            if responses {
-                return Err(invalid("OpenAI responses does not support seed"));
+            if responses && !sampling_extras {
+                return Err(invalid(format!("{label} responses does not support seed")));
             }
             if rejects_penalties_and_seed {
                 return Err(invalid(format!("{label} does not support seed")));
@@ -208,14 +218,20 @@ pub(super) fn build(p: &InferenceRequestParams, wire: Wire) -> Result<Map<String
     if let Some(m) = &p.metadata {
         out.insert("metadata".into(), json!(m));
     }
-    if let Some(provider) = p
-        .provider_params
-        .as_ref()
-        .filter(|_| chat.is_none_or(|c| c.openai_params))
-        .and_then(|p| p.get(OpenAIParams::KEY))
+    // The provider parameters that hold `store`: `openai` for OpenAI, and a
+    // host's own key, such as `xai`, for a host that reads them.
+    let params_key = match wire {
+        Wire::Chat(profile) => profile.openai_params.then_some(OpenAIParams::KEY),
+        Wire::Responses(profile) => profile.params_key,
+    };
+    if let Some(key) = params_key
+        && let Some(provider) = p.provider_params.as_ref().and_then(|p| p.get(key))
     {
-        let options: OpenAIParams = serde_json::from_value(provider.clone())
-            .map_err(|_| invalid("openai provider_params must be an OpenAIParams object"))?;
+        let options: OpenAIParams = serde_json::from_value(provider.clone()).map_err(|_| {
+            invalid(format!(
+                "{key} provider_params must be an OpenAIParams object"
+            ))
+        })?;
         if let Some(store) = options.store {
             out.insert("store".into(), json!(store));
         }

@@ -95,8 +95,8 @@ and an endpoint change applies to snapshots saved before it. A snapshot of anoth
 provider class is refused.
 
 `providers::hosts` has Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral,
-Moonshot AI, Together AI and Z.ai on Chat Completions and MiniMax on the
-Anthropic Messages protocol. Register one with its module's `register`, for
+Moonshot AI, Together AI and Z.ai on Chat Completions, xAI and Hugging Face on
+the Responses API, and MiniMax on the Anthropic Messages protocol. Register one with its module's `register`, for
 example `hosts::cerebras::register(&mut registry, config, transport)`, under its
 name (`cerebras`) and package handle (`@ai-sdk/cerebras`). Each host follows its
 package in the AI SDK for TypeScript 7.0.148. Options that package drops with a
@@ -106,6 +106,9 @@ reject the request settings their packages never send, such as a service tier.
 An output schema goes to a host without JSON schema support as JSON mode, which
 does not enforce the schema. Moonshot AI does not fetch media URLs: register it
 with `hosts::moonshotai::register_with_downloads` to send image and video URLs.
+xAI is ported for text: its built-in tools fail with
+`Error::UnsupportedOperation`, and its `store` setting is the provider
+parameter `xai` (`{"store": false}`).
 Hosts do not support `list_models` or `probe`.
 
 Enable the `testing` feature for `testing::ScriptedProvider`. It answers each call

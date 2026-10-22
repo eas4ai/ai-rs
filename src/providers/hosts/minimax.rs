@@ -38,6 +38,7 @@ static PROFILE: MessagesProfile = MessagesProfile {
         collapse_server_errors: false,
         keep_error_object: false,
         top_level_first: true,
+        code_prefixes_error: false,
     },
     always_reasons: names_version_3_1_or_later,
 };

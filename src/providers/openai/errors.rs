@@ -24,6 +24,7 @@ pub(crate) const API: http::ApiProfile = http::ApiProfile {
     collapse_server_errors: true,
     keep_error_object: true,
     top_level_first: false,
+    code_prefixes_error: false,
 };
 
 /// Map a transport failure to a provider error that keeps it as the source.
