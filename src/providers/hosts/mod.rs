@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! Hosted providers that speak a protocol the crate implements: Cerebras,
-//! DeepInfra, Fireworks, Together AI and Z.ai over OpenAI Chat Completions,
-//! and MiniMax over the Anthropic Messages protocol.
+//! DeepInfra, DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI and Z.ai
+//! over OpenAI Chat Completions, and MiniMax over the Anthropic Messages
+//! protocol.
 //!
 //! Each host is the protocol's adapter with a host profile: its endpoint, its
 //! key and the request and response differences the AI SDK for TypeScript
@@ -51,6 +52,7 @@ use crate::{
         anthropic::protocol::{HostMessagesProtocol, MessagesProfile},
         openai::{profile::ChatProfile, protocol::HostChatProtocol},
     },
+    models::files::DownloadTransport,
     transport::HttpTransport,
 };
 use async_trait::async_trait;
@@ -58,19 +60,25 @@ use std::{fmt, sync::Arc};
 
 pub mod cerebras;
 pub mod deepinfra;
+pub mod deepseek;
 pub mod fireworks;
 pub mod minimax;
+pub mod mistral;
+pub mod moonshotai;
 pub mod togetherai;
 pub mod zai;
 
 /// Every host, for lookups by package or name.
-static HOSTS: [&Host; 6] = [
+static HOSTS: [&Host; 9] = [
     &cerebras::HOST,
     &deepinfra::HOST,
     &fireworks::HOST,
     &togetherai::HOST,
     &zai::HOST,
     &minimax::HOST,
+    &deepseek::HOST,
+    &moonshotai::HOST,
+    &mistral::HOST,
 ];
 
 /// The Chat Completions profile of the host that models.dev metadata names,
@@ -103,9 +111,9 @@ pub(crate) enum HostProtocol {
     Messages(&'static MessagesProfile),
 }
 impl HostProtocol {
-    fn protocol(&self) -> Arc<dyn ProviderProtocol> {
+    fn protocol(&self, downloads: Option<Arc<dyn DownloadTransport>>) -> Arc<dyn ProviderProtocol> {
         match self {
-            Self::Chat(profile) => Arc::new(HostChatProtocol(profile)),
+            Self::Chat(profile) => Arc::new(HostChatProtocol(profile, downloads)),
             Self::Messages(profile) => Arc::new(HostMessagesProtocol(profile)),
         }
     }
@@ -124,6 +132,7 @@ pub struct HostProvider {
     host: &'static Host,
     config: ProviderConfig,
     transport: Arc<dyn HttpTransport>,
+    downloads: Option<Arc<dyn DownloadTransport>>,
 }
 impl fmt::Debug for HostProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -151,7 +160,20 @@ impl HostProvider {
             host,
             config,
             transport,
+            downloads: None,
         }
+    }
+    /// Download the media URLs that a Chat Completions host cannot fetch
+    /// before each request: images and videos for Moonshot AI, audio and PDFs
+    /// for the hosts that take them as OpenAI does. Without one, such a URL
+    /// fails with `Error::Validation`. Download transports must honor the
+    /// core DNS-pinning contract. A snapshot does not keep the transport; a
+    /// restore through a registry made with `register_with_downloads` gets it
+    /// back.
+    #[must_use]
+    pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
+        self.downloads = Some(downloads);
+        self
     }
 }
 #[async_trait]
@@ -166,7 +188,7 @@ impl Provider for HostProvider {
         self.host.name
     }
     fn default_protocol(&self) -> Option<Arc<dyn ProviderProtocol>> {
-        Some(self.host.protocol.protocol())
+        Some(self.host.protocol.protocol(self.downloads.clone()))
     }
     fn transport(&self) -> Option<&dyn HttpTransport> {
         Some(self.transport.as_ref())
@@ -187,9 +209,17 @@ fn register(
     registry: &mut ProviderRegistry,
     config: ProviderConfig,
     transport: Arc<dyn HttpTransport>,
+    downloads: Option<Arc<dyn DownloadTransport>>,
 ) -> Result<(), Error> {
     let mut next = registry.clone();
-    let provider = Arc::new(HostProvider::new(host, config, transport.clone()));
+    let build = move |config| {
+        let provider = HostProvider::new(host, config, transport.clone());
+        match &downloads {
+            Some(downloads) => provider.with_download_transport(downloads.clone()),
+            None => provider,
+        }
+    };
+    let provider = Arc::new(build(config));
     for handle in [host.name, host.handle] {
         next.register(handle, provider.clone())?;
     }
@@ -197,10 +227,10 @@ fn register(
     // provider; the snapshot keeps only the rest of the configuration.
     next.register_provider_factory(host.name, move |value, _| {
         let config = serde_json::from_value(value)?;
-        Ok(Arc::new(HostProvider::new(host, config, transport.clone())))
+        Ok(Arc::new(build(config)))
     })?;
     next.register_protocol_factory(host.protocol.class_id(), move |_| {
-        Ok(host.protocol.protocol())
+        Ok(host.protocol.protocol(None))
     })?;
     *registry = next;
     Ok(())

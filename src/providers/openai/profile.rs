@@ -47,6 +47,35 @@ pub(crate) struct ChatProfile {
     pub reasoning_outside_completion: bool,
     /// Under an output schema, drop tool calls that follow text.
     pub json_drops_tool_calls_after_text: bool,
+    /// Request settings the server's TypeScript provider never sends; a call
+    /// that sets one fails with `Error::Validation`.
+    pub unsupported: &'static [Setting],
+    /// How the server writes messages, schemas and stream content.
+    pub dialect: Dialect,
+    /// Give errors inside the stream a kind from their code and type.
+    pub stream_error_kinds: bool,
+}
+
+/// A request setting that a host profile can mark unsupported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Setting {
+    ServiceTier,
+    SafetyIdentifier,
+    Metadata,
+    CacheKey,
+    CacheRetention,
+    ParallelToolCalls,
+    ToolSelection,
+}
+
+/// A server whose messages, schemas or stream content differ from OpenAI's
+/// in more than field names. Each one's rules are in `dialect.rs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dialect {
+    OpenAI,
+    DeepSeek,
+    Moonshot,
+    Mistral,
 }
 
 #[derive(Debug)]
@@ -97,4 +126,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     finish_reasons: &[],
     reasoning_outside_completion: false,
     json_drops_tool_calls_after_text: false,
+    unsupported: &[],
+    dialect: Dialect::OpenAI,
+    stream_error_kinds: false,
 };
