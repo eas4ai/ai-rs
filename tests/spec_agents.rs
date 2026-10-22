@@ -282,7 +282,9 @@ async fn agt_001_a_rerun_of_the_loop_keeps_the_step_count_and_usage() {
             ScriptedResponse::text("unused"),
         ],
     );
-    let seen: Arc<Mutex<Vec<(usize, Option<u64>)>>> = Arc::default();
+    // Each entry: steps and input usage tokens.
+    type Seen = Vec<(usize, Option<u64>)>;
+    let seen: Arc<Mutex<Seen>> = Arc::default();
     let record = {
         let seen = seen.clone();
         StepCheck::new(move |progress: RunProgress| {
