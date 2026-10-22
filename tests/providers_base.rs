@@ -298,6 +298,68 @@ fn factories_reject_duplicate_ids_and_missing_or_unknown_discriminators() {
 }
 
 #[test]
+fn restore_refuses_snapshots_that_would_send_credentials_elsewhere() {
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register(
+            "empty",
+            Arc::new(EmptyProvider {
+                config: ProviderConfig {
+                    default_base_url: "https://api.example".into(),
+                    api_key_value: Some("sk-live".into()),
+                    ..Default::default()
+                },
+            }),
+        )
+        .unwrap();
+    for class in ["empty", "other"] {
+        registry
+            .register_provider_factory(class, |value, _| {
+                Ok(Arc::new(EmptyProvider {
+                    config: serde_json::from_value(value)?,
+                }))
+            })
+            .unwrap();
+    }
+    let restored = registry
+        .restore_provider(serde_json::json!({
+            "provider_class_id": "empty",
+            "name": "empty",
+            "default_base_url": "https://api.example"
+        }))
+        .unwrap();
+    assert_eq!(restored.api_key(), Some("sk-live"));
+    for (snapshot, field) in [
+        (
+            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://attacker.example"}),
+            "default_base_url",
+        ),
+        (
+            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","base_url_env":"OTHER_URL"}),
+            "base_url_env",
+        ),
+        (
+            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","api_key_env":"OTHER_KEY"}),
+            "api_key_env",
+        ),
+        (
+            serde_json::json!({"provider_class_id":"empty","name":"empty","default_base_url":"https://api.example","config_envs":["HOST"]}),
+            "config_envs",
+        ),
+        (
+            serde_json::json!({"provider_class_id":"other","name":"empty","default_base_url":"https://api.example"}),
+            "class",
+        ),
+    ] {
+        match registry.restore_provider(snapshot) {
+            Err(Error::Configuration(message)) => assert!(message.contains(field), "{message}"),
+            Err(other) => panic!("{field}: expected a configuration error, got {other:?}"),
+            Ok(_) => panic!("{field}: a mismatched snapshot was restored with the live key"),
+        }
+    }
+}
+
+#[test]
 fn operation_payload_defaults_match_python() {
     let warning: Warning = serde_json::from_value(serde_json::json!({})).unwrap();
     assert_eq!(warning.kind, "other");
