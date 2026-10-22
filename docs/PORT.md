@@ -137,6 +137,9 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.m
   defaults: 2 retries, waits of 2 s and 4 s, and `retry-after-ms` or
   `retry-after` waits under 60 s. Optional idle and total timeouts end a call
   with a `Timeout` provider error. Python has neither.
+- `ReqwestTransport::new()` limits only opening a connection, to 10 s, with TCP
+  keepalive, and sets no limit on a response, so a thinking model's long
+  stream is not cut off.
 - The agent loop runs async step checks after each step, which continue, steer
   with a user message or stop with a reason. Python has no step limit or checks;
   the TypeScript tool loop stops at 20 steps by default, while this default has
@@ -230,7 +233,7 @@ rules follow the source.
 | `tests/ui/ai_sdk/test_outbound_stream.py` | `tests/ui_outbound_stream.rs` | Stream boundaries, retries, tools, typed partial results, hooks, files and SSE encoding |
 | Captured Python UI outputs | `tests/ui_python_compat.rs`, `tests/fixtures/ui-python-0.8.0.json` | Requests, histories, event streams and exact JSON encoding from the unmodified Python tests |
 | UI transport integration | `tests/ui_transport.rs`, `tests/ui_aggregator.rs` | Scripted `HttpTransport`, byte-split SSE, hydration, lazy conversion, error termination and typed reducer compatibility |
-| `docs/spec/models.md` (no Python source) | `tests/spec_models.rs` | MOD-001 to MOD-008: model ids, gateway removal, credential-free snapshots, retries, timeouts, drop cancellation, the scripted provider |
+| `docs/spec/models.md` (no Python source) | `tests/spec_models.rs` | MOD-001 to MOD-009: model ids, gateway removal, credential-free snapshots, retries, timeouts, drop cancellation, the scripted provider, the reqwest transport's time limits |
 | `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-006: step checks, unknown tools, tool concurrency, run usage, stop reasons, interrupted history |
 | `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-018: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort, the DeepSeek, Moonshot AI and Mistral dialects, tool calls without an index, stream error kinds |
 

@@ -73,7 +73,12 @@ its first event. By default it retries twice, waiting 2 s and then 4 s, or the
 provider's `retry-after` wait when that is under 60 s. Set `StreamOptions::retry`
 to change this, or use `RetryPolicy::none()` to turn it off.
 `StreamOptions::timeout` bounds the whole call and `StreamOptions::idle_timeout`
-bounds the silence before each event; both are unset by default. Retries and
+bounds the silence before each event; both are unset by default.
+`ReqwestTransport::new()` limits only opening a connection, to 10 s, and uses TCP
+keepalive to end a connection whose peer is gone. It sets no limit on a response,
+because a model can think for minutes before or while it streams, so a provider
+that keeps the connection open and stops answering is bounded only by these two
+options. Retries and
 timeouts use the Tokio timer, so run calls in a Tokio runtime with its time
 driver enabled (`enable_time` or `enable_all`, which `#[tokio::main]` sets).
 Without a runtime, a retryable error is returned without a retry and a call with a
