@@ -45,7 +45,7 @@ static PROFILE: ChatProfile = ChatProfile {
         keep_error_object: false,
         top_level_first: false,
     },
-    include_usage: true,
+    include_usage: false,
     max_tokens_field: "max_tokens",
     reasoning_field: "reasoning_content",
     effort_aliases: &[
@@ -63,6 +63,7 @@ static PROFILE: ChatProfile = ChatProfile {
     reasoning_outside_completion: false,
     json_drops_tool_calls_after_text: false,
     unsupported: &[
+        Setting::ServiceTier,
         Setting::SafetyIdentifier,
         Setting::Metadata,
         Setting::CacheRetention,

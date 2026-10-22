@@ -394,7 +394,7 @@ pub(super) fn convert(
                 match dialect {
                     // V4 needs the field on every assistant turn; earlier
                     // models get no reasoning from before the last user turn.
-                    Dialect::DeepSeek if !dialect::deepseek_legacy(model) && !reasoning.is_empty() => {
+                    Dialect::DeepSeek if !dialect::deepseek_legacy(model) => {
                         entry[reasoning_field] = json!(reasoning);
                     }
                     Dialect::DeepSeek if last_user.is_some_and(|user| index < user) => {}
@@ -406,7 +406,9 @@ pub(super) fn convert(
                         } else {
                             mistral_content(&msg)
                         };
-
+                        if index == last {
+                            entry["prefix"] = json!(true);
+                        }
                     }
                     _ if !reasoning.is_empty() => {
                         entry[reasoning_field] = json!(reasoning);
@@ -421,7 +423,9 @@ pub(super) fn convert(
                 }
                 }
                 if !calls.is_empty() {
-
+                    if dialect == Dialect::Moonshot && text.is_empty() {
+                        entry["content"] = Value::Null;
+                    }
                     entry["tool_calls"] = calls.into();
                 }
                 out.push(entry);
