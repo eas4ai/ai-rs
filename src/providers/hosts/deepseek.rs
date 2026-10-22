@@ -72,7 +72,7 @@ static PROFILE: ChatProfile = ChatProfile {
 pub(super) static HOST: Host = Host {
     name: "deepseek",
     handle: "@ai-sdk/deepseek",
-    default_base_url: "https://api.deepseek.com",
+    default_base_url: "https://api.deepseek.com/v1",
     api_key_env: "DEEPSEEK_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
 };

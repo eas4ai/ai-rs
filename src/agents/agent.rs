@@ -302,7 +302,9 @@ impl LoopStep {
         let parts = calls
             .iter()
             .map(|call| {
-                None::<&ToolResultPart>
+                self.results
+                    .iter()
+                    .find(|result| result.tool_call_id == call.tool_call_id)
                     .or(call.cached_result.as_ref())
                     .cloned()
                     .unwrap_or_else(|| {

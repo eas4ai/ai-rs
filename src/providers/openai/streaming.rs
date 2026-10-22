@@ -276,9 +276,7 @@ impl Parser {
                 Dialect::OpenAI => None,
                 Dialect::DeepSeek => value["prompt_cache_hit_tokens"].as_u64(),
                 Dialect::Moonshot => value["cached_tokens"].as_u64(),
-                Dialect::Mistral => value["num_cached_tokens"]
-                    .as_u64()
-                    .or_else(|| value["prompt_token_details"]["cached_tokens"].as_u64()),
+                Dialect::Mistral => None,
             };
             if cached.is_some() {
                 u.cache_read_tokens = cached;
@@ -343,7 +341,7 @@ impl Parser {
                 // them, is keyed by its place in the chunk; a new id under a
                 // key is a new call.
                 let key = match tc.get("index") {
-                    None | Some(Value::Null) => format!("position {position}"),
+                    None | Some(Value::Null) => "no index".to_owned(),
                     Some(index) => match index.as_u64() {
                         Some(index) => format!("index {index}"),
                         None => {

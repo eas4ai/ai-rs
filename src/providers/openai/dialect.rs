@@ -79,9 +79,7 @@ pub(super) fn request(
                 body.remove("reasoning_effort");
                 body.insert("thinking".into(), json!({"type":"disabled"}));
             }
-            Some(Effort::Level(_)) => {
-                body.insert("thinking".into(), json!({"type":"enabled"}));
-            }
+            Some(Effort::Level(_)) => {}
             None => {}
         },
         Dialect::Moonshot => {
@@ -104,9 +102,7 @@ pub(super) fn request(
             }
         }
         Dialect::Mistral => {
-            if let Some(seed) = body.remove("seed") {
-                body.insert("random_seed".into(), seed);
-            }
+
         }
     }
 }
@@ -322,8 +318,8 @@ fn moonshot_family(model: &str) -> Family {
 fn moonshot_effort(level: &str) -> &str {
     match level {
         "minimal" | "low" => "low",
-        "medium" | "high" => "high",
-        "xhigh" | "max" => "max",
+        "medium" | "high" | "xhigh" => "high",
+        "max" => "max",
         other => other,
     }
 }
@@ -401,7 +397,6 @@ fn mfjs_root(schema: Value, what: &str) -> Result<Value, Error> {
     if object.get("type").and_then(Value::as_str) != Some("object") {
         return Err(mfjs_root_error(what));
     }
-    object.remove("$schema");
     Ok(mfjs(Value::Object(object)))
 }
 fn mfjs_root_error(what: &str) -> Error {
@@ -529,7 +524,9 @@ pub(super) fn stream_error(
     };
     // `insufficient_quota` is a rate limit that waiting does not cure.
     let status = if quota {
-        Some(429)
+        None
+    } else if quota || code.is_some() || kind_name.is_some() {
+        None
     } else {
         code.as_deref()
             .filter(|code| code.len() == 3)
