@@ -107,6 +107,10 @@ pub(super) fn request(
             if let Some(seed) = body.remove("seed") {
                 body.insert("random_seed".into(), seed);
             }
+            // Mistral reasons at one level, whatever the effort's name.
+            if let Some(Effort::Level(_)) = effort(p) {
+                body.insert("reasoning_effort".into(), json!("high"));
+            }
         }
     }
 }

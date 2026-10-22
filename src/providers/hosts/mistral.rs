@@ -48,13 +48,8 @@ static PROFILE: ChatProfile = ChatProfile {
     include_usage: false,
     max_tokens_field: "max_tokens",
     reasoning_field: "reasoning_content",
-    effort_aliases: &[
-        ("minimal", "high"),
-        ("low", "high"),
-        ("medium", "high"),
-        ("xhigh", "high"),
-        ("max", "high"),
-    ],
+    // The dialect sends every effort as `high`.
+    effort_aliases: &[],
     json_schema: JsonSchemaModels::All,
     openai_params: false,
     auto_tool_choice_only: false,
