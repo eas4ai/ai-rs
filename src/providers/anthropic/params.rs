@@ -127,6 +127,12 @@ pub(super) fn translate(
     };
     let b = &mut out.body;
     sampling(label, b, &p.sampling)?;
+    let reasoning_disabled = matches!(
+        &p.reasoning,
+        ProviderValue::Value(ReasoningParams {
+            effort: ProviderValue::Value(None)
+        })
+    );
     if let ProviderValue::Value(reasoning) = &p.reasoning
         && let ProviderValue::Value(effort) = &reasoning.effort
     {
@@ -147,8 +153,10 @@ pub(super) fn translate(
         }
     }
     if let Some(output) = &p.output {
+        // A summary display needs reasoning; disabled reasoning sends none,
+        // also for a model that always reasons and gets the lowest effort.
         if let ProviderValue::Value(summary) = &output.reasoning_summary
-            && b.get("thinking").and_then(|v| v.get("type")) != Some(&json!("disabled"))
+            && !reasoning_disabled
         {
             b.insert(
                 "thinking".into(),

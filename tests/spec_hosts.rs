@@ -942,6 +942,20 @@ async fn hst_007_minimax_3_1_and_later_always_reason() {
 }
 
 #[tokio::test]
+async fn hst_007_a_summary_adds_no_thinking_when_reasoning_is_disabled() {
+    let mut options = effort(None);
+    options.params.as_mut().unwrap().output = Some(OutputParams {
+        reasoning_summary: ProviderValue::Value(Some("summarized".into())),
+        ..Default::default()
+    });
+    let body = minimax_body("MiniMax-M3.1", options.clone()).await;
+    assert!(body.get("thinking").is_none(), "{body}");
+    assert_eq!(body["output_config"]["effort"], "low");
+    let body = minimax_body("MiniMax-M2", options).await;
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+}
+
+#[tokio::test]
 async fn hst_007_older_minimax_models_keep_the_anthropic_mapping() {
     for options in [effort(None), effort(Some("minimal")), effort(Some("high"))] {
         let minimax = minimax_body("MiniMax-M2", options.clone()).await;
