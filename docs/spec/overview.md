@@ -1,0 +1,53 @@
+# suprnova-ai: overview
+
+suprnova-ai is a Rust library crate. It ports the AI SDK for Python 0.8.0
+(`https://github.com/vercel-labs/ai-python`) to Rust. It covers model
+references, streaming and generation, OpenAI-compatible and
+Anthropic-compatible provider adapters, a tool-calling agent loop, and an
+adapter for Vercel AI SDK v6 UI messages. Its repository is
+`https://github.com/eas4ai/suprnova-ai-rs`.
+
+## The problem
+
+Rust applications, suprchat first, need the behavior of the Python SDK: the
+same event and message shapes and the same tool loop. The port keeps that
+behavior, so Rust code and Python or JavaScript clients can exchange the
+same streams. It departs from Python only where a requirement says so.
+
+## What it is not
+
+- It is not a Vercel product, and it is not the upstream Python package.
+  Upstream module names such as `ai.types` belong to the Python package.
+- It does not port the Vercel AI Gateway protocol, OIDC, telemetry spans,
+  the MCP client, durable workflow integrations or the factories that read
+  the environment (`README.md`, `docs/PORT.md`).
+- It never reads process environment variables. The application passes
+  every credential and setting.
+- It stores no persistent state.
+
+## Spec map
+
+| File | Prefix | Covers |
+|---|---|---|
+| package.md | PKG | package, library and repository names, the upstream credit, the origin remote and the check script |
+| models.md | MOD | model ids, model snapshots, retries, timeouts and dropping a call, and the scripted test provider |
+| agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency and run usage |
+
+## Not yet specified
+
+These areas have code and tests but no requirements yet, apart from the
+parts that the files in the spec map cover. `docs/recon.md` describes what
+each one does today. A later commitment specifies an area before it changes
+it.
+
+| Area | Code |
+|---|---|
+| Model references, streaming and generation | `src/models/` |
+| Provider traits, registry and configuration | `src/providers/base.rs` |
+| OpenAI-compatible adapter | `src/providers/openai/` |
+| Anthropic-compatible adapter | `src/providers/anthropic/` |
+| Events, messages, builders, media and tools | `src/types/` |
+| HTTP transport and media downloads | `src/transport/`, `src/models/files.rs` |
+| Agent loop | `src/agents/` |
+| UI adapter for Vercel AI SDK v6 | `src/ui/ai_sdk/` |
+| Errors | `src/errors.rs` |
