@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::{Event, Message, tools::Tool, usage::Usage};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use suprnova_ai::types::{Event, Message, tools::Tool, usage::Usage};
 
 fn fixtures() -> Value {
     serde_json::from_str(include_str!("fixtures/python-0.8.0.json")).expect("valid Python fixture")
@@ -51,7 +51,7 @@ fn usage_roundtrips_canonical_python_json() {
 
 #[test]
 fn compact_serialization_keeps_full_non_model_event_messages() {
-    use ai::types::events::OmitEventMessages;
+    use suprnova_ai::types::events::OmitEventMessages;
     for value in fixtures()["events"].as_array().unwrap() {
         let event: Event = serde_json::from_value(value.clone()).unwrap();
         if event.model_event().is_none() {

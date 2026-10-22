@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::Error;
-use ai::agents::{AgentTool, BoundToolCall, HookRegistry, Runtime, ToolContext, ToolResolver};
-use ai::types::messages::{
-    MessageBundle, MessageRole, SpecialToolResult, ToolCallPart, ToolResultPart, ToolResultValue,
-};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use suprnova_ai::Error;
+use suprnova_ai::agents::{
+    AgentTool, BoundToolCall, HookRegistry, Runtime, ToolContext, ToolResolver,
+};
+use suprnova_ai::types::messages::{
+    MessageBundle, MessageRole, SpecialToolResult, ToolCallPart, ToolResultPart, ToolResultValue,
+};
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct Add {
@@ -53,10 +55,10 @@ fn standalone_context_has_no_owner_or_inherited_bound_call() {
 
 #[tokio::test]
 async fn executor_inspects_original_bound_call_through_overrides_and_middleware() {
-    use ai::agents::Middleware;
-    use ai::agents::middleware::{ToolContext as MiddlewareContext, ToolNext};
-    use ai::types::events::ToolCallResult;
     use std::sync::Arc;
+    use suprnova_ai::agents::Middleware;
+    use suprnova_ai::agents::middleware::{ToolContext as MiddlewareContext, ToolNext};
+    use suprnova_ai::types::events::ToolCallResult;
 
     struct Rewrite;
     #[async_trait::async_trait]
@@ -188,7 +190,7 @@ async fn errors_keep_the_original_error_for_downcasting() {
 
 #[tokio::test]
 async fn already_erased_tool_errors_preserve_identity_and_direct_downcasting() {
-    use ai::types::events::RuntimeError;
+    use suprnova_ai::types::events::RuntimeError;
     let original = RuntimeError::new(std::io::Error::other("original"));
     let returned = original.clone();
     let tool = AgentTool::new_with_hooks("fail", "Retain original error.", move |_: Value, _| {
@@ -311,9 +313,9 @@ async fn nested_inputs_defaults_and_aliases_reach_the_typed_closure() {
 
 #[tokio::test]
 async fn runner_cancels_in_fifo_order_and_discards_without_results() {
-    use ai::agents::tools::ToolRunner;
     use futures::StreamExt;
     use std::sync::{Arc, Mutex};
+    use suprnova_ai::agents::tools::ToolRunner;
     struct Cancel {
         id: usize,
         cancelled: Arc<Mutex<Vec<usize>>>,
@@ -333,7 +335,8 @@ async fn runner_cancels_in_fifo_order_and_discards_without_results() {
         };
         handles.push(runner.schedule(async move {
             let _guard = guard;
-            futures::future::pending::<Result<ai::types::events::ToolCallResult, Error>>().await
+            futures::future::pending::<Result<suprnova_ai::types::events::ToolCallResult, Error>>()
+                .await
         }));
     }
     assert!(futures::poll!(runner.events().next()).is_pending());
@@ -346,8 +349,8 @@ async fn runner_cancels_in_fifo_order_and_discards_without_results() {
 
 #[tokio::test]
 async fn runner_events_restart_and_collect_results_in_completion_order() {
-    use ai::agents::tools::{ToolRunner, tool_result};
     use futures::StreamExt;
+    use suprnova_ai::agents::tools::{ToolRunner, tool_result};
     let mut runner = ToolRunner::new();
     let (send, receive) = tokio::sync::oneshot::channel();
     runner.schedule(async move {
@@ -384,8 +387,8 @@ async fn runner_events_restart_and_collect_results_in_completion_order() {
 
 #[tokio::test]
 async fn runner_discard_omits_a_ready_but_undelivered_result() {
-    use ai::agents::tools::{ToolRunner, tool_result};
     use futures::StreamExt;
+    use suprnova_ai::agents::tools::{ToolRunner, tool_result};
     let mut runner = ToolRunner::new();
     runner.add_result(tool_result(ToolResultPart::new("first", "add", json!(1))));
     let discarded = runner.schedule(async {

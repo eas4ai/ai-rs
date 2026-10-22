@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::{
+use futures::{StreamExt, poll};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::json;
+use suprnova_ai::{
     agents::{
         hooks::{HookError, HookRegistry},
         runtime::Runtime,
     },
     types::{Event, HookPart, HookStatus, messages::Metadata},
 };
-use futures::{StreamExt, poll};
-use schemars::JsonSchema;
-use serde::Deserialize;
-use serde_json::json;
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
 struct Confirmation {
@@ -34,7 +34,10 @@ struct Confirmation {
 fn hook(event: Event) -> HookPart {
     match event {
         Event::Hook(event) => {
-            assert_eq!(event.message.role, ai::types::MessageRole::Internal);
+            assert_eq!(
+                event.message.role,
+                suprnova_ai::types::MessageRole::Internal
+            );
             assert_eq!(event.message.parts, vec![event.hook.clone().into()]);
             event.hook
         }
@@ -269,8 +272,8 @@ async fn closed_runtime_removes_failed_suspension() {
 
 #[tokio::test]
 async fn scoped_middleware_wraps_hooks_and_can_short_circuit_without_suspension() {
-    use ai::agents::middleware::{HookContext, HookNext, Middleware};
     use std::sync::{Arc, Mutex};
+    use suprnova_ai::agents::middleware::{HookContext, HookNext, Middleware};
     struct Wrapper {
         name: &'static str,
         calls: Arc<Mutex<Vec<String>>>,
@@ -371,8 +374,8 @@ async fn cancel_returns_even_with_many_queued_side_events() {
 
 #[tokio::test]
 async fn middleware_rewrites_hook_label_and_metadata_before_suspending() {
-    use ai::agents::middleware::{HookContext, HookNext, Middleware};
     use std::sync::Arc;
+    use suprnova_ai::agents::middleware::{HookContext, HookNext, Middleware};
     struct Rewrite;
     #[async_trait::async_trait]
     impl Middleware for Rewrite {
@@ -424,7 +427,6 @@ async fn cancelled_awaiter_cleanup_does_not_remove_new_same_label_hook() {
 
 #[tokio::test]
 async fn cancellation_event_is_queued_before_waiter_wakes() {
-    use ai::agents::runtime::RuntimeEvents;
     use futures::{
         Future, Stream,
         task::{ArcWake, noop_waker_ref, waker_ref},
@@ -434,6 +436,7 @@ async fn cancellation_event_is_queued_before_waiter_wakes() {
         atomic::{AtomicBool, Ordering},
     };
     use std::task::Context;
+    use suprnova_ai::agents::runtime::RuntimeEvents;
 
     struct ObserveWake {
         events: Mutex<RuntimeEvents>,
@@ -593,8 +596,8 @@ async fn resolution_schema_constraints_apply_to_live_and_pre_registered_input() 
 
 #[tokio::test]
 async fn middleware_short_circuit_must_satisfy_original_payload_schema() {
-    use ai::agents::middleware::{HookContext, HookNext, Middleware};
     use std::sync::Arc;
+    use suprnova_ai::agents::middleware::{HookContext, HookNext, Middleware};
     struct InvalidResolution;
     #[async_trait::async_trait]
     impl Middleware for InvalidResolution {

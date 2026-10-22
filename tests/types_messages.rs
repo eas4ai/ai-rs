@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::{
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
+use suprnova_ai::types::{
     ContentOutput, FilePart, Message, MessageRole, Part, TextPart, ToolCallPart, ToolResultPart,
     Usage,
     messages::{
@@ -20,8 +22,6 @@ use ai::types::{
         ModelInputKind, ResultKind, ToolResultValue, with_id_generator,
     },
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
 
 #[test]
 fn usage_add_merges_optional_fields_and_drops_raw() {

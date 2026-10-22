@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::transport::{Body, HttpRequest, TransportError, sse};
 use bytes::Bytes;
 use futures::{StreamExt, stream};
+use suprnova_ai::transport::{Body, HttpRequest, TransportError, sse};
 
 fn body(chunks: Vec<&[u8]>) -> Body {
     stream::iter(

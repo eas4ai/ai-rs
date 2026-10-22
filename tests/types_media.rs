@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::media;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use suprnova_ai::types::media;
 
 const RIFF_WEBP: &[u8] = b"RIFF\0\0\0\0WEBP";
 const RIFF_WAVE: &[u8] = b"RIFF\0\0\0\0WAVE";

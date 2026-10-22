@@ -13,9 +13,9 @@
 // limitations under the License.
 
 mod anthropic_support;
-use ai::{StreamOptions, types::messages::*};
 use anthropic_support::*;
 use serde_json::{Value, json};
+use suprnova_ai::{StreamOptions, types::messages::*};
 async fn result_content(result: ToolResultValue, model_input: Option<ToolResultValue>) -> Value {
     let mut part = ToolResultPart::new("tc-1", "read", result);
     if let Some(v) = model_input {
@@ -23,7 +23,7 @@ async fn result_content(result: ToolResultValue, model_input: Option<ToolResultV
     }
     let (b, _) = capture(
         vec![
-            ai::user_message("Read image"),
+            suprnova_ai::user_message("Read image"),
             Message::new(
                 MessageRole::Assistant,
                 vec![ToolCallPart::new("tc-1", "read", "{}").into()],

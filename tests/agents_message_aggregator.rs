@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::agents::MessageAggregator;
-use ai::types::events::{Aggregator, Event, ModelEventMeta, Retry, StreamEnd, ToolCallResult};
-use ai::types::messages::{Message, MessageRole, TextPart};
+use suprnova_ai::agents::MessageAggregator;
+use suprnova_ai::types::events::{
+    Aggregator, Event, ModelEventMeta, Retry, StreamEnd, ToolCallResult,
+};
+use suprnova_ai::types::messages::{Message, MessageRole, TextPart};
 
 fn text(id: &str, value: &str) -> Event {
     Event::StreamEnd(StreamEnd {

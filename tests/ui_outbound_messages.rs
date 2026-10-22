@@ -14,7 +14,8 @@
 
 use std::collections::BTreeMap;
 
-use ai::{
+use serde_json::{Value, json};
+use suprnova_ai::{
     types::{FilePart, Message, MessageRole, Part, TextPart, messages::MessageBundle},
     ui::ai_sdk::{
         inbound_messages::to_messages,
@@ -24,7 +25,6 @@ use ai::{
         },
     },
 };
-use serde_json::{Value, json};
 
 fn message(value: Value) -> Message {
     serde_json::from_value(value).expect("valid core message fixture")
@@ -529,7 +529,7 @@ fn content_output_and_empty_bundle_keep_special_result_metadata() {
                 .next()
                 .expect("result")
                 .result,
-            ai::types::messages::ToolResultValue::Special(_)
+            suprnova_ai::types::messages::ToolResultValue::Special(_)
         ));
     }
 }

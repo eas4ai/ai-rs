@@ -13,16 +13,16 @@
 // limitations under the License.
 
 mod anthropic_support;
-use ai::{
+use anthropic_support::*;
+use serde_json::json;
+use std::sync::Arc;
+use suprnova_ai::{
     Model, Provider, ProviderConfig, ProviderRegistry,
     providers::{
         ModelsDevProvider,
         anthropic::{AnthropicCompatibleProvider, register},
     },
 };
-use anthropic_support::*;
-use serde_json::json;
-use std::sync::Arc;
 #[tokio::test]
 async fn list_models_gets_headers_and_sorts_ids() {
     let fake = ScriptedTransport::new(vec![Ok(response(
@@ -96,15 +96,15 @@ fn explicit_config_snapshot_defaults_and_transport_ownership() {
 #[tokio::test]
 async fn list_errors_preserve_context_and_404_is_generic() {
     for (status, kind) in [
-        (529, ai::errors::ProviderErrorKind::Overloaded),
-        (404, ai::errors::ProviderErrorKind::NotFound),
+        (529, suprnova_ai::errors::ProviderErrorKind::Overloaded),
+        (404, suprnova_ai::errors::ProviderErrorKind::NotFound),
     ] {
         let fake = ScriptedTransport::new(vec![Ok(response(
             status,
             json!({"error":{"message":"overloaded","type":"overloaded_error","code":42,"param":"model"}}),
         ))]);
         let err = provider(fake).list_models().await.unwrap_err();
-        let ai::Error::Provider(err) = err else {
+        let suprnova_ai::Error::Provider(err) = err else {
             panic!("wrong error")
         };
         assert_eq!(err.kind, kind);
@@ -185,17 +185,17 @@ fn modelsdev_custom_provider_requires_url_and_uses_its_config_envs() {
 #[tokio::test]
 async fn configured_provider_exposes_a_transport_for_owned_protocol_streams() {
     let fake = ScriptedTransport::events(complete(vec![], Some("end_turn")));
-    let p = ai::providers::ConfiguredProvider::new(
+    let p = suprnova_ai::providers::ConfiguredProvider::new(
         "proxy",
         ProviderConfig {
             default_base_url: "https://anthropic.test".into(),
             ..Default::default()
         },
-        Arc::new(ai::providers::anthropic::AnthropicMessagesProtocol),
+        Arc::new(suprnova_ai::providers::anthropic::AnthropicMessagesProtocol),
         Some(fake),
     );
     let m = Model::new("claude", Arc::new(p));
-    let mut s = ai::stream(&m, vec![], Default::default());
+    let mut s = suprnova_ai::stream(&m, vec![], Default::default());
     use futures::StreamExt;
     while let Some(event) = s.next().await {
         event.unwrap();
@@ -206,9 +206,9 @@ async fn configured_provider_exposes_a_transport_for_owned_protocol_streams() {
 async fn malformed_model_lists_are_response_errors() {
     for value in [json!({}), json!({"data":[{}]}), json!({"data":null})] {
         let p = provider(ScriptedTransport::new(vec![Ok(response(200, value))]));
-        let ai::Error::Provider(err) = p.list_models().await.unwrap_err() else {
+        let suprnova_ai::Error::Provider(err) = p.list_models().await.unwrap_err() else {
             panic!()
         };
-        assert_eq!(err.kind, ai::errors::ProviderErrorKind::Response);
+        assert_eq!(err.kind, suprnova_ai::errors::ProviderErrorKind::Response);
     }
 }

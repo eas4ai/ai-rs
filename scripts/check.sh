@@ -2,7 +2,7 @@
 set -euo pipefail
 T=/home/shawn/.rustup/toolchains/1.95-x86_64-unknown-linux-gnu/bin
 export PATH="$T:$PATH"
-export CARGO_TARGET_DIR=/home/shawn/workspace2/scratchpads/targets/ai-rs/w-core
+export CARGO_TARGET_DIR=/home/shawn/workspace2/scratchpads/targets/suprnova-ai-rs/w-core
 export RUSTC="$T/rustc" RUSTDOC="$T/rustdoc" RUSTUP_AUTO_INSTALL=0
 "$T/cargo" fmt --all -- --check
 "$T/cargo" build --locked --no-default-features

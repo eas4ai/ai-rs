@@ -14,7 +14,12 @@
 
 mod agents_support;
 use agents_support::*;
-use ai::{
+use futures::{StreamExt, stream};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::json;
+use std::sync::{Arc, Mutex};
+use suprnova_ai::{
     Error,
     agents::{
         Agent, AgentTool, Middleware, RunContext, RunOptions,
@@ -23,11 +28,6 @@ use ai::{
     types::{Event, events::ToolCallResult},
     user_message,
 };
-use futures::{StreamExt, stream};
-use schemars::JsonSchema;
-use serde::Deserialize;
-use serde_json::json;
-use std::sync::{Arc, Mutex};
 #[derive(Deserialize, JsonSchema)]
 struct Args {
     x: i32,
@@ -45,8 +45,12 @@ impl Middleware for Fixer {
         call.tool_name = "rewritten".into();
         next(call).await
     }
-    fn wrap_model(&self, mut call: ModelContext, next: ModelNext) -> ai::providers::EventStream {
-        call.messages.push(ai::system_message("injected"));
+    fn wrap_model(
+        &self,
+        mut call: ModelContext,
+        next: ModelNext,
+    ) -> suprnova_ai::providers::EventStream {
+        call.messages.push(suprnova_ai::system_message("injected"));
         next(call)
     }
 }
@@ -70,7 +74,7 @@ async fn tool_middleware_repairs_malformed_arguments_and_rewrites_result_fields(
             assert_eq!(r.results[0].tool_name, "rewritten");
             assert_eq!(
                 r.results[0].result,
-                ai::types::messages::ToolResultValue::Json(json!(198))
+                suprnova_ai::types::messages::ToolResultValue::Json(json!(198))
             );
             seen = true;
         }
@@ -88,7 +92,11 @@ struct Order {
     order: Arc<Mutex<Vec<String>>>,
 }
 impl Middleware for Order {
-    fn wrap_agent_run(&self, call: RunContext, next: RunNext) -> ai::providers::EventStream {
+    fn wrap_agent_run(
+        &self,
+        call: RunContext,
+        next: RunNext,
+    ) -> suprnova_ai::providers::EventStream {
         self.order
             .lock()
             .unwrap()
@@ -175,7 +183,11 @@ async fn rewriting_correlation_id_returns_history_integrity_error() {
 
 struct RetryRun;
 impl Middleware for RetryRun {
-    fn wrap_agent_run(&self, call: RunContext, next: RunNext) -> ai::providers::EventStream {
+    fn wrap_agent_run(
+        &self,
+        call: RunContext,
+        next: RunNext,
+    ) -> suprnova_ai::providers::EventStream {
         let source = next(call.clone());
         stream::unfold(
             (call, next, source, false),
@@ -199,7 +211,7 @@ impl Middleware for RetryRun {
 #[tokio::test]
 async fn run_middleware_can_retry_by_calling_next_again() {
     let (model, transport) = scripted_results(vec![
-        Err(ai::transport::TransportError::Timeout),
+        Err(suprnova_ai::transport::TransportError::Timeout),
         Ok(text("recovered")),
     ]);
     let mut run = Agent::default().run_with_options(
@@ -226,14 +238,15 @@ struct GenerateSuffix;
 impl Middleware for GenerateSuffix {
     async fn wrap_generate(
         &self,
-        mut call: ai::agents::middleware::GenerateContext,
-        next: ai::agents::middleware::GenerateNext,
-    ) -> Result<ai::types::Message, Error> {
-        call.messages.push(ai::system_message("generate-only"));
+        mut call: suprnova_ai::agents::middleware::GenerateContext,
+        next: suprnova_ai::agents::middleware::GenerateNext,
+    ) -> Result<suprnova_ai::types::Message, Error> {
+        call.messages
+            .push(suprnova_ai::system_message("generate-only"));
         let mut message = next(call).await?;
         message
             .parts
-            .push(ai::types::TextPart::new("-wrapped").into());
+            .push(suprnova_ai::types::TextPart::new("-wrapped").into());
         Ok(message)
     }
 }
@@ -244,8 +257,8 @@ async fn custom_loop_generation_uses_generate_middleware_and_preserves_history_i
         stream::once(async move {
             let message = call.generate().await?;
             call.update(|context| context.add(message.clone()));
-            Ok(Event::StreamEnd(ai::events::StreamEnd {
-                event: ai::types::ModelEventMeta::with_message(message),
+            Ok(Event::StreamEnd(suprnova_ai::events::StreamEnd {
+                event: suprnova_ai::types::ModelEventMeta::with_message(message),
                 ..Default::default()
             }))
         })

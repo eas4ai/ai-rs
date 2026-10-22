@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::{Error, agents::runtime::Runtime, types::Event};
 use futures::{StreamExt, poll, stream};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use suprnova_ai::{Error, agents::runtime::Runtime, types::Event};
 
 fn chunk(event: Event) -> String {
     match event {

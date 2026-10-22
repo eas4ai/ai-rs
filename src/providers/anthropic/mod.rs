@@ -20,9 +20,9 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use ai::{Model, ProviderConfig};
-//! use ai::providers::anthropic::AnthropicCompatibleProvider;
-//! use ai::transport::HttpTransport;
+//! use suprnova_ai::{Model, ProviderConfig};
+//! use suprnova_ai::providers::anthropic::AnthropicCompatibleProvider;
+//! use suprnova_ai::transport::HttpTransport;
 //!
 //! fn configured_model(transport: Arc<dyn HttpTransport>, api_key: String) -> Model {
 //!     let provider = AnthropicCompatibleProvider::new(

@@ -8,7 +8,7 @@ The source is AI SDK for Python 0.8.0 at
 
 | Python module | Rust module | Responsibility |
 | --- | --- | --- |
-| `ai.__init__` | `ai` | Core API re-exports |
+| `ai.__init__` | `suprnova_ai` | Core API re-exports |
 | `ai.types.events` | `types::events` | Event vocabulary, hydration, replay, run state |
 | `ai.types.messages` | `types::messages` | Messages, parts, special tool results, IDs |
 | `ai.types.builders` | `types::builders` | Message and part constructors |

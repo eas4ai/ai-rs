@@ -18,12 +18,12 @@ use std::{
     sync::Mutex,
 };
 
-use ai::{
+use bytes::Bytes;
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
+use suprnova_ai::{
     models::files::{DownloadError, DownloadTransport, MAX_REDIRECTS, download},
     transport::{HttpRequest, HttpResponse, TransportError},
 };
-use bytes::Bytes;
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
 
 const PUBLIC_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
 const PUBLIC_URL: &str = "https://media.example/file?signature=a%2Fb";
@@ -59,7 +59,7 @@ struct FakeDownloadTransport {
     responses: Mutex<VecDeque<ResponseSpec>>,
     resolved: Mutex<Vec<(String, u16)>>,
     sent: Mutex<Vec<(String, Vec<IpAddr>)>>,
-    sent_headers: Mutex<Vec<ai::transport::Headers>>,
+    sent_headers: Mutex<Vec<suprnova_ai::transport::Headers>>,
 }
 
 impl FakeDownloadTransport {

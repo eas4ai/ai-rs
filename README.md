@@ -1,4 +1,4 @@
-# ai
+# suprnova-ai
 
 Rust port of the inference core in AI SDK for Python 0.8.0.
 
@@ -15,10 +15,10 @@ Python 0.8.0 adapter protocol and message identity metadata.
 
 ```rust
 use std::sync::Arc;
-use ai::{Model, ProviderConfig, ProviderProtocol, StreamOptions, stream};
-use ai::providers::{ConfiguredProvider, EventStream};
-use ai::types::{Event, Message};
-use ai::types::events::{StreamStart, StreamEnd, TextStart, TextDelta};
+use suprnova_ai::{Model, ProviderConfig, ProviderProtocol, StreamOptions, stream};
+use suprnova_ai::providers::{ConfiguredProvider, EventStream};
+use suprnova_ai::types::{Event, Message};
+use suprnova_ai::types::events::{StreamStart, StreamEnd, TextStart, TextDelta};
 use futures::StreamExt;
 
 struct ExampleProtocol;
@@ -32,7 +32,7 @@ impl ProviderProtocol for ExampleProtocol {
         _model: &Model,
         _messages: Vec<Message>,
         _options: StreamOptions,
-        _provider: &dyn ai::Provider,
+        _provider: &dyn suprnova_ai::Provider,
     ) -> EventStream {
         futures::stream::iter([
             Ok(Event::StreamStart(StreamStart::default())),
@@ -43,12 +43,12 @@ impl ProviderProtocol for ExampleProtocol {
     }
 }
 
-# async fn example() -> Result<(), ai::Error> {
+# async fn example() -> Result<(), suprnova_ai::Error> {
 let provider = Arc::new(ConfiguredProvider::new(
     "example", ProviderConfig::default(), Arc::new(ExampleProtocol), None,
 ));
 let model = Model::new("example-model", provider);
-let mut response = stream(&model, vec![ai::user_message("Hello")], StreamOptions::default());
+let mut response = stream(&model, vec![suprnova_ai::user_message("Hello")], StreamOptions::default());
 while let Some(event) = response.next().await {
     event?;
 }
@@ -79,12 +79,12 @@ For UI requests, parse `UIMessage` with Serde and pass the core event stream to
 adapter consumes events lazily and propagates source errors.
 
 ```rust
-use ai::ui::ai_sdk::{UIMessage, to_messages, to_sse, UI_MESSAGE_STREAM_HEADERS};
+use suprnova_ai::ui::ai_sdk::{UIMessage, to_messages, to_sse, UI_MESSAGE_STREAM_HEADERS};
 
-# fn example(model: &ai::Model, request: Vec<UIMessage>) -> Result<(), ai::Error> {
+# fn example(model: &suprnova_ai::Model, request: Vec<UIMessage>) -> Result<(), suprnova_ai::Error> {
 let (messages, approvals) = to_messages(&request, None)?;
 // Apply approvals through a run-scoped ApprovalResolver before polling the run.
-let body = to_sse(ai::stream(model, messages, ai::StreamOptions::default()));
+let body = to_sse(suprnova_ai::stream(model, messages, suprnova_ai::StreamOptions::default()));
 let headers = UI_MESSAGE_STREAM_HEADERS;
 # let _ = (approvals, body, headers);
 # Ok(())

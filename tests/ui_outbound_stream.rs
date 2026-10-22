@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::ui::ai_sdk::ui_events::*;
-use ai::{Error, types::events::Event, ui::ai_sdk::outbound_stream::*};
 use futures::{StreamExt, stream};
 use serde_json::{Value, json};
+use suprnova_ai::ui::ai_sdk::ui_events::*;
+use suprnova_ai::{Error, types::events::Event, ui::ai_sdk::outbound_stream::*};
 
 fn event(value: Value) -> Event {
     serde_json::from_value(value).unwrap()
@@ -287,7 +287,7 @@ async fn builtin_tool_stream_marks_provider_execution_and_dynamic() {
 
 #[tokio::test]
 async fn file_event_emits_data_url_and_preserves_provider_metadata() {
-    use ai::types::{
+    use suprnova_ai::types::{
         events::{FileEvent, ModelEventMeta},
         messages::FileData,
     };
@@ -355,7 +355,7 @@ async fn approval_hooks_dedupe_requests_emit_responses_denials_and_cancellation(
 
 #[derive(Default)]
 struct Concat(String);
-impl ai::types::events::Aggregator<Value> for Concat {
+impl suprnova_ai::types::events::Aggregator<Value> for Concat {
     type Snapshot = Value;
     type ModelInput = Value;
     fn feed(&mut self, value: Value) {
@@ -371,7 +371,7 @@ impl ai::types::events::Aggregator<Value> for Concat {
 
 #[tokio::test]
 async fn partial_tool_results_accumulate_and_retry_recreates_aggregators() {
-    use ai::types::events::{AggregatorFactory, PartialToolCallResult};
+    use suprnova_ai::types::events::{AggregatorFactory, PartialToolCallResult};
     let factory = AggregatorFactory::new(Concat::default);
     let partial = |text: &str, factory: Option<AggregatorFactory>| {
         Event::PartialToolCallResult(PartialToolCallResult {
@@ -438,7 +438,7 @@ struct Snapshot {
     value: Value,
     typed_bundle: bool,
 }
-impl ai::types::events::ValueAggregator for Snapshot {
+impl suprnova_ai::types::events::ValueAggregator for Snapshot {
     fn feed(&mut self, _: Value) {}
     fn snapshot(&self) -> Value {
         self.value.clone()
@@ -446,11 +446,13 @@ impl ai::types::events::ValueAggregator for Snapshot {
     fn get_model_input(&self) -> Value {
         self.snapshot()
     }
-    fn snapshot_result(&self) -> ai::types::messages::ToolResultValue {
+    fn snapshot_result(&self) -> suprnova_ai::types::messages::ToolResultValue {
         if self.typed_bundle {
-            serde_json::from_value::<ai::types::messages::MessageBundle>(self.value.clone())
-                .unwrap()
-                .into()
+            serde_json::from_value::<suprnova_ai::types::messages::MessageBundle>(
+                self.value.clone(),
+            )
+            .unwrap()
+            .into()
         } else {
             self.value.clone().into()
         }
@@ -459,7 +461,7 @@ impl ai::types::events::ValueAggregator for Snapshot {
 
 #[tokio::test]
 async fn typed_partial_message_bundle_is_one_bubble_plain_json_stays_unchanged() {
-    use ai::types::events::{AggregatorFactory, PartialToolCallResult};
+    use suprnova_ai::types::events::{AggregatorFactory, PartialToolCallResult};
     let bundle = json!({"type":"messages","messages":[{"id":"inner","role":"assistant","parts":[{"kind":"text","id":"text","text":"hi from sub-agent"}]}]});
     for typed_bundle in [false, true] {
         let value = bundle.clone();
@@ -492,7 +494,7 @@ async fn typed_partial_message_bundle_is_one_bubble_plain_json_stays_unchanged()
 
 #[tokio::test]
 async fn empty_typed_partial_message_bundle_has_no_output_anchor() {
-    use ai::types::events::{AggregatorFactory, PartialToolCallResult};
+    use suprnova_ai::types::events::{AggregatorFactory, PartialToolCallResult};
     let factory = AggregatorFactory::from_boxed(|| {
         Box::new(Snapshot {
             value: json!({"type":"messages","messages":[]}),

@@ -1,11 +1,11 @@
 [package]
-name = "ai"
+name = "suprnova-ai"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Inference core for the AI SDK Rust port"
 license = "Apache-2.0"
-repository = "https://github.com/eas4ai/ai-rs"
+repository = "https://github.com/eas4ai/suprnova-ai-rs"
 
 [features]
 default = []

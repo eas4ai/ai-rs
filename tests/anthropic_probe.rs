@@ -13,10 +13,10 @@
 // limitations under the License.
 
 mod anthropic_support;
-use ai::{Model, ProviderConfig, providers::anthropic::AnthropicCompatibleProvider};
 use anthropic_support::*;
 use serde_json::json;
 use std::sync::Arc;
+use suprnova_ai::{Model, ProviderConfig, providers::anthropic::AnthropicCompatibleProvider};
 #[tokio::test]
 async fn success_model_not_found_and_custom_version() {
     for status in [200, 404] {
@@ -32,10 +32,13 @@ async fn success_model_not_found_and_custom_version() {
         if status == 200 {
             result.unwrap();
         } else {
-            let ai::Error::Provider(err) = result.unwrap_err() else {
+            let suprnova_ai::Error::Provider(err) = result.unwrap_err() else {
                 panic!()
             };
-            assert_eq!(err.kind, ai::errors::ProviderErrorKind::ModelNotFound);
+            assert_eq!(
+                err.kind,
+                suprnova_ai::errors::ProviderErrorKind::ModelNotFound
+            );
             assert_eq!(err.model_id.as_deref(), Some("custom/model?x"));
         }
         assert_eq!(
@@ -53,9 +56,12 @@ async fn unconfigured_probe_never_sends_http() {
     let fake = ScriptedTransport::new(vec![]);
     let p = AnthropicCompatibleProvider::new(ProviderConfig::default(), fake.clone());
     let m = Model::new("claude", Arc::new(p));
-    let ai::Error::Provider(err) = m.provider.probe(&m).await.unwrap_err() else {
+    let suprnova_ai::Error::Provider(err) = m.provider.probe(&m).await.unwrap_err() else {
         panic!()
     };
-    assert_eq!(err.kind, ai::errors::ProviderErrorKind::NotConfigured);
+    assert_eq!(
+        err.kind,
+        suprnova_ai::errors::ProviderErrorKind::NotConfigured
+    );
     assert!(fake.requests.lock().unwrap().is_empty());
 }

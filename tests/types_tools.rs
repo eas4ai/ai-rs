@@ -14,15 +14,15 @@
 
 use std::collections::BTreeSet;
 
-use ai::Error;
-use ai::types::tools::{
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use suprnova_ai::Error;
+use suprnova_ai::types::tools::{
     Tool, ToolApproval, ToolCall, ToolChoice, ToolChoiceMode, ToolConfig, ToolDefinition, ToolKind,
     ToolRef, ToolResult, ToolSelection, ToolShapeError, ToolSpec, ToolValidationError,
     validate_schema_value,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
