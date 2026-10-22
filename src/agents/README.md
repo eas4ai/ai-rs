@@ -98,6 +98,7 @@ Once the stream ends, `stop_reason()` returns `StopReason::Done`, `Stopped(reaso
 or `Deferred`; it is `None` while the run goes on and after an error.
 `usage()` returns the summed usage of the delivered model responses.
 `RunOptions::tool_concurrency` caps how many tool executions of one step run at
-once; the others start in call order as slots free up.
+once; the others start in call order as slots free up. A call waiting for its
+approval holds no slot, so approvals and `blocked()` work as without a cap.
 
 MCP connections and telemetry span recording are outside this module.

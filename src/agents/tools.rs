@@ -16,7 +16,6 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    num::NonZeroUsize,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -79,6 +78,9 @@ pub struct ToolContext {
     pub tool_call_id: String,
     pub tool_name: String,
     pub middleware: Vec<Arc<dyn Middleware>>,
+    /// The step's execution slots under `RunOptions::tool_concurrency`. An
+    /// execution holds one after any approval and until it finishes.
+    pub(crate) execution_slots: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ToolContext {
@@ -96,6 +98,7 @@ impl ToolContext {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
             middleware: Vec::new(),
+            execution_slots: None,
         }
     }
 
@@ -493,6 +496,17 @@ impl BoundToolCall {
                 Err(error) => return Ok(error_tool_result(error, self.id(), self.name())),
             }
         }
+        // A call waiting for approval holds no slot, so a capped step cannot
+        // queue other calls behind a pending hook.
+        let _slot = match context.execution_slots.clone() {
+            Some(slots) => Some(
+                slots
+                    .acquire_owned()
+                    .await
+                    .expect("tool execution slots are never closed"),
+            ),
+            None => None,
+        };
         let tool = self.tool.clone();
         let stack = context.middleware.clone();
         let real: ToolNext = Arc::new(move |call| {
@@ -665,21 +679,15 @@ impl ToolTask {
 struct RunningTool {
     id: Arc<()>,
     abort: AbortHandle,
-    /// Whether the task holds one of the concurrency slots.
-    limited: bool,
     future: Abortable<BoxFuture<'static, Result<ToolCallResult, Error>>>,
 }
 
 /// Own concurrent tool futures and the completed results for their tool message.
 /// Futures advance while the runner's event stream is polled. Dropping the runner
 /// cancels unfinished work in insertion order and never detaches background tasks.
-/// With a concurrency limit, scheduled futures beyond it wait and start in
-/// schedule order as running ones finish.
 #[derive(Default)]
 pub struct ToolRunner {
     tasks: Vec<RunningTool>,
-    queued: VecDeque<RunningTool>,
-    limit: Option<NonZeroUsize>,
     ready: VecDeque<(Arc<()>, AbortHandle, Result<ToolCallResult, Error>)>,
     results: Vec<ToolCallResult>,
 }
@@ -688,49 +696,18 @@ impl ToolRunner {
     pub fn new() -> Self {
         Self::default()
     }
-    /// A runner that polls at most `limit` scheduled futures at once.
-    pub fn with_concurrency(limit: NonZeroUsize) -> Self {
-        let mut runner = Self::default();
-        runner.limit = Some(limit);
-        runner
-    }
     pub fn schedule(
         &mut self,
         future: impl Future<Output = Result<ToolCallResult, Error>> + Send + 'static,
     ) -> ToolTask {
-        let (task, handle) = Self::task(future, true);
-        if self.has_free_slot() {
-            self.tasks.push(task);
-        } else {
-            self.queued.push_back(task);
-        }
-        handle
-    }
-    fn task(
-        future: impl Future<Output = Result<ToolCallResult, Error>> + Send + 'static,
-        limited: bool,
-    ) -> (RunningTool, ToolTask) {
         let (abort, registration) = AbortHandle::new_pair();
         let id = Arc::new(());
-        let task = RunningTool {
+        self.tasks.push(RunningTool {
             id: id.clone(),
             abort: abort.clone(),
-            limited,
             future: Abortable::new(Box::pin(future), registration),
-        };
-        (task, ToolTask { id, abort })
-    }
-    fn has_free_slot(&self) -> bool {
-        self.limit
-            .is_none_or(|limit| self.tasks.iter().filter(|task| task.limited).count() < limit.get())
-    }
-    /// Move waiting futures into the running set while slots are free.
-    fn start_queued(&mut self) {
-        while self.has_free_slot()
-            && let Some(task) = self.queued.pop_front()
-        {
-            self.tasks.push(task);
-        }
+        });
+        ToolTask { id, abort }
     }
     /// Cancel and drop a speculative call immediately without producing a result.
     pub fn discard(&mut self, task: &ToolTask) {
@@ -742,15 +719,10 @@ impl ToolRunner {
         {
             self.tasks.remove(index);
         }
-        self.queued
-            .retain(|entry| !Arc::ptr_eq(&entry.id, &task.id));
         self.ready.retain(|(id, _, _)| !Arc::ptr_eq(id, &task.id));
-        self.start_queued();
     }
-    /// Add a finished result. It holds no concurrency slot.
     pub fn add_result(&mut self, result: ToolCallResult) {
-        let (task, _) = Self::task(async move { Ok(result) }, false);
-        self.tasks.push(task);
+        self.schedule(async move { Ok(result) });
     }
     /// A fresh borrow resumes iteration after an earlier borrow was dropped.
     pub fn events(&mut self) -> &mut Self {
@@ -775,25 +747,16 @@ impl Stream for ToolRunner {
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Poll every task, including when an earlier task is already complete,
         // so each future receives the wake registration needed for concurrency.
-        // A finished task frees its slot, so poll the futures that start then.
-        loop {
-            self.start_queued();
-            let mut finished = false;
-            let mut index = 0;
-            while index < self.tasks.len() {
-                match Pin::new(&mut self.tasks[index].future).poll(context) {
-                    Poll::Pending => index += 1,
-                    Poll::Ready(outcome) => {
-                        let task = self.tasks.remove(index);
-                        finished = true;
-                        if let Ok(result) = outcome {
-                            self.ready.push_back((task.id, task.abort, result));
-                        }
+        let mut index = 0;
+        while index < self.tasks.len() {
+            match Pin::new(&mut self.tasks[index].future).poll(context) {
+                Poll::Pending => index += 1,
+                Poll::Ready(outcome) => {
+                    let task = self.tasks.remove(index);
+                    if let Ok(result) = outcome {
+                        self.ready.push_back((task.id, task.abort, result));
                     }
                 }
-            }
-            if !finished || self.queued.is_empty() {
-                break;
             }
         }
         while let Some((_, abort, result)) = self.ready.pop_front() {
@@ -805,7 +768,7 @@ impl Stream for ToolRunner {
             }
             return Poll::Ready(Some(result));
         }
-        if self.tasks.is_empty() && self.queued.is_empty() {
+        if self.tasks.is_empty() {
             Poll::Ready(None)
         } else {
             Poll::Pending
@@ -818,6 +781,5 @@ impl Drop for ToolRunner {
         for task in self.tasks.drain(..) {
             drop(task);
         }
-        self.queued.clear();
     }
 }

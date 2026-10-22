@@ -412,6 +412,7 @@ struct LoopState {
 struct Step {
     source: EventStream,
     tools: ToolRunner,
+    slots: Option<Arc<tokio::sync::Semaphore>>,
     resolver: ToolResolver,
     in_flight: usize,
     done: bool,
@@ -422,10 +423,10 @@ impl Step {
     fn new(call: &RunContext, source: EventStream, replay: bool) -> Self {
         Self {
             source,
-            tools: match call.tool_concurrency {
-                Some(limit) => ToolRunner::with_concurrency(limit),
-                None => ToolRunner::new(),
-            },
+            tools: ToolRunner::new(),
+            slots: call
+                .tool_concurrency
+                .map(|limit| Arc::new(tokio::sync::Semaphore::new(limit.get()))),
             resolver: ToolResolver::new(call.agent.tools.clone()),
             in_flight: 0,
             done: false,
@@ -516,6 +517,7 @@ impl Step {
                 middleware: call.middleware.clone(),
                 agent: Some(call.agent.clone()),
                 bound_call: None,
+                execution_slots: self.slots.clone(),
             };
             self.tools
                 .schedule(async move { tc.execute(context).await });

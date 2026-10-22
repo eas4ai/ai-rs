@@ -436,6 +436,61 @@ async fn agt_003_without_a_cap_every_call_runs_at_once() {
     assert_eq!(state.most.load(Ordering::SeqCst), 5);
 }
 
+#[tokio::test]
+async fn agt_003_capped_steps_still_block_on_approvals_and_finish() {
+    let calls = [("g1", "gated"), ("p1", "work"), ("g2", "gated")]
+        .map(|(id, name)| suprnova_ai::types::ToolCallPart::new(id, name, json!({}).to_string()));
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [
+            ScriptedResponse::tool_calls(calls),
+            ScriptedResponse::text("done"),
+        ],
+    );
+    let gated = noop("gated").require_approval(true);
+    let mut run = Agent::new(vec![gated, noop("work")]).run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        RunOptions {
+            tool_concurrency: NonZeroUsize::new(1),
+            ..RunOptions::default()
+        },
+    );
+    // Approve only when the run reports that it is blocked on its hooks, as an
+    // application that waits for RunBlocked does.
+    let drained = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut approved = 0;
+        while let Some(event) = run.next().await {
+            if let Event::RunBlocked(blocked) = event.unwrap() {
+                for hook in blocked.hooks {
+                    run.hook_registry()
+                        .resolve_hook(&hook.hook_id, json!({"granted": true}))
+                        .unwrap();
+                    approved += 1;
+                }
+            }
+        }
+        approved
+    })
+    .await;
+    assert_eq!(
+        drained.expect("the capped run never reported RunBlocked"),
+        2
+    );
+    assert_eq!(run.text().unwrap(), "done");
+    let history = run.messages();
+    let results = history
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .unwrap()
+        .tool_results();
+    assert_eq!(results.len(), 3);
+    assert!(
+        results.iter().all(|result| !result.is_error()),
+        "{results:?}"
+    );
+}
+
 // AGT-004
 
 #[tokio::test]
