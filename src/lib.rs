@@ -14,6 +14,7 @@
 
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+#![doc(test(attr(deny(warnings), allow(dead_code))))]
 
 pub mod agents;
 pub mod errors;

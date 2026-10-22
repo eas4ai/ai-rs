@@ -25,6 +25,7 @@ while let Some(event) = run.next().await {
     event?;
 }
 let answer = run.text()?;
+println!("{answer}");
 # Ok(())
 # }
 ```
