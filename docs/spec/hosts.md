@@ -4,10 +4,10 @@ Prefix: HST
 
 Vendor APIs that speak a protocol the crate already implements: the OpenAI
 Chat Completions protocol (Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral,
-Moonshot AI, Together AI and Z.ai) and the Anthropic Messages protocol
-(MiniMax). Each one is the existing adapter with a host profile: its
-endpoint, its key, and the request and response differences the AI SDK for
-TypeScript 7.0.148 records for it.
+Moonshot AI, Together AI and Z.ai), the OpenAI Responses protocol (xAI and
+Hugging Face) and the Anthropic Messages protocol (MiniMax). Each one is the
+existing adapter with a host profile: its endpoint, its key, and the request
+and response differences the AI SDK for TypeScript 7.0.148 records for it.
 
 | Host | Name and handles | Default base URL | Key variable |
 |---|---|---|---|
@@ -20,14 +20,17 @@ TypeScript 7.0.148 records for it.
 | DeepSeek | `deepseek`, `@ai-sdk/deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
 | Moonshot AI | `moonshotai`, `@ai-sdk/moonshotai` | `https://api.moonshot.ai/v1` | `MOONSHOT_API_KEY` |
 | Mistral | `mistral`, `@ai-sdk/mistral` | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` |
+| xAI | `xai`, `@ai-sdk/xai` | `https://api.x.ai/v1` | `XAI_API_KEY` |
+| Hugging Face | `huggingface`, `@ai-sdk/huggingface` | `https://router.huggingface.co/v1` | `HUGGINGFACE_API_KEY` |
 
 [HST-001] For each host in the table, `providers::hosts::<name>::register`
 MUST register, under the host's name and handles, a provider named after the
 host. Its model calls MUST stream the host's protocol from the configured
 base URL, or the default base URL when none is configured: Chat Completions
-at `<base>/chat/completions` with `authorization: Bearer <key>`, and for
-MiniMax, Messages at `<base>/v1/messages` with `x-api-key: <key>` and
-`anthropic-version: 2023-06-01`. The key is the configuration's API key
+at `<base>/chat/completions` with `authorization: Bearer <key>`; for xAI and
+Hugging Face, Responses at `<base>/responses` with `authorization: Bearer
+<key>`; and for MiniMax, Messages at `<base>/v1/messages` with `x-api-key:
+<key>` and `anthropic-version: 2023-06-01`. The key is the configuration's API key
 value, or the `env` value named by the host's key variable. Registering
 every host, OpenAI and Anthropic into one registry MUST succeed.
 Falsifier: For any host, a recorded request goes to another URL, uses another method or credential header, or omits the key; the provider is missing under one of its handles or has another name; or registering every host in the table with `openai::register`, `openai::register_factories` and `anthropic::register` into one registry fails.
@@ -303,4 +306,113 @@ above gives the kind of the table's status; otherwise the kind is
 Falsifier: A DeepSeek stream error `{"error": {"message": "m", "type": "rate_limit_error", "code": "rate_limit_exceeded"}}` does not end the call with an error whose message is `m`, code `rate_limit_exceeded`, type `rate_limit_error` and kind `RateLimit`, or it is not retryable; a code `insufficient_quota` gives another kind or is retryable; a code of 503 or `"503"` gives a kind other than `ServiceUnavailable`; a Moonshot AI error of type `server_error` gives a kind other than `InternalServer` or is not retryable; a Mistral event `{"object": "error", "message": "m", "type": "invalid_request_error", "code": "3230"}` is ignored, or gives a message other than `m` or a kind other than `BadRequest`; or an error of type `unknown_error` gives a kind other than `Response` or is retryable.
 Mechanism: hosts
 Rationale: The table and rules are `deepseek-chat-language-model.ts`'s; an error that arrives before the first event is retried under MOD-005 when it is retryable.
+Status: Agreed 2026-10-22
+
+## xAI and Hugging Face
+
+These two hosts speak only the Responses protocol: `@ai-sdk/xai` 5.0.0
+removed its Chat Completions model. xAI is ported for text: its built-in
+tools, such as web and X search, and the citations they return are not.
+
+[HST-019] `OpenAICompatibleProvider::from_modelsdev_provider` MUST give
+metadata whose package is `@ai-sdk/xai` or `@ai-sdk/huggingface`, or whose id
+is `xai` or `huggingface`, that host's Responses protocol and rules.
+Falsifier: A provider built from metadata with id `xai` and package `@ai-sdk/openai-compatible`, or with id `hf` and package `@ai-sdk/huggingface`, sends a request to a path other than `<base>/responses`, or a body other than the one the provider that `providers::hosts` registers for that host sends for the same call.
+Mechanism: hosts
+Status: Agreed 2026-10-22
+
+[HST-020] An xAI request MUST send top-k as `top_k`, min-p as `min_p` and a
+seed as `seed`. An xAI call MUST fail with `Error::Validation` before any
+request is sent when it sets a frequency or presence penalty, a reasoning
+summary, a text verbosity, a maximum tool call count, context management, a
+cache retention, metadata or a tool selection (`ToolChoice::Selection`). A
+Hugging Face call MUST fail the same way when it sets top-k, min-p, a seed, a
+frequency or presence penalty, a reasoning summary, a text verbosity, an
+output include list, a maximum tool call count, parallel tool calls, a
+service tier, a safety identifier, a cache key, a cache retention, context
+management or a tool selection.
+Falsifier: For xAI and for Hugging Face, a call that sets one of the settings named for that host sends a request or fails with another error kind; or an xAI call with top-k 40, min-p 0.1 and seed 7 lacks `top_k: 40`, `min_p: 0.1` or `seed: 7`.
+Mechanism: hosts
+Rationale: The TypeScript packages drop these settings with a warning or never send them; DeepSeek, Moonshot AI and Mistral reject theirs the same way (HST-008).
+Status: Agreed 2026-10-22
+
+[HST-021] An xAI reasoning effort MUST be sent as `reasoning.effort`, with
+`minimal` as `low`, `xhigh` and `max` as `xhigh` for the model `grok-4.6` and
+as `high` for every other model, and any other effort as given; disabled
+reasoning MUST be sent as `none`. For a model whose id is `grok-4.20`, then
+optionally `-` and four digits, then `-reasoning` or `-non-reasoning`, an
+effort or disabled reasoning MUST fail with `Error::Validation` before any
+request is sent. The provider parameters under the key `xai` take `store`:
+`false` MUST be sent as `"store": false` with `reasoning.encrypted_content`
+added to `include`, and `true` or no setting MUST send no `store` field. A
+named tool choice MUST be sent as `{"type": "function", "name": <name>}`, and
+a call with a provider tool MUST fail with `Error::UnsupportedOperation`
+before any request is sent.
+Falsifier: A recorded xAI body for effort `minimal` has a `reasoning.effort` other than `low`; effort `xhigh` for `grok-4.7` sends other than `high`, or for `grok-4.6` other than `xhigh`; disabled reasoning sends other than `none`; an effort for `grok-4.20-0309-reasoning` or `grok-4.20-non-reasoning` sends a request or fails with another error kind; a call with `xai` store false lacks `"store": false` or lacks `reasoning.encrypted_content` in `include`, or one with store true or unset has a `store` field; a named tool `lookup` is sent in another shape; or a call with a provider tool sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: The effort map and the models without reasoning settings are `xai-responses-language-model.ts` and `supports-reasoning-effort.ts`; xAI stores responses by default, so only `false` needs sending.
+Status: Agreed 2026-10-22
+
+[HST-022] An xAI request MUST send no `item_reference` item and no replayed
+raw item. An assistant turn MUST send each text part as `{"role":
+"assistant", "content": <text>}`, with `"id"` set to the part's xAI item id
+when it has one; each tool call as `{"type": "function_call", "id": <its xAI
+item id, else its call id>, "call_id", "name", "arguments", "status":
+"completed"}`; and each reasoning part that has an xAI item id or encrypted
+content as `{"type": "reasoning", "id": <its item id, else "">, "summary":
+[{"type": "summary_text", "text": <text>}], "status": "completed"}` with its
+`encrypted_content`, and with an empty `summary` when the text is empty.
+Reasoning with neither an item id nor encrypted content MUST NOT be sent, and
+neither are built-in tool calls and results. A user image MUST be sent as
+`input_image`, any other file given as a URL as `{"type": "input_file",
+"file_url": <URL>}`, and any other file given as bytes MUST fail with
+`Error::Validation` before any request is sent. In a tool result's content, a
+file that is not an image MUST be sent as the text `[file: <media type>]`.
+Falsifier: A recorded xAI body for a history whose assistant turn has reasoning with encrypted content, text and a tool call, each with an xAI item id, holds an `item_reference` or sends one of them in another shape; reasoning without an item id or encrypted content is sent; a `text/csv` file given as a URL is not sent as `input_file` with that `file_url`; a PDF given as bytes sends a request or fails with another error kind; or a PDF in a tool result's content is sent as anything other than the text `[file: application/pdf]`.
+Mechanism: hosts
+Rationale: These are the shapes `convert-to-xai-responses-input.ts` sends; xAI resolves no references to stored items.
+Status: Agreed 2026-10-22
+
+[HST-023] An xAI stream MUST keep each output item's id, and a reasoning
+item's encrypted content, in part metadata under the key `xai`, from which
+HST-022 reads them. When a usage's `input_tokens_details.cached_tokens` is
+greater than its `input_tokens`, input tokens MUST be their sum. An xAI error
+body `{"code": <c>, "error": <e>}` MUST give a `ProviderError` with the
+message `<c>: <e>` and the code `<c>`.
+Falsifier: A next request built from the history of an xAI stream with a reasoning item that carries encrypted content and a message item lacks that encrypted content or the message's item id, or the parts hold them under a key other than `xai`; usage with `input_tokens` 4142 and `cached_tokens` 4328 reports input tokens other than 8470 or cache-read tokens other than 4328; or an HTTP 400 body `{"code": "Client specified an invalid argument", "error": "Invalid request content"}` gives a message other than `Client specified an invalid argument: Invalid request content` or a code other than `Client specified an invalid argument`.
+Mechanism: hosts
+Rationale: Item ids under the host's own key are never sent to OpenAI when a history moves to it (`convert-xai-responses-usage.ts`, `xai-error.ts`).
+Status: Agreed 2026-10-22
+
+[HST-024] A Hugging Face output schema MUST be sent as `text.format`
+`{"type": "json_schema", "name", "strict": false, "schema"}` with the schema
+as given. Tool choice `required` MUST be sent as `"required"`, a named tool
+as `{"type": "function", "function": {"name": <name>}}`, and tool choice
+`none` MUST send neither `tools` nor `tool_choice`. A call with a provider
+tool MUST fail with `Error::UnsupportedOperation` before any request is
+sent. A request MUST send no `item_reference` item and no replayed raw item;
+each assistant text part and each reasoning part MUST be sent as `{"role":
+"assistant", "content": [{"type": "output_text", "text": <text>}]}`, tool
+calls as `function_call` items and tool results as `function_call_output`
+items. A user file that is not an image MUST fail with `Error::Validation`
+before any request is sent.
+Falsifier: A recorded Hugging Face body for an output schema with an optional property has `strict` true or a changed schema; tool choice `required` or a named tool `lookup` is sent in another shape, or tool choice `none` sends `tools` or `tool_choice`; a call with a provider tool sends a request or fails with another error kind; a body for a history with reasoning `R`, text `T`, a tool call and its result holds an `item_reference`, sends `R` or `T` in another shape, or lacks the `function_call` or `function_call_output` item; or a user PDF sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: The TypeScript package drops tool calls and results from the history, which breaks an agent's tool loop; Hugging Face's Responses API follows OpenAI's, whose items these are.
+Status: Agreed 2026-10-22
+
+## Every Responses provider
+
+[HST-025] A Responses stream, for OpenAI, xAI and Hugging Face, MUST end the
+call with an `Error::Provider` that keeps the message, `code` and `type` of a
+`response.failed` event's `response.error`, or of an `error` event, with the
+kind and retry flag that HST-018's rules give. A `response.done` event MUST be
+read as `response.completed`. A `response.incomplete` event MUST report the
+finish reason `length` for the reason `max_output_tokens`, `content_filter`
+for `content_filter` and `other` otherwise, whether or not its response has a
+`status`. A reasoning block whose summary part ends before its output item
+MUST still carry the item's encrypted content.
+Falsifier: An OpenAI or xAI stream that sends `response.failed` with `{"error": {"code": "server_error", "message": "m"}}` does not end the call with an error whose message is `m`, code `server_error` and kind `InternalServer`; an `error` event with code `rate_limit_exceeded` gives a kind other than `RateLimit`; a stream that ends with `response.done` reports another finish reason or usage than the same stream ending with `response.completed`; `response.incomplete` with reason `max_output_tokens` and no `status` reports a finish reason other than `length`; or an xAI stream whose `response.reasoning_summary_part.done` comes before an `output_item.done` with `encrypted_content` delivers a reasoning part without that encrypted content.
+Mechanism: hosts
+Rationale: The crate read `response.failed` as metadata only, so a failed OpenAI response ended with no error (`openai-responses-language-model.ts` raises one).
 Status: Agreed 2026-10-22

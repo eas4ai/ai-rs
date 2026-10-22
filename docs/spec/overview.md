@@ -33,7 +33,7 @@ same streams. It departs from Python only where a requirement says so.
 | package.md | PKG | package, library and repository names, the upstream credit, the origin remote and the check script |
 | models.md | MOD | model ids, model snapshots, retries, timeouts and dropping a call, the time limits of the reqwest transport, and the scripted test provider |
 | agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency, run usage, stopping a run and the history of an interrupted run |
-| hosts.md | HST | the hosted chat providers that use the Chat Completions or Messages protocol: Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI, Z.ai and MiniMax; tool calls without an index in any Chat Completions stream |
+| hosts.md | HST | the hosted chat providers that use the Chat Completions, Responses or Messages protocol: Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI, Z.ai, xAI, Hugging Face and MiniMax; tool calls without an index in any Chat Completions stream; errors and terminal events in any Responses stream |
 
 ## Not yet specified
 
