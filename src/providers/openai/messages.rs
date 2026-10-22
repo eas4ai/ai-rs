@@ -160,6 +160,11 @@ fn moonshot_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
         "video/wmv",
         "video/3gpp",
     ];
+    if fetch_url(part).is_some() {
+        return Err(invalid(
+            "Moonshot AI does not fetch media URLs; supply the file bytes or build the provider with a download transport",
+        ));
+    }
     if mt.starts_with("text/") {
         return Ok(json!({"type":"text","text":text_file(part)?}));
     }
@@ -170,11 +175,6 @@ fn moonshot_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
     } else {
         return Err(invalid(format!("Moonshot AI does not take {mt} files")));
     };
-    if fetch_url(part).is_some() {
-        return Err(invalid(
-            "Moonshot AI does not fetch media URLs; supply the file bytes or build the provider with a download transport",
-        ));
-    }
     let url = media::data_to_data_url(media_ref(&part.data), mt);
     Ok(json!({"type":kind,kind:{"url":url}}))
 }
@@ -514,9 +514,35 @@ fn mistral_content(msg: &Message) -> Value {
 fn downloads(wire: Wire, media_type: &str) -> bool {
     match dialect_of(wire) {
         Dialect::OpenAI => media_type.starts_with("audio/") || media_type == "application/pdf",
-        Dialect::Moonshot => media_type.starts_with("image/") || media_type.starts_with("video/"),
+        Dialect::Moonshot => ["image/", "video/", "text/"]
+            .iter()
+            .any(|kind| media_type.starts_with(kind)),
         Dialect::DeepSeek | Dialect::Mistral => false,
     }
+}
+/// The URL of a user file that the protocol downloads before the request.
+fn download_url(file: &FilePart, wire: Wire) -> Option<&str> {
+    file.data
+        .as_text()
+        .filter(|s| downloads(wire, &file.media_type) && media::is_downloadable_url(s))
+}
+/// The messages with each file the protocol would download given inline as
+/// empty bytes, to check the request before any download; `None` when there
+/// is no such file.
+pub(super) fn without_downloads(messages: &[Message], wire: Wire) -> Option<Vec<Message>> {
+    let mut found = false;
+    let mut messages = messages.to_vec();
+    for msg in messages.iter_mut().filter(|m| m.role == MessageRole::User) {
+        for part in &mut msg.parts {
+            if let Part::File(file) = part
+                && download_url(file, wire).is_some()
+            {
+                file.data = FileData::Bytes(Vec::new());
+                found = true;
+            }
+        }
+    }
+    found.then_some(messages)
 }
 pub(super) async fn download_files(
     mut messages: Vec<Message>,
@@ -534,14 +560,7 @@ pub(super) async fn download_files(
             let Part::File(file) = part else {
                 continue;
             };
-            if !downloads(wire, &file.media_type) {
-                continue;
-            }
-            let Some(url) = file
-                .data
-                .as_text()
-                .filter(|s| media::is_downloadable_url(s))
-            else {
+            let Some(url) = download_url(file, wire) else {
                 continue;
             };
             let (bytes, _) = crate::models::files::download(
