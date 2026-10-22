@@ -63,11 +63,13 @@ impl OpenAICompatibleProvider {
             protocol_override: None,
         }
     }
-    /// Build a provider from models.dev metadata. It speaks Responses when
-    /// the metadata names OpenAI's own adapter package, `@ai-sdk/openai`, and
-    /// Chat Completions otherwise. Metadata that names a Chat Completions
-    /// host of `providers::hosts`, by package or id, gets that host's
-    /// request and response rules.
+    /// Build a provider from models.dev metadata. Metadata that names a
+    /// Responses host of `providers::hosts`, xAI or Hugging Face, by package
+    /// or id, gets that host's Responses rules. Other metadata speaks
+    /// Responses when it names OpenAI's own adapter package,
+    /// `@ai-sdk/openai`, and Chat Completions otherwise; metadata that names
+    /// a Chat Completions host, by package or id, gets that host's request
+    /// and response rules.
     pub fn from_modelsdev_provider(
         metadata: &ModelsDevProvider,
         mut config: ProviderConfig,
@@ -94,13 +96,15 @@ impl OpenAICompatibleProvider {
         if metadata.id == "openai" && !explicit_url && config.base_url_env.is_none() {
             config.base_url_env = Some("OPENAI_BASE_URL".into());
         }
+        // A Responses host keeps its rules even under OpenAI's package, whose
+        // own Responses rules would send its item ids and settings wrongly.
         let default_protocol: Arc<dyn ProviderProtocol> =
-            if metadata.npm.as_deref() == Some("@ai-sdk/openai") {
+            if let Some(profile) = hosts::responses_profile_for(metadata) {
+                Arc::new(HostResponsesProtocol(profile))
+            } else if metadata.npm.as_deref() == Some("@ai-sdk/openai") {
                 Arc::new(OpenAIResponsesProtocol)
             } else if let Some(profile) = hosts::chat_profile_for(metadata) {
                 Arc::new(HostChatProtocol(profile, None))
-            } else if let Some(profile) = hosts::responses_profile_for(metadata) {
-                Arc::new(HostResponsesProtocol(profile))
             } else {
                 Arc::new(OpenAIChatCompletionsProtocol)
             };
