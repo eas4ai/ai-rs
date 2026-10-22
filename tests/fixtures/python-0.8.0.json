@@ -1,0 +1,745 @@
+{
+  "events": [
+    {
+      "kind": "stream_start",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "finish_reason": "tool_call",
+      "kind": "stream_end",
+      "message": {
+        "id": "assistant",
+        "parts": [
+          {
+            "id": "text",
+            "kind": "text",
+            "provider_metadata": null,
+            "text": "hello"
+          },
+          {
+            "id": "reason",
+            "kind": "reasoning",
+            "provider_metadata": null,
+            "text": "thinking"
+          },
+          {
+            "id": "call",
+            "kind": "tool_call",
+            "provider_metadata": null,
+            "tool_args": "{\"city\":\"SF\"}",
+            "tool_call_id": "tc",
+            "tool_name": "weather"
+          },
+          {
+            "id": "builtin",
+            "kind": "builtin_tool_call",
+            "provider_metadata": null,
+            "tool_args": "{}",
+            "tool_call_id": "bc",
+            "tool_name": "search"
+          },
+          {
+            "id": "builtin-return",
+            "is_error": false,
+            "kind": "builtin_tool_return",
+            "provider_metadata": null,
+            "result": [
+              "answer"
+            ],
+            "tool_call_id": "bc",
+            "tool_name": "search"
+          },
+          {
+            "data": "iVBORw0K",
+            "filename": "image.png",
+            "id": "file",
+            "kind": "file",
+            "media_type": "image/png",
+            "provider_metadata": null
+          }
+        ],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": {
+        "key": "value"
+      },
+      "response_id": "r1",
+      "response_model": "actual",
+      "usage": {
+        "cache_read_tokens": null,
+        "cache_write_tokens": null,
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "raw": null,
+        "reasoning_tokens": null
+      }
+    },
+    {
+      "block_id": "t",
+      "kind": "text_start",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "block_id": "t",
+      "chunk": "hello",
+      "kind": "text_delta",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "block_id": "t",
+      "kind": "text_end",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "block_id": "r",
+      "kind": "reasoning_start",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "block_id": "r",
+      "chunk": "think",
+      "kind": "reasoning_delta",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "block_id": "r",
+      "kind": "reasoning_end",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "kind": "tool_start",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "tool_call_id": "tc",
+      "tool_name": "weather",
+      "usage": null
+    },
+    {
+      "chunk": "{}",
+      "kind": "tool_delta",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "tool_call_id": "tc",
+      "usage": null
+    },
+    {
+      "kind": "tool_end",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "tool_call": {
+        "id": "call",
+        "kind": "tool_call",
+        "provider_metadata": null,
+        "tool_args": "{\"city\":\"SF\"}",
+        "tool_call_id": "tc",
+        "tool_name": "weather"
+      },
+      "tool_call_id": "tc",
+      "usage": null
+    },
+    {
+      "kind": "builtin_tool_start",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "tool_call_id": "bc",
+      "tool_name": "search",
+      "usage": null
+    },
+    {
+      "chunk": "{}",
+      "kind": "builtin_tool_delta",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "tool_call_id": "bc",
+      "usage": null
+    },
+    {
+      "kind": "builtin_tool_end",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "tool_call": {
+        "id": "builtin",
+        "kind": "builtin_tool_call",
+        "provider_metadata": null,
+        "tool_args": "{}",
+        "tool_call_id": "bc",
+        "tool_name": "search"
+      },
+      "tool_call_id": "bc",
+      "usage": null
+    },
+    {
+      "kind": "builtin_tool_result",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "result": {
+        "id": "builtin-return",
+        "is_error": false,
+        "kind": "builtin_tool_return",
+        "provider_metadata": null,
+        "result": [
+          "answer"
+        ],
+        "tool_call_id": "bc",
+        "tool_name": "search"
+      },
+      "tool_call_id": "bc",
+      "usage": null
+    },
+    {
+      "block_id": "f",
+      "data": "aW1hZ2U=",
+      "filename": "image.png",
+      "kind": "file",
+      "media_type": "image/png",
+      "message": {
+        "id": "<unset>",
+        "parts": [],
+        "provider_metadata": null,
+        "role": "assistant",
+        "turn_id": null,
+        "usage": null
+      },
+      "provider_metadata": null,
+      "usage": null
+    },
+    {
+      "kind": "tool_call_result",
+      "message": {
+        "id": "tool",
+        "parts": [
+          {
+            "id": "result",
+            "is_hook_deferred": false,
+            "kind": "tool_result",
+            "provider_metadata": null,
+            "result": {
+              "temp": 20
+            },
+            "result_kind": "json",
+            "tool_call_id": "tc",
+            "tool_name": "weather"
+          },
+          {
+            "id": "null-result",
+            "is_hook_deferred": false,
+            "kind": "tool_result",
+            "model_input": null,
+            "provider_metadata": null,
+            "result": "fallback",
+            "result_kind": "json",
+            "tool_call_id": "tc",
+            "tool_name": "weather"
+          },
+          {
+            "id": "special",
+            "is_hook_deferred": false,
+            "kind": "tool_result",
+            "provider_metadata": null,
+            "result": {
+              "type": "content",
+              "value": [
+                {
+                  "id": "text",
+                  "kind": "text",
+                  "provider_metadata": null,
+                  "text": "hello"
+                },
+                {
+                  "data": "iVBORw0K",
+                  "filename": "image.png",
+                  "id": "file",
+                  "kind": "file",
+                  "media_type": "image/png",
+                  "provider_metadata": null
+                }
+              ]
+            },
+            "result_kind": "special",
+            "tool_call_id": "tc",
+            "tool_name": "weather"
+          }
+        ],
+        "provider_metadata": null,
+        "role": "tool",
+        "turn_id": null,
+        "usage": null
+      },
+      "results": [
+        {
+          "id": "result",
+          "is_hook_deferred": false,
+          "kind": "tool_result",
+          "provider_metadata": null,
+          "result": {
+            "temp": 20
+          },
+          "result_kind": "json",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        },
+        {
+          "id": "null-result",
+          "is_hook_deferred": false,
+          "kind": "tool_result",
+          "model_input": null,
+          "provider_metadata": null,
+          "result": "fallback",
+          "result_kind": "json",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        },
+        {
+          "id": "special",
+          "is_hook_deferred": false,
+          "kind": "tool_result",
+          "provider_metadata": null,
+          "result": {
+            "type": "content",
+            "value": [
+              {
+                "id": "text",
+                "kind": "text",
+                "provider_metadata": null,
+                "text": "hello"
+              },
+              {
+                "data": "iVBORw0K",
+                "filename": "image.png",
+                "id": "file",
+                "kind": "file",
+                "media_type": "image/png",
+                "provider_metadata": null
+              }
+            ]
+          },
+          "result_kind": "special",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        }
+      ]
+    },
+    {
+      "kind": "partial_tool_call_result",
+      "label": {
+        "nested": true
+      },
+      "tool_call_id": "tc",
+      "tool_name": "weather",
+      "value": [
+        1,
+        2
+      ]
+    },
+    {
+      "kind": "retry"
+    },
+    {
+      "hooks": [
+        {
+          "hook_id": "approve",
+          "hook_type": "approval",
+          "id": "hook",
+          "kind": "hook",
+          "metadata": {},
+          "resolution": null,
+          "status": "pending",
+          "tool_call_id": "tc"
+        }
+      ],
+      "kind": "run_blocked"
+    },
+    {
+      "hook": {
+        "hook_id": "approve",
+        "hook_type": "approval",
+        "id": "hook",
+        "kind": "hook",
+        "metadata": {},
+        "resolution": null,
+        "status": "pending",
+        "tool_call_id": "tc"
+      },
+      "kind": "hook",
+      "message": {
+        "id": "internal",
+        "parts": [
+          {
+            "hook_id": "approve",
+            "hook_type": "approval",
+            "id": "hook",
+            "kind": "hook",
+            "metadata": {},
+            "resolution": null,
+            "status": "pending",
+            "tool_call_id": "tc"
+          }
+        ],
+        "provider_metadata": null,
+        "role": "internal",
+        "turn_id": null,
+        "usage": null
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": "system",
+      "parts": [
+        {
+          "id": "text",
+          "kind": "text",
+          "provider_metadata": null,
+          "text": "hello"
+        }
+      ],
+      "provider_metadata": null,
+      "role": "system",
+      "turn_id": null,
+      "usage": null
+    },
+    {
+      "id": "user",
+      "parts": [
+        {
+          "id": "text",
+          "kind": "text",
+          "provider_metadata": null,
+          "text": "hello"
+        },
+        {
+          "data": "iVBORw0K",
+          "filename": "image.png",
+          "id": "file",
+          "kind": "file",
+          "media_type": "image/png",
+          "provider_metadata": null
+        }
+      ],
+      "provider_metadata": null,
+      "role": "user",
+      "turn_id": null,
+      "usage": null
+    },
+    {
+      "id": "assistant",
+      "parts": [
+        {
+          "id": "text",
+          "kind": "text",
+          "provider_metadata": null,
+          "text": "hello"
+        },
+        {
+          "id": "reason",
+          "kind": "reasoning",
+          "provider_metadata": null,
+          "text": "thinking"
+        },
+        {
+          "id": "call",
+          "kind": "tool_call",
+          "provider_metadata": null,
+          "tool_args": "{\"city\":\"SF\"}",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        },
+        {
+          "id": "builtin",
+          "kind": "builtin_tool_call",
+          "provider_metadata": null,
+          "tool_args": "{}",
+          "tool_call_id": "bc",
+          "tool_name": "search"
+        },
+        {
+          "id": "builtin-return",
+          "is_error": false,
+          "kind": "builtin_tool_return",
+          "provider_metadata": null,
+          "result": [
+            "answer"
+          ],
+          "tool_call_id": "bc",
+          "tool_name": "search"
+        },
+        {
+          "data": "iVBORw0K",
+          "filename": "image.png",
+          "id": "file",
+          "kind": "file",
+          "media_type": "image/png",
+          "provider_metadata": null
+        }
+      ],
+      "provider_metadata": null,
+      "role": "assistant",
+      "turn_id": null,
+      "usage": null
+    },
+    {
+      "id": "tool",
+      "parts": [
+        {
+          "id": "result",
+          "is_hook_deferred": false,
+          "kind": "tool_result",
+          "provider_metadata": null,
+          "result": {
+            "temp": 20
+          },
+          "result_kind": "json",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        },
+        {
+          "id": "null-result",
+          "is_hook_deferred": false,
+          "kind": "tool_result",
+          "model_input": null,
+          "provider_metadata": null,
+          "result": "fallback",
+          "result_kind": "json",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        },
+        {
+          "id": "special",
+          "is_hook_deferred": false,
+          "kind": "tool_result",
+          "provider_metadata": null,
+          "result": {
+            "type": "content",
+            "value": [
+              {
+                "id": "text",
+                "kind": "text",
+                "provider_metadata": null,
+                "text": "hello"
+              },
+              {
+                "data": "iVBORw0K",
+                "filename": "image.png",
+                "id": "file",
+                "kind": "file",
+                "media_type": "image/png",
+                "provider_metadata": null
+              }
+            ]
+          },
+          "result_kind": "special",
+          "tool_call_id": "tc",
+          "tool_name": "weather"
+        }
+      ],
+      "provider_metadata": null,
+      "role": "tool",
+      "turn_id": null,
+      "usage": null
+    },
+    {
+      "id": "internal",
+      "parts": [
+        {
+          "hook_id": "approve",
+          "hook_type": "approval",
+          "id": "hook",
+          "kind": "hook",
+          "metadata": {},
+          "resolution": null,
+          "status": "pending",
+          "tool_call_id": "tc"
+        }
+      ],
+      "provider_metadata": null,
+      "role": "internal",
+      "turn_id": null,
+      "usage": null
+    }
+  ],
+  "source": "ai-python 0.8.0",
+  "tools": [
+    {
+      "kind": "function",
+      "name": "weather",
+      "require_approval": false,
+      "spec": {
+        "description": null,
+        "params": {
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      "tool_config": null
+    },
+    {
+      "kind": "provider",
+      "name": "search",
+      "require_approval": false,
+      "spec": null,
+      "tool_config": {
+        "args": {
+          "max_uses": 3
+        },
+        "id": "provider.search"
+      }
+    },
+    {
+      "kind": "provider",
+      "name": "mcp",
+      "require_approval": false,
+      "spec": null,
+      "tool_config": {
+        "args": {
+          "headers": {
+            "x_api_key": "fixture-value"
+          },
+          "server_label": "server"
+        },
+        "id": "openai.mcp"
+      }
+    }
+  ],
+  "usage": [
+    {
+      "cache_read_tokens": null,
+      "cache_write_tokens": null,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "raw": null,
+      "reasoning_tokens": null
+    },
+    {
+      "cache_read_tokens": null,
+      "cache_write_tokens": null,
+      "input_tokens": 7,
+      "output_tokens": 3,
+      "raw": {
+        "provider": 7
+      },
+      "reasoning_tokens": 1
+    }
+  ]
+}
