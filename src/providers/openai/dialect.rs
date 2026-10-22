@@ -251,7 +251,8 @@ fn sets_seed(p: &InferenceRequestParams) -> bool {
 /// A DeepSeek model before V4: `deepseek-chat`, `deepseek-reasoner`, or
 /// `deepseek-v1` to `deepseek-v3` with an optional minor version, at the
 /// start of the id or after `/` or `.`, followed by the end or by `-`, `/`,
-/// `:` or `.` (`is-deepseek-v4-model.ts`).
+/// `:` or `.` (`is-deepseek-v4-model.ts`). The `.` of a minor version is
+/// itself such a follower, so the version digit alone decides.
 pub(super) fn deepseek_legacy(model: &str) -> bool {
     let bytes = model.as_bytes();
     model.match_indices("deepseek-").any(|(start, _)| {
@@ -267,13 +268,7 @@ pub(super) fn deepseek_legacy(model: &str) -> bool {
             .strip_prefix('v')
             .and_then(|r| r.strip_prefix(['1', '2', '3']))
         {
-            // An optional `.<digits>` minor version.
-            match tail.strip_prefix('.') {
-                Some(minor) if minor.starts_with(|c: char| c.is_ascii_digit()) => {
-                    minor.trim_start_matches(|c: char| c.is_ascii_digit())
-                }
-                _ => tail,
-            }
+            tail
         } else {
             return false;
         };
@@ -563,6 +558,7 @@ mod tests {
             "deepseek-v3.2",
             "deepseek-v3",
             "provider/deepseek-v2.5",
+            "deepseek-v3.2x",
             "deepseek-chat:latest",
             "org.deepseek-v1-beta",
         ] {
