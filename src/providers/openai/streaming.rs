@@ -110,6 +110,10 @@ struct Parser {
     has_text: bool,
     /// Tool events held until the finish, while text can still void them.
     held: Vec<Event>,
+    /// `StreamStart` was queued. It waits for the first chunk that is not an
+    /// error, so an error the server sends first comes before any event and
+    /// a call retries it when it is retryable.
+    started: bool,
     ended: bool,
     queue: VecDeque<Event>,
     texts: BTreeSet<String>,
@@ -142,8 +146,6 @@ pub(super) fn parse(
     image_type: String,
     json_output: bool,
 ) -> EventStream {
-    let mut queue = VecDeque::new();
-    queue.push_back(Event::StreamStart(StreamStart::default()));
     let api = wire.api();
     let state = Parser {
         input: http::sse_json(*api, provider.clone(), body),
@@ -157,8 +159,9 @@ pub(super) fn parse(
         json_output,
         has_text: false,
         held: Vec::new(),
+        started: false,
         ended: false,
-        queue,
+        queue: VecDeque::new(),
         texts: BTreeSet::new(),
         reasoning: BTreeSet::new(),
         reasoning_delta: BTreeSet::new(),
@@ -196,6 +199,7 @@ pub(super) fn parse(
                     {
                         return Err(dialect::stream_error(p.chat, p.api, &p.provider, &data));
                     }
+                    p.start();
                     if p.responses {
                         p.response(&data);
                     } else {
@@ -209,10 +213,18 @@ pub(super) fn parse(
     .boxed()
 }
 impl Parser {
+    fn start(&mut self) {
+        if !self.started {
+            self.started = true;
+            self.queue
+                .push_back(Event::StreamStart(StreamStart::default()));
+        }
+    }
     fn complete(&mut self) {
         if self.ended {
             return;
         }
+        self.start();
         if self.responses {
             for id in std::mem::take(&mut self.texts) {
                 self.queue.push_back(block("text_end", &id, None));

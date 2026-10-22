@@ -54,7 +54,8 @@ static PROFILE: ChatProfile = ChatProfile {
         ("network_error", "error"),
     ],
     reasoning_outside_completion: false,
-    json_drops_tool_calls_after_text: false,    unsupported: &[],
+    json_drops_tool_calls_after_text: false,
+    unsupported: &[],
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
 };

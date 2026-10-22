@@ -215,15 +215,13 @@ fn sampling(p: &InferenceRequestParams) -> Vec<&'static str> {
         return Vec::new();
     };
     let mut set = Vec::new();
-    if s
-        .temperature
+    if s.temperature
         .as_ref()
         .is_some_and(|t| matches!(t.temperature, ProviderValue::Value(_)))
     {
         set.push("temperature");
     }
-    if s
-        .top_p
+    if s.top_p
         .as_ref()
         .is_some_and(|t| matches!(t.top_p, ProviderValue::Value(Some(_))))
     {
@@ -245,9 +243,9 @@ fn sets_seed(p: &InferenceRequestParams) -> bool {
     let ProviderValue::Value(s) = &p.sampling else {
         return false;
     };
-    s.seed.as_ref().is_some_and(|t| {
-        matches!(&t.seed, ProviderValue::Value(Some(Seed::Value(seed))) if *seed != -1)
-    })
+    s.seed.as_ref().is_some_and(
+        |t| matches!(&t.seed, ProviderValue::Value(Some(Seed::Value(seed))) if *seed != -1),
+    )
 }
 
 /// A DeepSeek model before V4: `deepseek-chat`, `deepseek-reasoner`, or
@@ -448,7 +446,12 @@ fn mfjs(schema: Value) -> Value {
             }
         }
     }
-    for key in ["properties", "patternProperties", "$defs", "dependentSchemas"] {
+    for key in [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "dependentSchemas",
+    ] {
         if let Some(Value::Object(map)) = object.get_mut(key) {
             for value in map.values_mut() {
                 *value = mfjs(value.take());

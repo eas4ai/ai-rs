@@ -50,7 +50,8 @@ static PROFILE: ChatProfile = ChatProfile {
     rejects_penalties_and_seed: false,
     finish_reasons: &[],
     reasoning_outside_completion: false,
-    json_drops_tool_calls_after_text: true,    unsupported: &[],
+    json_drops_tool_calls_after_text: true,
+    unsupported: &[],
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
 };

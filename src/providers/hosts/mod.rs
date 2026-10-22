@@ -47,12 +47,12 @@
 //! `list_models` and `probe` return `Error::UnsupportedOperation`.
 use crate::{
     Error, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
+    models::files::DownloadTransport,
     providers::{
         ModelsDevProvider,
         anthropic::protocol::{HostMessagesProtocol, MessagesProfile},
         openai::{profile::ChatProfile, protocol::HostChatProtocol},
     },
-    models::files::DownloadTransport,
     transport::HttpTransport,
 };
 use async_trait::async_trait;

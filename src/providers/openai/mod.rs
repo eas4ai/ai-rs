@@ -33,8 +33,9 @@
 //! or custom provider metadata. Metadata that names OpenAI's own package,
 //! `@ai-sdk/openai`, selects Responses, as `OpenAICompatibleProvider::new` does;
 //! other metadata selects Chat Completions. Metadata for Cerebras, DeepInfra,
-//! Fireworks, Together AI or Z.ai gets that host's rules from
-//! `providers::hosts`, which also registers those hosts directly. An explicit
+//! DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI or Z.ai gets that
+//! host's rules from `providers::hosts`, which also registers those hosts
+//! directly. An explicit
 //! protocol overrides the default. Custom providers using
 //! these protocols implement `Provider::shared_transport` for owned streams.
 //! `params::OpenAIParams::apply` stores options under the stable `openai` key.

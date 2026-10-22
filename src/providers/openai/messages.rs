@@ -112,12 +112,22 @@ fn text_file(part: &FilePart) -> Result<String, Error> {
 }
 /// The media URL of a file, which a host that cannot fetch URLs cannot take.
 fn fetch_url(part: &FilePart) -> Option<&str> {
-    part.data.as_text().filter(|s| media::is_downloadable_url(s))
+    part.data
+        .as_text()
+        .filter(|s| media::is_downloadable_url(s))
 }
 /// DeepSeek takes GIF, JPEG, PNG and WebP images only
 /// (`convert-to-deepseek-chat-messages.ts`).
 fn deepseek_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
-    if !["image/gif", "image/jpeg", "image/jpg", "image/png", "image/webp"].contains(&mt) {
+    if ![
+        "image/gif",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+    ]
+    .contains(&mt)
+    {
         return Err(invalid(format!(
             "DeepSeek takes only GIF, JPEG, PNG and WebP images, not {mt}"
         )));
@@ -194,9 +204,9 @@ fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
         ToolResultValue::Special(SpecialToolResult::Content(content))
             if match dialect_of(wire) {
                 Dialect::OpenAI => false,
-                Dialect::DeepSeek => !content.value.iter().any(|p| {
-                    matches!(p, ContentPart::File(f) if f.media_type.starts_with("image/"))
-                }),
+                Dialect::DeepSeek => !content.value.iter().any(
+                    |p| matches!(p, ContentPart::File(f) if f.media_type.starts_with("image/")),
+                ),
                 Dialect::Moonshot | Dialect::Mistral => true,
             } =>
         {
