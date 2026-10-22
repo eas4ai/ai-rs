@@ -145,6 +145,9 @@ These follow `docs/spec/models.md` and `docs/spec/agents.md`.
 - `RunOptions::tool_concurrency` caps the tools a step runs at once,
   `AgentStream::usage` sums the run's usage and `AgentStream::stop_reason` says
   why the run stopped. Python has none of them.
+- `AgentStream::interrupted_messages` returns the history plus the step a
+  stopped or failed run was in, as delivered, with cancelled error results for
+  its unfinished tool calls. Python loses that step.
 - The `testing` feature adds a scripted provider for tests without a network.
 
 ## UI adapter
@@ -202,7 +205,7 @@ rules follow the source.
 | Captured Python UI outputs | `tests/ui_python_compat.rs`, `tests/fixtures/ui-python-0.8.0.json` | Requests, histories, event streams and exact JSON encoding from the unmodified Python tests |
 | UI transport integration | `tests/ui_transport.rs`, `tests/ui_aggregator.rs` | Scripted `HttpTransport`, byte-split SSE, hydration, lazy conversion, error termination and typed reducer compatibility |
 | `docs/spec/models.md` (no Python source) | `tests/spec_models.rs` | MOD-001 to MOD-008: model ids, gateway removal, credential-free snapshots, retries, timeouts, drop cancellation, the scripted provider |
-| `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-005: step checks, unknown tools, tool concurrency, run usage, stop reasons |
+| `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-006: step checks, unknown tools, tool concurrency, run usage, stop reasons, interrupted history |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
 not reproduce Python test counts. Python garbage-collector closure behavior,

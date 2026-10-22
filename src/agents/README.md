@@ -97,6 +97,14 @@ run the default loop decides for itself.
 Once the stream ends, `stop_reason()` returns `StopReason::Done`, `Stopped(reason)`
 or `Deferred`; it is `None` while the run goes on and after an error.
 `usage()` returns the summed usage of the delivered model responses.
+`interrupted_messages()` returns the history plus the step in progress, as its
+events were delivered, so an application can save what the user saw when it
+stops a run by dropping it, or when the run fails. The step adds the model
+response so far, keeping only the tool calls whose `ToolEnd` was delivered, and
+a tool message with the delivered results; each of those calls without a result
+gets the error result `Cancelled: the run stopped before this tool call
+finished.` A next run started from it repeats no finished call. With no step in
+progress it equals `messages()`.
 `RunOptions::tool_concurrency` caps how many tool executions of one step run at
 once; the others start in call order as slots free up. A call waiting for its
 approval holds no slot, so approvals and `blocked()` work as without a cap.

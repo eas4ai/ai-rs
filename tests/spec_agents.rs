@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for AGT-001 to AGT-005 in docs/spec/agents.md. Each test name starts
+//! Tests for AGT-001 to AGT-006 in docs/spec/agents.md. Each test name starts
 //! with the requirement it checks; scripts/check-core.sh selects them by it.
 
 use std::{
@@ -35,7 +35,10 @@ use suprnova_ai::{
     errors::ProviderError,
     testing::{ScriptedProvider, ScriptedResponse},
     types::{
-        Event, HookStatus, MessageRole, ToolResultPart, messages::ToolResultValue, usage::Usage,
+        Event, HookStatus, Message, MessageRole, Part, ToolCallPart, ToolResultPart,
+        events::{TextDelta, replay_message_events},
+        messages::{TextPart, ToolResultValue},
+        usage::Usage,
     },
     user_message,
 };
@@ -583,4 +586,285 @@ async fn agt_005_a_run_that_ends_with_an_error_has_no_reason() {
     }
     assert!(failed);
     assert_eq!(run.stop_reason(), None);
+}
+
+// AGT-006
+
+const CANCELLED: &str = "Cancelled: the run stopped before this tool call finished.";
+
+/// The events that stream `Hello` as the deltas `Hel` and `lo`.
+fn hello_events() -> Vec<Event> {
+    let message = Message::new(
+        MessageRole::Assistant,
+        vec![
+            TextPart {
+                id: "t1".into(),
+                text: "Hello".into(),
+                provider_metadata: None,
+            }
+            .into(),
+        ],
+    );
+    let mut events = Vec::new();
+    for event in replay_message_events(&message) {
+        match event {
+            Event::TextDelta(delta) => {
+                for chunk in ["Hel", "lo"] {
+                    events.push(Event::TextDelta(TextDelta {
+                        chunk: chunk.into(),
+                        ..delta.clone()
+                    }));
+                }
+            }
+            Event::StreamEnd(mut end) => {
+                end.finish_reason = Some("stop".into());
+                events.push(Event::StreamEnd(end));
+            }
+            event => events.push(event),
+        }
+    }
+    events
+}
+
+fn hello_in_two_deltas() -> ScriptedResponse {
+    ScriptedResponse::events(hello_events())
+}
+
+fn lockstep() -> RunOptions {
+    RunOptions {
+        loop_buffer: Some(0),
+        ..RunOptions::default()
+    }
+}
+
+/// Read the run until `stop` returns true for a delivered event.
+async fn read_until(run: &mut AgentStream, mut stop: impl FnMut(&Event) -> bool) -> Vec<Event> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = run.next().await {
+            let event = event.unwrap();
+            let done = stop(&event);
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+        panic!("the run ended before the awaited event: {events:?}");
+    })
+    .await
+    .expect("the awaited event never arrived")
+}
+
+fn is_delta(event: &Event, chunk: &str) -> bool {
+    matches!(event, Event::TextDelta(delta) if delta.chunk == chunk)
+}
+
+fn call_ids(message: &Message) -> Vec<&str> {
+    message
+        .tool_calls()
+        .iter()
+        .map(|call| call.tool_call_id.as_str())
+        .collect()
+}
+
+/// A tool that counts its starts and never finishes for the index 0.
+fn counted(name: &str, starts: Arc<Mutex<Vec<u32>>>) -> AgentTool {
+    AgentTool::new::<Index, u32, _, _>(name, "Return the index", move |input, _| {
+        let starts = starts.clone();
+        async move {
+            starts.lock().unwrap().push(input.i);
+            if input.i == 0 {
+                std::future::pending::<()>().await;
+            }
+            Ok(input.i)
+        }
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn agt_006_a_lockstep_run_keeps_the_partial_text() {
+    let provider = ScriptedProvider::new("scripted", [hello_in_two_deltas()]);
+    let mut run = Agent::default().run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        lockstep(),
+    );
+    read_until(&mut run, |event| is_delta(event, "Hel")).await;
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 2, "{history:?}");
+    let last = history.last().unwrap();
+    assert_eq!(last.role, MessageRole::Assistant);
+    assert_eq!(last.text(), "Hel");
+    assert_eq!(
+        run.messages().len(),
+        1,
+        "the step is not in the history yet"
+    );
+}
+
+#[tokio::test]
+async fn agt_006_a_run_ahead_keeps_only_what_was_delivered() {
+    let provider = ScriptedProvider::new("scripted", [hello_in_two_deltas()]);
+    let mut run = Agent::default().run(provider.model("m"), vec![user_message("go")]);
+    read_until(&mut run, |event| is_delta(event, "Hel")).await;
+    // The buffered loop finishes the step while the consumer waits.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while run.messages().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the loop never ran ahead");
+    assert_eq!(run.messages().last().unwrap().text(), "Hello");
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(history.last().unwrap().text(), "Hel");
+}
+
+#[tokio::test]
+async fn agt_006_a_failed_step_keeps_its_partial_text() {
+    // The stream breaks after the delta `Hel`.
+    let mut events = hello_events();
+    let cut = events
+        .iter()
+        .position(|event| is_delta(event, "Hel"))
+        .unwrap();
+    events.truncate(cut + 1);
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [ScriptedResponse::events(events)
+            .then_error(ProviderError::from_status("broken", 400, None))],
+    );
+    let mut run = Agent::default().run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        lockstep(),
+    );
+    let mut failed = false;
+    while let Some(event) = run.next().await {
+        failed |= event.is_err();
+    }
+    assert!(failed);
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(history.last().unwrap().text(), "Hel");
+}
+
+#[tokio::test]
+async fn agt_006_without_a_step_in_progress_it_is_the_history() {
+    let provider = ScriptedProvider::new("scripted", tool_calls(1, "work"));
+    provider.push(ScriptedResponse::text("done"));
+    let mut run = Agent::new(vec![noop("work")]).run(provider.model("m"), vec![user_message("go")]);
+    assert_eq!(run.interrupted_messages(), run.messages());
+    finish(&mut run).await;
+    assert_eq!(run.messages().len(), 4);
+    assert_eq!(run.interrupted_messages(), run.messages());
+}
+
+#[tokio::test]
+async fn agt_006_a_stopped_step_keeps_delivered_results_and_cancels_the_rest() {
+    // Call a finishes at once, b never finishes, and c is still streaming.
+    let calls = [("a", 1), ("b", 0), ("c", 3)]
+        .map(|(id, i)| ToolCallPart::new(id, "work", json!({ "i": i }).to_string()));
+    let provider = ScriptedProvider::new("scripted", [ScriptedResponse::tool_calls(calls)]);
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(vec![counted("work", starts.clone())]);
+    let mut run = agent.run_with_options(provider.model("m"), vec![user_message("go")], lockstep());
+    let mut result_a = false;
+    let mut started_c = false;
+    let events = read_until(&mut run, |event| {
+        match event {
+            Event::ToolCallResult(result) => {
+                result_a |= result.results.iter().any(|r| r.tool_call_id == "a");
+            }
+            Event::ToolStart(start) => started_c |= start.tool_call_id == "c",
+            _ => {}
+        }
+        result_a && started_c
+    })
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ToolEnd(end) if end.tool_call.tool_call_id == "c")),
+        "the scenario needs c's ToolEnd undelivered: {events:?}"
+    );
+
+    let history = run.interrupted_messages();
+    drop(run);
+    assert_eq!(history.len(), 3, "{history:?}");
+    assert_eq!(history[1].role, MessageRole::Assistant);
+    assert_eq!(call_ids(&history[1]), ["a", "b"]);
+    assert_eq!(history[2].role, MessageRole::Tool);
+    let results = history[2].tool_results();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].tool_call_id, "a");
+    assert!(!results[0].is_error());
+    assert_eq!(results[1].tool_call_id, "b");
+    assert!(results[1].is_error());
+    assert_eq!(result_text(results[1]), CANCELLED);
+
+    // A next run continues from the history and runs neither call again.
+    let next = ScriptedProvider::new("scripted", [ScriptedResponse::text("done")]);
+    let mut run = agent.run(next.model("m"), history.clone());
+    finish(&mut run).await;
+    assert_eq!(run.text().unwrap(), "done");
+    assert_eq!(*starts.lock().unwrap(), [1, 0]);
+    let sent = &next.requests()[0].messages;
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2].tool_results().len(), 2);
+}
+
+#[tokio::test]
+async fn agt_006_a_replayed_step_keeps_the_results_it_delivered() {
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(vec![counted("work", starts.clone())]);
+    let mut deferred = ToolResultPart::error("wait", "work", json!("Deferred"));
+    deferred.is_hook_deferred = true;
+    let history = vec![
+        user_message("go"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                Part::ToolCall(ToolCallPart::new("done", "work", r#"{"i":4}"#)),
+                Part::ToolCall(ToolCallPart::new("wait", "work", r#"{"i":5}"#)),
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![
+                ToolResultPart::new("done", "work", json!(4)).into(),
+                deferred.into(),
+            ],
+        ),
+    ];
+    let provider = ScriptedProvider::new("scripted", [ScriptedResponse::text("done")]);
+    let mut run = agent.run_with_options(provider.model("m"), history, lockstep());
+    read_until(&mut run, |event| {
+        matches!(event, Event::ToolCallResult(result)
+            if result.results.iter().any(|r| r.tool_call_id == "wait"))
+    })
+    .await;
+    let history = run.interrupted_messages();
+    drop(run);
+    assert!(
+        provider.requests().is_empty(),
+        "the model was called before the stop"
+    );
+    assert_eq!(history.len(), 3, "{history:?}");
+    assert_eq!(call_ids(&history[1]), ["done", "wait"]);
+    let results = history[2].tool_results();
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| (r.tool_call_id.as_str(), r.is_error()))
+            .collect::<Vec<_>>(),
+        [("done", false), ("wait", false)]
+    );
+
+    let next = ScriptedProvider::new("scripted", [ScriptedResponse::text("done")]);
+    let mut run = agent.run(next.model("m"), history);
+    finish(&mut run).await;
+    assert_eq!(*starts.lock().unwrap(), [5], "a finished call ran again");
 }
