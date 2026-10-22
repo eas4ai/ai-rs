@@ -3298,3 +3298,29 @@ async fn hst_025_a_failed_event_without_a_response_still_fails() {
     let error = responses_error(openai_responses(Recorder::new([stream]))).await;
     assert_eq!(error.kind, ProviderErrorKind::Response, "{error:?}");
 }
+
+#[test]
+fn hst_019_the_openai_package_does_not_hide_a_responses_host_id() {
+    for (id, class) in [
+        ("xai", "xai_responses"),
+        ("huggingface", "huggingface_responses"),
+    ] {
+        let metadata = ModelsDevProvider {
+            id: id.into(),
+            npm: Some("@ai-sdk/openai".into()),
+            api: Some("https://host.test/v1".into()),
+            env: vec![],
+        };
+        let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+            &metadata,
+            key_config(),
+            Recorder::new([]),
+        )
+        .unwrap();
+        assert_eq!(
+            provider.protocol().unwrap().protocol_class_id(),
+            class,
+            "{id}"
+        );
+    }
+}
