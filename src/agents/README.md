@@ -108,7 +108,11 @@ gets the error result `Cancelled: the run stopped before this tool call
 finished.` A next run started from it repeats no finished call. After a step
 whose events were all delivered, it is the history up to the next model
 response, with what the loop added before that call, such as a steering
-message. With no step in progress it equals `messages()`.
+message. With no step in progress it equals `messages()`. It keeps only what was
+delivered: with the default buffered loop a tool can finish before its events
+reach the stream, and a stop at that moment leaves the call out or reports it
+cancelled, so a resumed run may call it again. Run in lockstep
+(`loop_buffer: Some(0)`) when tools are costly or change things.
 `RunOptions::tool_concurrency` caps how many tool executions of one step run at
 once; the others start in call order as slots free up. A call waiting for its
 approval holds no slot, so approvals and `blocked()` work as without a cap.
