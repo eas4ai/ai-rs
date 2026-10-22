@@ -411,7 +411,7 @@ fn mfjs_root_error(what: &str) -> Error {
 
 /// The subset of JSON schema Moonshot's MFJS validator accepts: a tuple
 /// `items` array moves to the end of `prefixItems`, and a string `type` next
-/// to `anyOf` moves into the branches without one
+/// to `anyOf` moves into the branches without one, in every subschema
 /// (`normalize-json-schema-for-mfjs.ts`).
 fn mfjs(schema: Value) -> Value {
     let Value::Object(mut object) = schema else {
@@ -445,11 +445,16 @@ fn mfjs(schema: Value) -> Value {
             }
         }
     }
+    // The TypeScript normalizer's keys, and the draft-07 `definitions`,
+    // `dependencies` and `additionalItems`, so every subschema is reached; a
+    // dependency that lists property names is not a schema and stays.
     for key in [
         "properties",
         "patternProperties",
         "$defs",
+        "definitions",
         "dependentSchemas",
+        "dependencies",
     ] {
         if let Some(Value::Object(map)) = object.get_mut(key) {
             for value in map.values_mut() {
@@ -459,6 +464,7 @@ fn mfjs(schema: Value) -> Value {
     }
     for key in [
         "additionalProperties",
+        "additionalItems",
         "propertyNames",
         "items",
         "contains",
