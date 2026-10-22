@@ -79,9 +79,10 @@ retry wait.
 `Model::to_value` leaves out credentials: the API key value, the `env` map and
 the headers. `Model::from_value` takes them from the provider that the registry
 holds under the snapshot's provider name, so register providers before restoring.
-It refuses a snapshot whose provider class or endpoint settings (base URL and the
-names of its key and URL variables) differ from that provider's, so a changed
-snapshot cannot send the key to another host.
+It also takes that provider's endpoint settings (the base URL and the names of its
+key and URL variables), so a changed snapshot cannot send the key to another host
+and an endpoint change applies to snapshots saved before it. A snapshot of another
+provider class is refused.
 
 Enable the `testing` feature for `testing::ScriptedProvider`. It answers each call
 with the next scripted response and records each request, with no network.
