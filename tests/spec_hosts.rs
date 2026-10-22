@@ -1739,10 +1739,13 @@ async fn hst_012_moonshot_schemas_go_out_as_mfjs() {
     validation("moonshotai", "kimi-k3", options).await;
 }
 
-/// Answers downloads with a JPEG image and records the URLs.
+/// Answers downloads with the bytes 1, 2, 3 as a JPEG image, or with the
+/// text `downloaded words`, or fails them, and records the URLs.
 #[derive(Default)]
 struct Downloads {
     urls: Mutex<Vec<String>>,
+    text: bool,
+    fail: bool,
 }
 impl suprnova_ai::models::files::DownloadTransport for Downloads {
     fn resolve<'a>(
@@ -1759,11 +1762,18 @@ impl suprnova_ai::models::files::DownloadTransport for Downloads {
         _addresses: Vec<std::net::IpAddr>,
     ) -> BoxFuture<'_, Result<HttpResponse, suprnova_ai::models::files::DownloadError>> {
         self.urls.lock().unwrap().push(request.url);
-        Box::pin(async {
+        let (status, content_type, body): (u16, &str, &'static [u8]) = if self.fail {
+            (404, "text/plain", b"missing")
+        } else if self.text {
+            (200, "text/plain", b"downloaded words")
+        } else {
+            (200, "image/jpeg", &[1, 2, 3])
+        };
+        Box::pin(async move {
             Ok(HttpResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "image/jpeg".into())],
-                body: stream::iter([Ok(Bytes::from_static(&[1, 2, 3]))]).boxed(),
+                status,
+                headers: vec![("content-type".into(), content_type.into())],
+                body: stream::iter([Ok(Bytes::from_static(body))]).boxed(),
             })
         })
     }
@@ -2302,4 +2312,103 @@ async fn hst_014_mistral_rejects_a_named_tool_it_was_not_given() {
         ..Default::default()
     };
     validation("mistral", "mistral-small-latest", options).await;
+}
+
+/// A Moonshot AI model whose provider has this download transport.
+fn moonshot_with(downloads: Arc<Downloads>, transport: Arc<Recorder>) -> Model {
+    let mut registry = ProviderRegistry::new();
+    moonshotai::register_with_downloads(&mut registry, key_config(), transport, downloads).unwrap();
+    Model::new("kimi-k3", registry.get_provider("moonshotai").unwrap())
+}
+
+#[tokio::test]
+async fn hst_013_a_rejected_call_downloads_nothing() {
+    let image = || FilePart::from_url("https://images.test/cat.jpg", Some("image/jpeg")).unwrap();
+    let pdf = FilePart::from_bytes(vec![1, 2, 3], Some("application/pdf"), None).unwrap();
+    let tiff = FilePart::from_url("https://images.test/cat.tiff", Some("image/tiff")).unwrap();
+    let service_tier = params(|p| {
+        p.provider_service = Some(ProviderServiceParams {
+            service_tier: ProviderValue::Value("flex".into()),
+        })
+    });
+    let string_root = StreamOptions {
+        tools: vec![Tool::function(
+            "lookup",
+            ToolSpec {
+                description: None,
+                params: json!({"type": "string"}).try_into().unwrap(),
+            },
+        )],
+        ..Default::default()
+    };
+    let cases = [
+        ("service tier", vec![user_file(image())], service_tier),
+        (
+            "seed",
+            vec![user_file(image())],
+            sampling(|s| {
+                s.seed = Some(SeedSamplerParams {
+                    seed: ProviderValue::Value(Some(Seed::Value(7))),
+                })
+            }),
+        ),
+        ("string root", vec![user_file(image())], string_root),
+        (
+            "pdf",
+            vec![Message::new(
+                MessageRole::User,
+                vec![Part::File(image()), Part::File(pdf)],
+            )],
+            Default::default(),
+        ),
+        ("tiff", vec![user_file(tiff)], Default::default()),
+    ];
+    for (case, messages, options) in cases {
+        let downloads = Arc::new(Downloads {
+            fail: true,
+            ..Default::default()
+        });
+        let transport = Recorder::new([chat_text("hi", "stop")]);
+        let model = moonshot_with(downloads.clone(), transport.clone());
+        let (_, events) = call(&model, messages, options).await;
+        let error = events.into_iter().find_map(Result::err);
+        assert!(
+            matches!(error, Some(Error::Validation(_))),
+            "{case}: {error:?}"
+        );
+        assert!(
+            downloads.urls.lock().unwrap().is_empty(),
+            "{case}: a download was sent"
+        );
+        assert_eq!(transport.count(), 0, "{case}: a request was sent");
+    }
+}
+
+#[tokio::test]
+async fn hst_013_a_moonshot_text_url_is_downloaded_or_rejected() {
+    let text = || FilePart::from_url("https://docs.test/notes.txt", Some("text/plain")).unwrap();
+    let error = rejected(
+        "moonshotai",
+        "kimi-k3",
+        vec![user_file(text())],
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    let downloads = Arc::new(Downloads {
+        text: true,
+        ..Default::default()
+    });
+    let transport = Recorder::new([chat_text("hi", "stop")]);
+    let model = moonshot_with(downloads.clone(), transport.clone());
+    let (_, events) = call(&model, vec![user_file(text())], Default::default()).await;
+    ok(&events);
+    assert_eq!(
+        *downloads.urls.lock().unwrap(),
+        ["https://docs.test/notes.txt"]
+    );
+    assert_eq!(
+        transport.body()["messages"][0]["content"][1],
+        json!({"type": "text", "text": "downloaded words"})
+    );
 }

@@ -177,6 +177,13 @@ fn start(
     let model_id = model.id.clone();
     let transport = provider.shared_transport();
     stream::once(async move {
+        // Check the request before any download, with each file to download
+        // standing in as bytes, so a call that fails validation sends nothing.
+        if downloads.is_some()
+            && let Some(inline) = messages::without_downloads(&messages, wire)
+        {
+            wire_request(wire, &model_id, &config, inline, &options)?;
+        }
         let messages = messages::download_files(messages, wire, downloads.as_deref()).await?;
         let request = wire_request(wire, &model_id, &config, messages, &options)?;
         let transport = transport.ok_or_else(|| {
