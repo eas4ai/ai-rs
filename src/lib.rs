@@ -32,5 +32,3 @@ pub use models::{
 pub use providers::{Provider, ProviderConfig, ProviderProtocol, ProviderRegistry, get_provider};
 pub use types::builders::{assistant_message, system_message, tool_message, user_message};
 pub use types::{events, messages, tools};
-
-fn   sudus_violating_example( ) {}
