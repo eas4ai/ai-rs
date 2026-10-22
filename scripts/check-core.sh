@@ -51,7 +51,7 @@ for req in "${reqs[@]}"; do
   printf '%s\n' "$output"
   # Tests that ran, passed or failed, across every test binary's summary line.
   ran=$(printf '%s\n' "$output" |
-    sed -n 's/^test result: [A-Z]*\. \([0-9][0-9]*\) passed; \([0-9][0-9]*\) failed.*/\1 \2/p' |
+    sed -n 's/^test result: [A-Za-z]*\. \([0-9][0-9]*\) passed; \([0-9][0-9]*\) failed.*/\1 \2/p' |
     awk '{ total += $1 + $2 } END { print total + 0 }')
   result=0
   if [ "$code" -ne 0 ]; then result=1; fi
