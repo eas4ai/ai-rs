@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::{
+use serde_json::{Value, json};
+use suprnova_ai::types::{
     events::{Aggregator, AggregatorFactory, ValueAggregator},
     messages::{MessageBundle, SpecialToolResult, ToolResultValue},
 };
-use serde_json::{Value, json};
 
 struct JsonSnapshot;
 impl Aggregator<Value> for JsonSnapshot {

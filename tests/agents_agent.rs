@@ -14,11 +14,6 @@
 
 mod agents_support;
 use agents_support::*;
-use ai::{
-    agents::{Agent, AgentTool, Context, RunOptions},
-    types::{Event, Message, MessageRole, ToolCallPart, ToolResultPart},
-    user_message,
-};
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -26,6 +21,11 @@ use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
+};
+use suprnova_ai::{
+    agents::{Agent, AgentTool, Context, RunOptions},
+    types::{Event, Message, MessageRole, ToolCallPart, ToolResultPart},
+    user_message,
 };
 #[derive(Deserialize, JsonSchema)]
 struct Args {
@@ -52,7 +52,7 @@ async fn loop_runs_tools_and_keeps_a_single_history_turn_per_response() {
     assert_eq!(run.text().unwrap(), "14");
     assert_eq!(
         results[0].result,
-        ai::types::messages::ToolResultValue::Json(json!(14))
+        suprnova_ai::types::messages::ToolResultValue::Json(json!(14))
     );
     let messages = run.messages();
     assert_eq!(
@@ -139,14 +139,14 @@ fn context_stops_on_final_or_deferred_and_ignores_replay_additions() {
         model,
         vec![user_message("go")],
         vec![],
-        ai::StreamOptions::default(),
+        suprnova_ai::StreamOptions::default(),
     );
     assert!(context.keep_running());
-    let mut replay = ai::assistant_message("old");
+    let mut replay = suprnova_ai::assistant_message("old");
     replay.replay = true;
     context.add(replay);
     assert_eq!(context.messages.len(), 1);
-    context.add(ai::assistant_message("done"));
+    context.add(suprnova_ai::assistant_message("done"));
     assert!(!context.keep_running());
 }
 #[tokio::test]
@@ -155,7 +155,7 @@ async fn empty_and_final_history_do_not_call_the_model_and_output_requires_a_fin
     let mut run = Agent::default().run(model.clone(), vec![]);
     assert!(run.next().await.is_none());
     assert!(run.text().is_err());
-    let mut run = Agent::default().run(model, vec![ai::assistant_message("already done")]);
+    let mut run = Agent::default().run(model, vec![suprnova_ai::assistant_message("already done")]);
     assert!(run.next().await.is_none());
     assert_eq!(run.text().unwrap(), "already done");
     assert!(transport.requests.lock().unwrap().is_empty());
@@ -168,9 +168,9 @@ struct Answer {
 async fn structured_output_and_provider_declarations_flow_to_model() {
     let (model, transport) = scripted(vec![text(r#"{"value":42}"#)]);
     let options = RunOptions::default().with_output::<Answer>();
-    let provider_tool = ai::types::Tool::provider(
+    let provider_tool = suprnova_ai::types::Tool::provider(
         "search",
-        ai::types::ToolConfig {
+        suprnova_ai::types::ToolConfig {
             id: Some("search.v1".into()),
             ..Default::default()
         },
@@ -203,7 +203,9 @@ async fn custom_loop_default_buffer_runs_ahead_but_zero_buffer_is_lockstep() {
             futures::stream::iter(0..10)
                 .map(move |i| {
                     observed.fetch_add(1, Ordering::SeqCst);
-                    Ok(Event::TextDelta(ai::events::TextDelta::new(i.to_string())))
+                    Ok(Event::TextDelta(suprnova_ai::events::TextDelta::new(
+                        i.to_string(),
+                    )))
                 })
                 .boxed()
         });
@@ -265,7 +267,7 @@ async fn tool_partial_results_precede_final_results() {
         "status",
         "",
         |_, _| futures::stream::iter([Ok("working".to_owned()), Ok("complete".to_owned())]),
-        ai::agents::Aggregate::last(),
+        suprnova_ai::agents::Aggregate::last(),
     )
     .unwrap();
     let (model, _) = scripted(vec![calls(&[("tc", "status", r#"{"x":1}"#)]), text("done")]);
@@ -285,11 +287,14 @@ async fn tool_partial_results_precede_final_results() {
 }
 #[tokio::test]
 async fn provider_error_is_returned_and_does_not_start_an_unrequested_retry() {
-    let (model, transport) = scripted_results(vec![Err(ai::transport::TransportError::Timeout)]);
+    let (model, transport) =
+        scripted_results(vec![Err(suprnova_ai::transport::TransportError::Timeout)]);
     let mut run = Agent::default().run(model, vec![user_message("go")]);
     assert!(matches!(
         run.next().await.unwrap(),
-        Err(ai::Error::Transport(ai::transport::TransportError::Timeout))
+        Err(suprnova_ai::Error::Transport(
+            suprnova_ai::transport::TransportError::Timeout
+        ))
     ));
     assert!(run.next().await.is_none());
     assert_eq!(transport.requests.lock().unwrap().len(), 1);
@@ -301,7 +306,9 @@ async fn buffered_loop_task_failure_is_returned_to_the_consumer() {
         futures::stream::once(async {
             panic!("custom loop failed");
             #[allow(unreachable_code)]
-            Ok(Event::TextDelta(ai::events::TextDelta::new("never")))
+            Ok(Event::TextDelta(suprnova_ai::events::TextDelta::new(
+                "never",
+            )))
         })
         .boxed()
     });
@@ -337,7 +344,7 @@ async fn subagent_stream_inherits_hooks_and_keeps_its_messages_out_of_parent_his
                 context.nested_options(),
             )
         },
-        ai::agents::Aggregate::messages(),
+        suprnova_ai::agents::Aggregate::messages(),
     )
     .unwrap();
     let (model, transport) = scripted(vec![
@@ -363,13 +370,13 @@ async fn subagent_stream_inherits_hooks_and_keeps_its_messages_out_of_parent_his
                 nested_result = true;
                 assert!(matches!(
                     &r.results[0].result,
-                    ai::types::messages::ToolResultValue::Special(
-                        ai::types::messages::SpecialToolResult::Messages(_)
+                    suprnova_ai::types::messages::ToolResultValue::Special(
+                        suprnova_ai::types::messages::SpecialToolResult::Messages(_)
                     )
                 ));
                 assert_eq!(
                     r.results[0].get_model_input(),
-                    &ai::types::messages::ToolResultValue::Json(json!("child done"))
+                    &suprnova_ai::types::messages::ToolResultValue::Json(json!("child done"))
                 );
             }
             _ => {}
@@ -436,7 +443,7 @@ async fn tool_context_retains_owning_agent_and_bound_call_across_nested_concurre
                 context.nested_options(),
             )
         },
-        ai::agents::Aggregate::messages(),
+        suprnova_ai::agents::Aggregate::messages(),
     )
     .unwrap();
     let parent = Agent::new(vec![probe, research, parent_marker]);

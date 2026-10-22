@@ -13,18 +13,18 @@
 // limitations under the License.
 
 #![allow(dead_code)]
-use ai::{
-    Error, Model, ProviderConfig, StreamOptions,
-    providers::anthropic::AnthropicCompatibleProvider,
-    transport::{Body, HttpRequest, HttpResponse, HttpTransport, TransportError},
-    types::{Event, Message},
-};
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+};
+use suprnova_ai::{
+    Error, Model, ProviderConfig, StreamOptions,
+    providers::anthropic::AnthropicCompatibleProvider,
+    transport::{Body, HttpRequest, HttpResponse, HttpTransport, TransportError},
+    types::{Event, Message},
 };
 
 pub struct ScriptedTransport {

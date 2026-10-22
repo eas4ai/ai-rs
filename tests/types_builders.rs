@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::{
+use serde_json::json;
+use suprnova_ai::types::{
     Message, MessageRole, Part, TextPart,
     builders::{
         PartLike, ToolMessageError, assistant_message, content_output, file_part, message,
@@ -20,7 +21,6 @@ use ai::types::{
         user_message,
     },
 };
-use serde_json::json;
 
 #[test]
 fn message_builders_coerce_strings_and_keep_parts() {
@@ -47,8 +47,8 @@ fn text_and_content_helpers_preserve_metadata_and_mixed_content() {
 
     let file = file_part("https://example.com/img.png", None, None).expect("known extension");
     let output = content_output([
-        ai::types::builders::ContentLike::from("Here:"),
-        ai::types::builders::ContentLike::from(file),
+        suprnova_ai::types::builders::ContentLike::from("Here:"),
+        suprnova_ai::types::builders::ContentLike::from(file),
     ]);
     assert_eq!(output.value.len(), 2);
 
@@ -81,8 +81,8 @@ fn tool_message_merges_results_and_rejects_invalid_messages() {
         vec![tool_result_part("tc-2", json!(2), "b", false).into()],
     );
     let merged = tool_message([
-        ai::types::builders::ToolMessageItem::from(first),
-        ai::types::builders::ToolMessageItem::from(second),
+        suprnova_ai::types::builders::ToolMessageItem::from(first),
+        suprnova_ai::types::builders::ToolMessageItem::from(second),
     ])
     .expect("merge messages");
     let ids: Vec<_> = merged
@@ -94,16 +94,18 @@ fn tool_message_merges_results_and_rejects_invalid_messages() {
 
     let wrong_role = user_message("hello");
     assert!(matches!(
-        tool_message([ai::types::builders::ToolMessageItem::from(wrong_role)]),
+        tool_message([suprnova_ai::types::builders::ToolMessageItem::from(
+            wrong_role
+        )]),
         Err(ToolMessageError::WrongRole(MessageRole::User))
     ));
     let invalid = Message::new(MessageRole::Tool, vec![TextPart::new("bad").into()]);
     assert_eq!(
-        tool_message([ai::types::builders::ToolMessageItem::from(invalid)]),
+        tool_message([suprnova_ai::types::builders::ToolMessageItem::from(invalid)]),
         Err(ToolMessageError::NonResultPart)
     );
     assert_eq!(
-        tool_message(Vec::<ai::types::builders::ToolMessageItem>::new()),
+        tool_message(Vec::<suprnova_ai::types::builders::ToolMessageItem>::new()),
         Err(ToolMessageError::Empty)
     );
 
@@ -114,7 +116,7 @@ fn tool_message_merges_results_and_rejects_invalid_messages() {
 
 #[test]
 fn builders_accept_tool_calls_hooks_events_and_message_lists() {
-    use ai::types::{HookPart, HookStatus, ToolCallPart, events::ToolCallResult};
+    use suprnova_ai::types::{HookPart, HookStatus, ToolCallPart, events::ToolCallResult};
     let call = ToolCallPart::new("tc", "tool", "{}");
     assert!(matches!(
         assistant_message(call.clone()).parts[0],

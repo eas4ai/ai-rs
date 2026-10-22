@@ -14,13 +14,13 @@
 
 use std::error::Error as _;
 
-use ai::Error;
-use ai::errors::{
+use serde_json::json;
+use suprnova_ai::Error;
+use suprnova_ai::errors::{
     HttpErrorContext, ProviderError, ProviderErrorKind, http_status_to_provider_error_kind,
     is_retryable_status,
 };
-use ai::transport::TransportError;
-use serde_json::json;
+use suprnova_ai::transport::TransportError;
 
 #[test]
 fn status_codes_map_to_the_full_provider_hierarchy() {

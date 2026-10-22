@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::messages::{
+use serde_json::{Value, json};
+use suprnova_ai::types::messages::{
     ContentOutput, ContentPart, HookStatus, MessageBundle, ResultKind, SpecialToolResult,
     ToolResultValue,
 };
-use ai::types::{Message, MessageRole, Part, TextPart, ToolCallPart, ToolResultPart};
-use ai::ui::ai_sdk::inbound_messages::{ToolResultValidator, normalize_ui_messages};
-use ai::ui::ai_sdk::{UIMessage, to_messages};
-use ai::ui::ai_sdk::{id_utils, tool_utils};
-use serde_json::{Value, json};
+use suprnova_ai::types::{Message, MessageRole, Part, TextPart, ToolCallPart, ToolResultPart};
+use suprnova_ai::ui::ai_sdk::inbound_messages::{ToolResultValidator, normalize_ui_messages};
+use suprnova_ai::ui::ai_sdk::{UIMessage, to_messages};
+use suprnova_ai::ui::ai_sdk::{id_utils, tool_utils};
 
 fn ui(role: &str, parts: Vec<Value>) -> UIMessage {
     serde_json::from_value(json!({"id":"m1", "role":role, "parts":parts}))
@@ -192,8 +192,12 @@ fn special_tool_results_round_trip_metadata() {
         ContentOutput::new(vec![
             ContentPart::Text(TextPart::new("desc")),
             ContentPart::File(
-                ai::types::FilePart::from_bytes(b"img-bytes".to_vec(), Some("image/png"), None)
-                    .unwrap(),
+                suprnova_ai::types::FilePart::from_bytes(
+                    b"img-bytes".to_vec(),
+                    Some("image/png"),
+                    None,
+                )
+                .unwrap(),
             ),
         ])
         .into(),
@@ -217,7 +221,7 @@ fn special_tool_results_round_trip_metadata() {
                 )
             },
         ];
-        let ui = ai::ui::ai_sdk::to_ui_messages(&messages).unwrap();
+        let ui = suprnova_ai::ui::ai_sdk::to_ui_messages(&messages).unwrap();
         let (restored, _) = to_messages(&ui, None).unwrap();
         let part = restored
             .iter()
@@ -242,12 +246,16 @@ fn special_tool_results_round_trip_metadata() {
 
 struct Weather;
 impl ToolResultValidator for Weather {
-    fn validate_result(&self, name: &str, mut value: Value) -> Result<ToolResultValue, ai::Error> {
+    fn validate_result(
+        &self,
+        name: &str,
+        mut value: Value,
+    ) -> Result<ToolResultValue, suprnova_ai::Error> {
         if name == "weather" {
             let n = value["temp"]
                 .as_str()
                 .and_then(|s| s.parse::<i64>().ok())
-                .ok_or_else(|| ai::Error::Validation("expected temperature".into()))?;
+                .ok_or_else(|| suprnova_ai::Error::Validation("expected temperature".into()))?;
             value["temp"] = json!(n);
         }
         if name == "research" {
@@ -299,7 +307,7 @@ fn validates_tool_return_and_aggregator_output_with_explicit_registry() {
     );
     assert!(matches!(
         to_messages(&[malformed], Some(&Weather)),
-        Err(ai::Error::Validation(_))
+        Err(suprnova_ai::Error::Validation(_))
     ));
 }
 

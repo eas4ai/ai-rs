@@ -13,9 +13,9 @@
 // limitations under the License.
 
 #![cfg(feature = "reqwest")]
-use ai::transport::{HttpRequest, HttpTransport, ReqwestTransport};
 use bytes::Bytes;
 use futures::StreamExt;
+use suprnova_ai::transport::{HttpRequest, HttpTransport, ReqwestTransport};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -95,8 +95,8 @@ async fn reqwest_does_not_follow_redirects() {
 
 #[tokio::test]
 async fn reqwest_download_pins_destination_and_keeps_original_host() {
-    use ai::models::files::DownloadTransport;
     use std::net::{IpAddr, Ipv4Addr};
+    use suprnova_ai::models::files::DownloadTransport;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let task = tokio::spawn(async move {
@@ -147,7 +147,10 @@ async fn reqwest_rejects_invalid_requests_without_exposing_url() {
         })
         .await
         .unwrap_err();
-    assert!(matches!(error, ai::transport::TransportError::Request(_)));
+    assert!(matches!(
+        error,
+        suprnova_ai::transport::TransportError::Request(_)
+    ));
     assert!(!error.to_string().contains("secret"));
 }
 

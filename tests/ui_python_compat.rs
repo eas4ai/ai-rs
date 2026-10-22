@@ -14,16 +14,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ai::{
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures::{TryStreamExt, stream};
+use serde_json::{Value, json};
+use suprnova_ai::{
     types::{Event, Message, messages::FileData},
     ui::ai_sdk::{
         UIMessage, outbound_stream::serialize_event, to_messages, to_stream, to_ui_messages,
         ui_events::*,
     },
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures::{TryStreamExt, stream};
-use serde_json::{Value, json};
 
 fn fixtures() -> Value {
     serde_json::from_str(include_str!("fixtures/ui-python-0.8.0.json")).unwrap()
@@ -163,7 +163,7 @@ fn serialization_matches_exact_python_json() {
 fn tool_arguments_match_python_spacing_escaping_and_object_order() {
     for case in fixtures()["tool_arguments"].as_array().unwrap() {
         assert_eq!(
-            ai::ui::ai_sdk::tool_utils::normalize_tool_args(&case["input"]),
+            suprnova_ai::ui::ai_sdk::tool_utils::normalize_tool_args(&case["input"]),
             case["args"].as_str().unwrap()
         );
     }

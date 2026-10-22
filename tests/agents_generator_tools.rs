@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::Error;
-use ai::agents::{AgentTool, Aggregate, BoundToolCall, HookRegistry, Runtime, ToolContext};
-use ai::types::events::{Aggregator, AggregatorFactory, StreamEnd};
-use ai::types::messages::{
-    Message, MessageRole, SpecialToolResult, TextPart, ToolCallPart, ToolResultValue,
-};
-use ai::types::{Event, ModelEventMeta};
 use futures::{StreamExt, stream};
 use serde_json::{Value, json};
+use suprnova_ai::Error;
+use suprnova_ai::agents::{
+    AgentTool, Aggregate, BoundToolCall, HookRegistry, Runtime, ToolContext,
+};
+use suprnova_ai::types::events::{Aggregator, AggregatorFactory, StreamEnd};
+use suprnova_ai::types::messages::{
+    Message, MessageRole, SpecialToolResult, TextPart, ToolCallPart, ToolResultValue,
+};
+use suprnova_ai::types::{Event, ModelEventMeta};
 
 #[tokio::test]
 async fn status_and_text_streams_forward_each_partial_before_finishing() {
@@ -218,7 +220,7 @@ async fn stream_failure_retains_error_and_already_emitted_partials() {
 
 #[tokio::test]
 async fn yield_from_routes_labeled_partials_and_returns_model_facing_value() {
-    use ai::agents::tools::yield_from;
+    use suprnova_ai::agents::tools::yield_from;
     let (runtime, mut events) = Runtime::new();
     let result = yield_from(
         &runtime,
@@ -243,8 +245,8 @@ async fn yield_from_routes_labeled_partials_and_returns_model_facing_value() {
 
 #[tokio::test]
 async fn nested_options_inherit_hook_registry_and_middleware() {
-    use ai::agents::Middleware;
     use std::sync::Arc;
+    use suprnova_ai::agents::Middleware;
     struct Marker;
     impl Middleware for Marker {}
     let (runtime, _events) = Runtime::new();

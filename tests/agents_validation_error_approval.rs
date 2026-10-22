@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::agents::{AgentTool, BoundToolCall, HookRegistry, Runtime, ToolContext};
-use ai::types::messages::{HookStatus, ToolCallPart};
-use ai::types::{Event, HookPart};
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use suprnova_ai::agents::{AgentTool, BoundToolCall, HookRegistry, Runtime, ToolContext};
+use suprnova_ai::types::messages::{HookStatus, ToolCallPart};
+use suprnova_ai::types::{Event, HookPart};
 
 #[derive(Deserialize, JsonSchema)]
 struct Edit {

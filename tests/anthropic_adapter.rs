@@ -13,23 +13,23 @@
 // limitations under the License.
 
 mod anthropic_support;
-use ai::{
+use anthropic_support::*;
+use futures::StreamExt;
+use serde_json::{Value, json};
+use suprnova_ai::{
     StreamOptions,
     models::params::*,
     types::{messages::*, tools::*},
 };
-use anthropic_support::*;
-use futures::StreamExt;
-use serde_json::{Value, json};
 
 #[tokio::test]
 async fn multiple_system_messages_are_preserved_and_roles_merge() {
     let (body, _) = capture(
         vec![
-            ai::system_message("First instruction."),
-            ai::user_message("Hi"),
-            ai::system_message("Second instruction."),
-            ai::user_message("Again"),
+            suprnova_ai::system_message("First instruction."),
+            suprnova_ai::user_message("Hi"),
+            suprnova_ai::system_message("Second instruction."),
+            suprnova_ai::user_message("Again"),
         ],
         StreamOptions::default(),
     )
@@ -79,7 +79,7 @@ async fn params_translate_to_http_body_and_headers() {
         ..Default::default()
     };
     let (body, request) = capture(
-        vec![ai::user_message("Hi")],
+        vec![suprnova_ai::user_message("Hi")],
         StreamOptions {
             params: Some(params),
             ..Default::default()
@@ -168,7 +168,7 @@ async fn signed_reasoning_and_builtin_tools_round_trip() {
     let (b, _) = capture(
         vec![
             Message::new(MessageRole::Assistant, parts),
-            ai::user_message("Hi"),
+            suprnova_ai::user_message("Hi"),
         ],
         StreamOptions::default(),
     )
@@ -293,7 +293,10 @@ async fn unsupported_options_fail_before_http() {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(matches!(err, ai::Error::Validation(_)), "{case}: {err:?}");
+        assert!(
+            matches!(err, suprnova_ai::Error::Validation(_)),
+            "{case}: {err:?}"
+        );
         assert!(fake.requests.lock().unwrap().is_empty());
     }
 }

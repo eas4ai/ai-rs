@@ -13,9 +13,11 @@
 // limitations under the License.
 
 mod anthropic_support;
-use ai::{StreamOptions, models::params::*, providers::anthropic::tools::*, types::tools::*};
 use anthropic_support::*;
 use serde_json::json;
+use suprnova_ai::{
+    StreamOptions, models::params::*, providers::anthropic::tools::*, types::tools::*,
+};
 #[tokio::test]
 async fn web_search_full_fields_and_beta() {
     let tool = web_search(WebSearchOptions {

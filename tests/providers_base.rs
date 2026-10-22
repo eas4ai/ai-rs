@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::providers::{
+use async_trait::async_trait;
+use futures::StreamExt;
+use std::{collections::BTreeMap, sync::Arc};
+use suprnova_ai::providers::{
     ConfiguredProvider, ModelsDevProvider,
     base::{provider_base_url, provider_config},
     operations::*,
 };
-use ai::{
+use suprnova_ai::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry, StreamOptions,
 };
-use async_trait::async_trait;
-use futures::StreamExt;
-use std::{collections::BTreeMap, sync::Arc};
 
 struct EmptyProtocol;
 #[async_trait]

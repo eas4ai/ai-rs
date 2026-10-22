@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::agents::{AgentTool, Aggregate, ConcatAggregator, LastAggregator};
-use ai::types::events::Aggregator;
 use futures::stream;
 use serde_json::{Value, json};
+use suprnova_ai::agents::{AgentTool, Aggregate, ConcatAggregator, LastAggregator};
+use suprnova_ai::types::events::Aggregator;
 
 #[test]
 fn marker_factories_capture_delimiters_and_create_independent_reducers() {

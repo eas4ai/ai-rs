@@ -13,15 +13,15 @@
 // limitations under the License.
 
 mod anthropic_support;
-use ai::{
+use anthropic_support::*;
+use futures::StreamExt;
+use serde_json::{Value, json};
+use suprnova_ai::{
     Error, StreamOptions,
     errors::ProviderErrorKind,
     transport::{HttpResponse, TransportError},
     types::{Event, Part},
 };
-use anthropic_support::*;
-use futures::StreamExt;
-use serde_json::{Value, json};
 
 #[tokio::test]
 async fn builtin_events_are_ordered_and_aggregate_call_parts_and_results() {
@@ -49,7 +49,11 @@ async fn builtin_events_are_ordered_and_aggregate_call_parts_and_results() {
         None,
     );
     let m = model(ScriptedTransport::events(events));
-    let mut s = ai::stream(&m, vec![ai::user_message("Hi")], StreamOptions::default());
+    let mut s = suprnova_ai::stream(
+        &m,
+        vec![suprnova_ai::user_message("Hi")],
+        StreamOptions::default(),
+    );
     let mut kinds = vec![];
     while let Some(e) = s.next().await {
         let e = e.unwrap();
@@ -119,7 +123,7 @@ async fn split_signatures_text_tools_and_usage_round_trip() {
     let last = events.len() - 2;
     events[last]["usage"] = json!({"output_tokens":20});
     let m = model(ScriptedTransport::events(events));
-    let mut s = ai::stream(&m, vec![], StreamOptions::default());
+    let mut s = suprnova_ai::stream(&m, vec![], StreamOptions::default());
     while let Some(e) = s.next().await {
         e.unwrap();
     }
@@ -206,7 +210,7 @@ async fn all_server_result_types_and_unknown_blocks() {
             ],
             Some("end_turn"),
         )));
-        let mut s = ai::stream(&m, vec![], StreamOptions::default());
+        let mut s = suprnova_ai::stream(&m, vec![], StreamOptions::default());
         while let Some(e) = s.next().await {
             e.unwrap();
         }
@@ -238,7 +242,7 @@ async fn sse_parser_handles_every_byte_boundary() {
             body: body(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]),
         })]);
         let m = model(fake);
-        let mut s = ai::stream(&m, vec![], StreamOptions::default());
+        let mut s = suprnova_ai::stream(&m, vec![], StreamOptions::default());
         while let Some(e) = s.next().await {
             e.unwrap();
         }
@@ -323,10 +327,11 @@ async fn structured_output_uses_output_config_and_core_decoding() {
         Some("end_turn"),
     ));
     let m = model(fake.clone());
-    let params = ai::models::params::InferenceRequestParams::default().with_reasoning_effort(
-        ai::models::params::ProviderValue::Value(Some("high".into())),
-    );
-    let mut s = ai::stream(
+    let params = suprnova_ai::models::params::InferenceRequestParams::default()
+        .with_reasoning_effort(suprnova_ai::models::params::ProviderValue::Value(Some(
+            "high".into(),
+        )));
+    let mut s = suprnova_ai::stream(
         &m,
         vec![],
         StreamOptions {

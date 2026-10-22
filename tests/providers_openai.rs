@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::models::params::*;
-use ai::providers::openai::{
-    OpenAIChatCompletionsProtocol, OpenAICompatibleProvider, register, register_factories,
-};
-use ai::providers::{ModelsDevProvider, ProviderRegistry};
-use ai::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError};
-use ai::types::messages::{ContentOutput, ContentPart, FilePart};
-use ai::types::{
-    Event, Message, MessageRole, Part, TextPart, Tool, ToolCallPart, ToolResultPart, ToolSpec,
-};
-use ai::{Model, Provider, ProviderConfig, StreamOptions};
 use bytes::Bytes;
 use futures::{StreamExt, future::BoxFuture, stream};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+use suprnova_ai::models::params::*;
+use suprnova_ai::providers::openai::{
+    OpenAIChatCompletionsProtocol, OpenAICompatibleProvider, register, register_factories,
+};
+use suprnova_ai::providers::{ModelsDevProvider, ProviderRegistry};
+use suprnova_ai::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError};
+use suprnova_ai::types::messages::{ContentOutput, ContentPart, FilePart};
+use suprnova_ai::types::{
+    Event, Message, MessageRole, Part, TextPart, Tool, ToolCallPart, ToolResultPart, ToolSpec,
+};
+use suprnova_ai::{Model, Provider, ProviderConfig, StreamOptions};
 
 struct Scripted {
     requests: Mutex<Vec<HttpRequest>>,
@@ -104,7 +104,7 @@ fn fixture(name: &str) -> Vec<Value> {
     let v: Value = serde_json::from_str(include_str!("fixtures/openai-streams.json")).unwrap();
     v[name].as_array().unwrap().clone()
 }
-fn end(events: &[Event]) -> &ai::types::events::StreamEnd {
+fn end(events: &[Event]) -> &suprnova_ai::types::events::StreamEnd {
     match events.last().unwrap() {
         Event::StreamEnd(v) => v,
         _ => panic!("missing stream end"),
@@ -118,7 +118,10 @@ async fn request_endpoints_system_roles_and_input() {
         collect(
             fake.clone(),
             chat,
-            vec![ai::system_message("rules"), ai::user_message("Hi")],
+            vec![
+                suprnova_ai::system_message("rules"),
+                suprnova_ai::user_message("Hi"),
+            ],
             StreamOptions::default(),
         )
         .await;
@@ -197,7 +200,7 @@ async fn responses_params_and_structured_output() {
     collect(
         fake.clone(),
         false,
-        vec![ai::user_message("Hi")],
+        vec![suprnova_ai::user_message("Hi")],
         StreamOptions {
             params: Some(params),
             ..Default::default()
@@ -263,7 +266,7 @@ async fn chat_params_sampling_and_random_seed() {
         collect(
             fake.clone(),
             true,
-            vec![ai::user_message("Hi")],
+            vec![suprnova_ai::user_message("Hi")],
             StreamOptions {
                 params: Some(params),
                 ..Default::default()
@@ -383,7 +386,7 @@ async fn responses_streams_text_usage_and_function_calls() {
     );
     let fake = Scripted::sse(fixture("test_responses_streams_function_tool_call"));
     let model = Model::new("gpt-5.4", provider(fake, false));
-    let mut handle = ai::stream(&model, vec![], StreamOptions::default());
+    let mut handle = suprnova_ai::stream(&model, vec![], StreamOptions::default());
     while let Some(event) = handle.next().await {
         event.unwrap();
     }
@@ -560,7 +563,7 @@ async fn history_repair_and_store_false_replay() {
 
 #[tokio::test]
 async fn provider_list_models_probe_and_status_errors() {
-    use ai::errors::ProviderErrorKind as K;
+    use suprnova_ai::errors::ProviderErrorKind as K;
     let fake = Scripted::response(200, br#"{"data":[{"id":"gpt-z"},{"id":"gpt-a"}]}"#.to_vec());
     assert_eq!(
         provider(fake.clone(), false).list_models().await.unwrap(),
@@ -586,7 +589,8 @@ async fn provider_list_models_probe_and_status_errors() {
     ] {
         let fake=Scripted::response(status,br#"{"error":{"message":"slow down","code":"rate_limit","param":"model","type":"rate_limit_error"}}"#.to_vec());
         let model = Model::new("gpt-5.4", provider(fake.clone(), false));
-        let ai::Error::Provider(e) = model.provider.probe(&model).await.unwrap_err() else {
+        let suprnova_ai::Error::Provider(e) = model.provider.probe(&model).await.unwrap_err()
+        else {
             panic!("wrong error")
         };
         assert_eq!(e.kind, kind);
@@ -602,7 +606,8 @@ async fn provider_list_models_probe_and_status_errors() {
         );
     }
     let fake = Scripted::response(404, b"{}".to_vec());
-    let ai::Error::Provider(e) = provider(fake, false).list_models().await.unwrap_err() else {
+    let suprnova_ai::Error::Provider(e) = provider(fake, false).list_models().await.unwrap_err()
+    else {
         panic!("wrong error")
     };
     assert_eq!(e.kind, K::NotFound);
@@ -687,10 +692,13 @@ async fn configuration_modelsdev_and_registry_restoration() {
         fake.clone(),
     ));
     let model = Model::new("gpt", unconfigured);
-    let ai::Error::Provider(e) = model.provider.probe(&model).await.unwrap_err() else {
+    let suprnova_ai::Error::Provider(e) = model.provider.probe(&model).await.unwrap_err() else {
         panic!("wrong error")
     };
-    assert_eq!(e.kind, ai::errors::ProviderErrorKind::NotConfigured);
+    assert_eq!(
+        e.kind,
+        suprnova_ai::errors::ProviderErrorKind::NotConfigured
+    );
 }
 
 #[tokio::test]
@@ -772,7 +780,7 @@ async fn multipart_tool_results_and_model_input() {
 
 #[tokio::test]
 async fn tools_and_builtin_guards() {
-    use ai::providers::openai::tools;
+    use suprnova_ai::providers::openai::tools;
     let fake = Scripted::sse(vec![]);
     let weather = Tool::function(
         "weather",
@@ -822,7 +830,7 @@ async fn chat_interleaved_tools_reasoning_and_usage() {
         json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":2}}}),
     ];
     let model = Model::new("custom", provider(Scripted::sse(chunks), true));
-    let mut h = ai::stream(&model, vec![], StreamOptions::default());
+    let mut h = suprnova_ai::stream(&model, vec![], StreamOptions::default());
     while let Some(e) = h.next().await {
         e.unwrap();
     }
@@ -863,7 +871,7 @@ async fn malformed_sse_and_transport_errors() {
         replies: Mutex::new(vec![Err(TransportError::Timeout)]),
     });
     let model = Model::new("gpt", provider(fake, false));
-    let ai::Error::Provider(e) = model
+    let suprnova_ai::Error::Provider(e) = model
         .provider
         .stream(&model, vec![], StreamOptions::default())
         .next()
@@ -873,14 +881,14 @@ async fn malformed_sse_and_transport_errors() {
     else {
         panic!("wrong error")
     };
-    assert_eq!(e.kind, ai::errors::ProviderErrorKind::Timeout);
+    assert_eq!(e.kind, suprnova_ai::errors::ProviderErrorKind::Timeout);
     assert!(e.is_retryable);
 }
 
 #[test]
 fn transport_error_retains_original_source() {
-    let e = ai::providers::openai::errors::map_transport(TransportError::Timeout, "xai");
-    let ai::Error::Provider(p) = e else {
+    let e = suprnova_ai::providers::openai::errors::map_transport(TransportError::Timeout, "xai");
+    let suprnova_ai::Error::Provider(p) = e else {
         panic!("wrong category")
     };
     let source = std::error::Error::source(p.as_ref()).expect("original transport cause");
@@ -918,7 +926,7 @@ async fn responses_reasoning_images_and_done_only_calls() {
         json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc","call_id":"call","name":"f","arguments":"{}"}}),
         json!({"type":"response.image_generation_call.partial_image","item_id":"im","partial_image_b64":"YQ=="}),
         json!({"type":"response.output_item.done","item":{"type":"image_generation_call","id":"im","result":"Yg=="}}),
-    ]),false,vec![],StreamOptions::default().with_tools([ai::providers::openai::tools::image_generation(json!({"output_format":"jpeg"})).unwrap()])).await;
+    ]),false,vec![],StreamOptions::default().with_tools([suprnova_ai::providers::openai::tools::image_generation(json!({"output_format":"jpeg"})).unwrap()])).await;
     assert_eq!(
         events
             .iter()
@@ -987,12 +995,12 @@ async fn history_rejects_duplicate_and_orphaned_tool_results() {
 #[tokio::test]
 async fn chat_downloads_audio_and_pdf_through_core_downloads() {
     struct Download(Arc<Scripted>);
-    impl ai::models::files::DownloadTransport for Download {
+    impl suprnova_ai::models::files::DownloadTransport for Download {
         fn resolve<'a>(
             &'a self,
             _host: &'a str,
             _port: u16,
-        ) -> BoxFuture<'a, Result<Vec<std::net::IpAddr>, ai::models::files::DownloadError>>
+        ) -> BoxFuture<'a, Result<Vec<std::net::IpAddr>, suprnova_ai::models::files::DownloadError>>
         {
             Box::pin(async { Ok(vec!["8.8.8.8".parse().unwrap()]) })
         }
@@ -1000,12 +1008,12 @@ async fn chat_downloads_audio_and_pdf_through_core_downloads() {
             &self,
             request: HttpRequest,
             _addresses: Vec<std::net::IpAddr>,
-        ) -> BoxFuture<'_, Result<HttpResponse, ai::models::files::DownloadError>> {
+        ) -> BoxFuture<'_, Result<HttpResponse, suprnova_ai::models::files::DownloadError>>
+        {
             Box::pin(async move {
-                self.0
-                    .send(request)
-                    .await
-                    .map_err(|_| ai::models::files::DownloadError::new("test", "transport failed"))
+                self.0.send(request).await.map_err(|_| {
+                    suprnova_ai::models::files::DownloadError::new("test", "transport failed")
+                })
             })
         }
     }
@@ -1051,7 +1059,7 @@ async fn chat_downloads_audio_and_pdf_through_core_downloads() {
 
 #[test]
 fn strict_schema_inlines_annotated_refs_and_single_allof() {
-    use ai::providers::openai::protocol::build_request;
+    use suprnova_ai::providers::openai::protocol::build_request;
     let schema = json!({"type":"object","properties":{"child":{"$ref":"#/$defs/Child","description":"child"}},"$defs":{"Child":{"type":"object","properties":{"name":{"allOf":[{"type":"string"}]}},"required":["name"]}}});
     let request = build_request(
         "gpt",
@@ -1092,7 +1100,7 @@ async fn explicit_provider_owns_request_transport() {
 #[tokio::test]
 async fn configured_provider_shares_transport_with_protocol() {
     let fake = Scripted::sse(vec![]);
-    let p = Arc::new(ai::providers::ConfiguredProvider::new(
+    let p = Arc::new(suprnova_ai::providers::ConfiguredProvider::new(
         "custom",
         ProviderConfig {
             default_base_url: "https://custom.test/v1".into(),
@@ -1104,7 +1112,11 @@ async fn configured_provider_shares_transport_with_protocol() {
     let m = Model::new("local", p);
     let events = m
         .provider
-        .stream(&m, vec![ai::user_message("Hi")], StreamOptions::default())
+        .stream(
+            &m,
+            vec![suprnova_ai::user_message("Hi")],
+            StreamOptions::default(),
+        )
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(Result::is_ok));
@@ -1149,7 +1161,7 @@ async fn stream_is_lazy_and_drop_cancels_body() {
 
 #[tokio::test]
 async fn common_params_and_allowed_tool_choices() {
-    use ai::types::{ToolChoice, ToolChoiceMode, ToolSelection};
+    use suprnova_ai::types::{ToolChoice, ToolChoiceMode, ToolSelection};
     for chat in [false, true] {
         let fake = Scripted::sse(vec![]);
         let params = InferenceRequestParams {

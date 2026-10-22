@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::messages::{HookPart, HookStatus};
-use ai::types::{Message, MessageRole, Part};
-use ai::ui::ai_sdk::{UIMessage, approvals::*};
 use serde_json::{Value, json};
+use suprnova_ai::types::messages::{HookPart, HookStatus};
+use suprnova_ai::types::{Message, MessageRole, Part};
+use suprnova_ai::ui::ai_sdk::{UIMessage, approvals::*};
 
 fn hook(kind: &str) -> HookPart {
     serde_json::from_value(
@@ -66,7 +66,7 @@ fn reconstructs_hook_states_and_metadata() {
 #[derive(Default)]
 struct Registry(Vec<(String, Value)>);
 impl ApprovalResolver for Registry {
-    fn resolve_hook(&mut self, id: &str, resolution: Value) -> Result<(), ai::Error> {
+    fn resolve_hook(&mut self, id: &str, resolution: Value) -> Result<(), suprnova_ai::Error> {
         self.0.push((id.into(), resolution));
         Ok(())
     }

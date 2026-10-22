@@ -20,7 +20,12 @@ use std::{
     },
 };
 
-use ai::{
+use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt, stream as futures_stream};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::json;
+use suprnova_ai::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry, StreamOptions,
     errors::{ProviderError, ProviderErrorKind},
     generate, get_model,
@@ -32,11 +37,6 @@ use ai::{
         tools::{Tool, ToolConfig, ToolKind, ToolSpec},
     },
 };
-use async_trait::async_trait;
-use futures::{StreamExt, TryStreamExt, stream as futures_stream};
-use schemars::JsonSchema;
-use serde::Deserialize;
-use serde_json::json;
 
 #[derive(Clone)]
 enum GenerateBehavior {
@@ -79,7 +79,7 @@ impl ProviderProtocol for ScriptedProtocol {
         _messages: Vec<Message>,
         options: StreamOptions,
         _provider: &dyn Provider,
-    ) -> ai::providers::EventStream {
+    ) -> suprnova_ai::providers::EventStream {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         self.options.lock().unwrap().push(options);
         futures_stream::iter(self.events.lock().unwrap().clone().into_iter().map(Ok)).boxed()
@@ -582,7 +582,7 @@ async fn marked_assistant_turns_replay_tool_ends_without_calling_the_provider() 
 async fn replay_message_rebuilds_parts_and_preserves_the_message_id() {
     let message = assistant_message("cached");
     let id = message.id.clone();
-    let mut response = ai::StreamHandle::replay_message(message);
+    let mut response = suprnova_ai::StreamHandle::replay_message(message);
     let events = response.by_ref().try_collect::<Vec<_>>().await.unwrap();
 
     assert!(!events.is_empty());
@@ -593,7 +593,9 @@ async fn replay_message_rebuilds_parts_and_preserves_the_message_id() {
 
 #[test]
 fn request_param_builders_preserve_other_sampling_values() {
-    use ai::models::{InferenceRequestParams, ProviderValue, SamplerParams, TopPSamplerParams};
+    use suprnova_ai::models::{
+        InferenceRequestParams, ProviderValue, SamplerParams, TopPSamplerParams,
+    };
 
     let params = InferenceRequestParams {
         sampling: ProviderValue::Value(SamplerParams {

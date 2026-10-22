@@ -14,16 +14,16 @@
 
 mod agents_support;
 use agents_support::*;
-use ai::{
-    agents::{Agent, AgentTool, RunOptions},
-    types::{Event, HookStatus},
-    user_message,
-};
 use futures::{StreamExt, stream};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use suprnova_ai::{
+    agents::{Agent, AgentTool, RunOptions},
+    types::{Event, HookStatus},
+    user_message,
+};
 #[derive(Deserialize, JsonSchema)]
 struct Args {
     x: i32,
@@ -149,7 +149,7 @@ async fn defer_finishes_blocked_and_resume_uses_preregistered_resolution() {
     assert!(run.blocked());
     assert!(run.messages().last().unwrap().tool_results()[0].is_hook_deferred);
     let history = run.messages();
-    let hooks = ai::agents::HookRegistry::default();
+    let hooks = suprnova_ai::agents::HookRegistry::default();
     hooks
         .resolve_hook("approve_one", json!({"granted":true}))
         .unwrap();
@@ -176,9 +176,9 @@ async fn replay_without_resolution_emits_blocked_after_hidden_response_boundary(
     let (model, _) = scripted(vec![text("done")]);
     let history = vec![
         user_message("go"),
-        ai::types::Message::new(
-            ai::types::MessageRole::Assistant,
-            vec![ai::types::ToolCallPart::new("one", "gated", r#"{"x":1}"#).into()],
+        suprnova_ai::types::Message::new(
+            suprnova_ai::types::MessageRole::Assistant,
+            vec![suprnova_ai::types::ToolCallPart::new("one", "gated", r#"{"x":1}"#).into()],
         ),
     ];
     let mut run = Agent::new(vec![gated()]).run(model, history);
@@ -212,9 +212,11 @@ async fn custom_loop_hook_blocks_after_model_end() {
                     .hooks
                     .hook("confirm", Default::default(), None, &call.runtime)
                     .await
-                    .map_err(|e| ai::Error::Validation(e.to_string()))?;
+                    .map_err(|e| suprnova_ai::Error::Validation(e.to_string()))?;
                 assert!(answer.approved);
-                Ok(Event::TextDelta(ai::events::TextDelta::new("confirmed")))
+                Ok(Event::TextDelta(suprnova_ai::events::TextDelta::new(
+                    "confirmed",
+                )))
             }))
             .boxed()
     });

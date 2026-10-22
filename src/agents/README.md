@@ -6,7 +6,7 @@ returns a final answer. Tools run concurrently. Provider tools stay declarations
 they have no local executor.
 
 ```rust
-use ai::{Agent, AgentTool, Model, user_message};
+use suprnova_ai::{Agent, AgentTool, Model, user_message};
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -14,7 +14,7 @@ use serde::Deserialize;
 #[derive(Deserialize, JsonSchema)]
 struct Double { x: i32 }
 
-# async fn example(model: Model) -> Result<(), ai::Error> {
+# async fn example(model: Model) -> Result<(), suprnova_ai::Error> {
 let double = AgentTool::new::<Double, i32, _, _>(
     "double", "Double a number", |input, _context| async move {
         Ok(input.x * 2)

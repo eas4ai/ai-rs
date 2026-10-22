@@ -19,9 +19,9 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use ai::{Model, ProviderConfig};
-//! use ai::providers::openai::OpenAICompatibleProvider;
-//! use ai::transport::HttpTransport;
+//! use suprnova_ai::{Model, ProviderConfig};
+//! use suprnova_ai::providers::openai::OpenAICompatibleProvider;
+//! use suprnova_ai::transport::HttpTransport;
 //!
 //! fn model(transport: Arc<dyn HttpTransport>, api_key: String) -> Model {
 //!     let config = ProviderConfig { api_key_value: Some(api_key), ..Default::default() };

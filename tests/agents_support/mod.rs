@@ -13,18 +13,18 @@
 // limitations under the License.
 
 #![allow(dead_code)]
-use ai::{
-    Error, Model, ProviderConfig, ProviderProtocol, StreamOptions,
-    providers::{ConfiguredProvider, EventStream},
-    transport::{HttpRequest, HttpResponse, HttpTransport, TransportError},
-    types::{Event, Message, MessageRole, Part, ToolCallPart, events::replay_message_events},
-};
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream};
 use serde_json::Value;
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+};
+use suprnova_ai::{
+    Error, Model, ProviderConfig, ProviderProtocol, StreamOptions,
+    providers::{ConfiguredProvider, EventStream},
+    transport::{HttpRequest, HttpResponse, HttpTransport, TransportError},
+    types::{Event, Message, MessageRole, Part, ToolCallPart, events::replay_message_events},
 };
 
 pub struct ScriptedTransport {
@@ -65,7 +65,7 @@ impl ProviderProtocol for ScriptedProtocol {
         _model: &Model,
         messages: Vec<Message>,
         options: StreamOptions,
-        _provider: &dyn ai::Provider,
+        _provider: &dyn suprnova_ai::Provider,
     ) -> EventStream {
         let transport = self.0.clone();
         stream::once(async move {
@@ -99,7 +99,7 @@ pub fn response(message: Message) -> Vec<Event> {
     replay_message_events(&message)
 }
 pub fn text(value: &str) -> Vec<Event> {
-    response(ai::assistant_message(value))
+    response(suprnova_ai::assistant_message(value))
 }
 pub fn calls(calls: &[(&str, &str, &str)]) -> Vec<Event> {
     response(Message::new(

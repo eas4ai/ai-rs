@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ai::types::{
+use serde_json::{Value, json};
+use suprnova_ai::types::{
     Event, FilePart, Message, MessageHydrator, MessageRole, Part, ReasoningPart, TextPart,
     ToolCallPart,
     events::{
@@ -22,7 +23,6 @@ use ai::types::{
     },
     messages::{BuiltinToolCallPart, BuiltinToolReturnPart, HookPart, HookStatus, ToolResultPart},
 };
-use serde_json::{Value, json};
 
 fn meta(id: &str) -> ModelEventMeta {
     ModelEventMeta::with_message(Message::with_id(id, MessageRole::Assistant, vec![]))
@@ -450,7 +450,7 @@ fn blocked_hook_snapshots_keep_insertion_order() {
 
 #[test]
 fn partial_results_keep_runtime_aggregator_factories_and_stable_keys() {
-    use ai::types::events::{Aggregator, AggregatorFactory};
+    use suprnova_ai::types::events::{Aggregator, AggregatorFactory};
     struct Sum(u64);
     impl Aggregator<Value> for Sum {
         type Snapshot = Value;
@@ -490,8 +490,8 @@ fn partial_results_keep_runtime_aggregator_factories_and_stable_keys() {
 
 #[test]
 fn tool_results_keep_original_runtime_error_and_source_chain() {
-    use ai::types::events::RuntimeError;
     use std::error::Error as _;
+    use suprnova_ai::types::events::RuntimeError;
     #[derive(Debug, thiserror::Error)]
     #[error("tool failed")]
     struct ToolError {

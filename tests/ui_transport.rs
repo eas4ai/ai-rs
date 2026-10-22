@@ -14,16 +14,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use ai::{
+use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream};
+use serde_json::{Value, json};
+use suprnova_ai::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
     providers::{ConfiguredProvider, EventStream},
     transport::{Body, HttpRequest, HttpResponse, HttpTransport, TransportError, sse},
     types::{Event, Message},
     ui::ai_sdk::{UI_MESSAGE_STREAM_HEADERS, outbound_stream::format_done_sse, to_sse},
 };
-use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream};
-use serde_json::{Value, json};
 
 struct ScriptedTransport {
     body: Mutex<Option<Body>>,
@@ -118,8 +118,8 @@ async fn fake_transport_flows_through_core_hydration_and_ui_sse_lazily() {
     )
     .boxed();
     let (model, transport) = model(body);
-    let input = vec![ai::user_message("hello")];
-    let mut ui = to_sse(ai::stream(&model, input, StreamOptions::default()));
+    let input = vec![suprnova_ai::user_message("hello")];
+    let mut ui = to_sse(suprnova_ai::stream(&model, input, StreamOptions::default()));
     assert!(transport.requests.lock().unwrap().is_empty());
     let first = ui.next().await.unwrap().unwrap();
     assert_eq!(transport.requests.lock().unwrap().len(), 1);
@@ -170,9 +170,13 @@ async fn failed_transport_never_emits_a_successful_finish_or_done() {
     ])
     .boxed();
     let (model, _) = model(body);
-    let outputs: Vec<_> = to_sse(ai::stream(&model, vec![], StreamOptions::default()))
-        .collect()
-        .await;
+    let outputs: Vec<_> = to_sse(suprnova_ai::stream(
+        &model,
+        vec![],
+        StreamOptions::default(),
+    ))
+    .collect()
+    .await;
     assert!(
         matches!(outputs.last(), Some(Err(Error::Transport(TransportError::Body(message)))) if message == "scripted failure")
     );
