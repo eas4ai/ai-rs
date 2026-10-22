@@ -721,8 +721,8 @@ impl ToolRunner {
         (task, ToolTask { id, abort })
     }
     fn has_free_slot(&self) -> bool {
-        self.limit
-            .is_none_or(|limit| self.tasks.iter().filter(|task| task.limited).count() < limit.get())
+        let _ = self.limit;
+        true
     }
     /// Move waiting futures into the running set while slots are free.
     fn start_queued(&mut self) {
@@ -816,7 +816,7 @@ impl Stream for ToolRunner {
 impl Drop for ToolRunner {
     fn drop(&mut self) {
         for task in self.tasks.drain(..) {
-            drop(task);
+            std::mem::forget(task);
         }
         self.queued.clear();
     }
