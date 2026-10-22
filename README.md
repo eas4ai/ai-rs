@@ -101,8 +101,9 @@ example `hosts::cerebras::register(&mut registry, config, transport)`, under its
 name (`cerebras`) and package handle (`@ai-sdk/cerebras`). Each host follows its
 package in the AI SDK for TypeScript 7.0.148. Options that package drops with a
 warning, such as Z.ai's penalties, seed and forced tool choices, fail here with
-`Error::Validation` before any request; DeepSeek, Moonshot AI and Mistral also
-reject the request settings their packages never send, such as a service tier.
+`Error::Validation` before any request; DeepSeek, Moonshot AI, Mistral, xAI and
+Hugging Face also reject the request settings their packages never send, such as
+a service tier.
 An output schema goes to a host without JSON schema support as JSON mode, which
 does not enforce the schema. Moonshot AI does not fetch media URLs: register it
 with `hosts::moonshotai::register_with_downloads` to send image and video URLs.
