@@ -618,18 +618,21 @@ impl ProviderRegistry {
                 Error::Configuration("provider data must include provider_class_id".into())
             })?
             .to_owned();
-        let factory = self
-            .provider_factories
-            .get(&id)
-            .ok_or_else(|| Error::Configuration(format!("unknown provider_class_id: {id:?}")))?;
         let name = value
             .get("name")
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
-            .ok_or_else(|| Error::Configuration("provider data must include a name".into()))?;
-        let registered = self.providers.get(name).ok_or_else(|| {
+            .ok_or_else(|| Error::Configuration("provider data must include a name".into()))?
+            .to_owned();
+        // Look the provider up first, so every failure to restore it names it.
+        let registered = self.providers.get(&name).ok_or_else(|| {
             Error::Configuration(format!(
                 "cannot restore provider {name:?}: the registry holds no provider under that name to supply its credentials"
+            ))
+        })?;
+        let factory = self.provider_factories.get(&id).ok_or_else(|| {
+            Error::Configuration(format!(
+                "cannot restore provider {name:?}: unknown provider_class_id {id:?}"
             ))
         })?;
         // The registered provider decides where requests go and how they
