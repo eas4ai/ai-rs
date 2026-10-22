@@ -128,7 +128,9 @@ These follow `docs/spec/models.md` and `docs/spec/agents.md`.
   its own name. The gateway-only `routing` and `tags` request parameters are gone.
 - Snapshots leave out the API key value, the `env` map and the headers.
   `Model::from_value` takes them from the provider registered under the
-  snapshot's name and fails when there is none. Python serializes them.
+  snapshot's name. It fails when there is none, and when the snapshot's
+  provider class or endpoint fields differ from that provider's, so a changed
+  snapshot cannot send the key elsewhere. Python serializes the credentials.
 - Calls retry a retryable error before the first event, with the TypeScript
   defaults: 2 retries, waits of 2 s and 4 s, and `retry-after-ms` or
   `retry-after` waits under 60 s. Optional idle and total timeouts end a call
