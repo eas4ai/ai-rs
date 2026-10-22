@@ -58,11 +58,11 @@ runs the checks after each step; each answers continue, steer with a user
 message, or stop with a reason. The default list is empty.
 
 **Host.** A vendor API that speaks a protocol the crate implements, such as
-Cerebras over Chat Completions or MiniMax over Messages. `providers::hosts`
+Cerebras over Chat Completions, xAI over Responses or MiniMax over Messages. `providers::hosts`
 registers one provider per host.
 
-**Host profile.** The data that turns the Chat Completions or Messages
-adapter into one host's provider: its default base URL, its key variable,
+**Host profile.** The data that turns the Chat Completions, Responses or
+Messages adapter into one host's provider: its default base URL, its key variable,
 and its request and response rules.
 
 **Interrupted history.** What `AgentStream::interrupted_messages()` returns:

@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: dialect-hosts
+Current: responses-hosts
 
 ## rename-to-suprnova-ai
 
@@ -94,5 +94,30 @@ report one result per requirement through the shared
 `scripts/spec-tests.sh`.
 
 Done when the hosts, core, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## responses-hosts
+
+Requirements: HST-001, HST-019, HST-020, HST-021, HST-022, HST-023, HST-024, HST-025, PKG-002, PKG-006
+
+Give the Responses protocol a host profile, as Chat Completions has, with
+OpenAI's rules as today's default, and add xAI and Hugging Face to
+`providers::hosts` on it, each restorable from a snapshot and chosen by
+models.dev metadata. xAI is ported for text: its settings, effort map, store
+and include rules, history items without references, item metadata under
+`xai`, cached-token usage and `code: error` messages; its built-in tools fail
+with `Error::UnsupportedOperation`. Hugging Face gets its schema, tool choice
+and history rules and takes only image files. Each host rejects the settings
+its TypeScript package never sends. Fix the Responses reader for every
+Responses provider: `response.failed` and `error` events end the call with a
+classified `ProviderError`, `response.done` counts as `response.completed`,
+`response.incomplete` always reports a finish reason, and reasoning keeps its
+encrypted content when its summary ends first. Update `README.md`,
+`docs/PORT.md` and the adapter docs. Each requirement's tests in
+`tests/spec_hosts.rs` are named after it; `scripts/check-hosts.sh` reports
+one result per requirement through the shared `scripts/spec-tests.sh`.
+
+Done when the hosts, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
 adversary report have no open findings.
