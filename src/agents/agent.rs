@@ -565,8 +565,12 @@ impl Step {
         if let Some(meta) = event.model_event() {
             self.message = Some(meta.message.clone());
             let replayed = self.replay;
+            // The interrupted history keeps the response only up to its last
+            // received call, so the copy is taken at each ToolEnd.
+            let tool_end = matches!(event, Event::ToolEnd(_));
             call.record(|step| match step {
-                Some(step) => step.message.clone_from(&meta.message),
+                Some(step) if tool_end => step.message.clone_from(&meta.message),
+                Some(_) => {}
                 None => {
                     *step = Some(LoopStep {
                         message: meta.message.clone(),
