@@ -286,10 +286,21 @@ async fn tool_partial_results_precede_final_results() {
     assert_eq!(events, vec!["partial", "partial", "final"]);
 }
 #[tokio::test]
-async fn provider_error_is_returned_and_does_not_start_an_unrequested_retry() {
+async fn provider_error_is_returned_without_an_agent_level_retry() {
     let (model, transport) =
         scripted_results(vec![Err(suprnova_ai::transport::TransportError::Timeout)]);
-    let mut run = Agent::default().run(model, vec![user_message("go")]);
+    // Call retries are off, so the error shows the agent loop itself does not retry.
+    let mut run = Agent::default().run_with_options(
+        model,
+        vec![user_message("go")],
+        suprnova_ai::RunOptions {
+            stream_options: suprnova_ai::StreamOptions {
+                retry: suprnova_ai::RetryPolicy::none(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
     assert!(matches!(
         run.next().await.unwrap(),
         Err(suprnova_ai::Error::Transport(

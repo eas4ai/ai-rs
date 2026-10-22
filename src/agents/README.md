@@ -3,7 +3,8 @@
 `Agent` streams a model response, executes each function tool as its call finishes,
 adds the assistant and tool messages to history, then repeats until the assistant
 returns a final answer. Tools run concurrently. Provider tools stay declarations;
-they have no local executor.
+they have no local executor. A call to a tool with no executor becomes an error
+result that names the available tools, so the model can correct the call.
 
 ```rust
 use suprnova_ai::{Agent, AgentTool, Model, user_message};
@@ -57,7 +58,7 @@ results are cached and skipped on replay. Replay events stay out of consumer
 output. `blocked()` and `deferred_hooks()` reflect delivered events.
 
 `RunOptions` carries model parameters, structured output schema, hooks,
-middleware and the loop buffer. The first middleware is outermost. The stack
+middleware, the loop buffer, step checks and the tool concurrency cap. The first middleware is outermost. The stack
 wraps agent runs, model streams, generation, tool execution and hooks. Context
 containers own their values. A wrapper can replace messages or arguments without
 mutating the caller's input. Changing a tool call's correlation ID causes a history
@@ -78,8 +79,25 @@ behind queued events. Applications with large streams should use bounded loop
 buffering and avoid queuing unbounded side work. Dropping a buffered run requests
 cancellation; cleanup finishes when its task is polled. Dropping a lockstep run
 drops its source and pending tools immediately. Tool errors become error results with retained original
-error handles; provider and middleware errors end the run. Provider errors do not
-trigger automatic retries. As in Python, `Retry` events supplied by an execution
+error handles; provider and middleware errors end the run. The loop itself does
+not retry; each model call retries a retryable error before its first event, as
+`RunOptions::stream_options.retry` sets. As in Python, `Retry` events supplied by an execution
 wrapper reset aggregation and run tracking.
+
+`RunOptions::step_checks` run after each step, in order. A check is async and
+receives `RunProgress`: the step count, the history and the total usage. It
+answers `StepDecision::Continue`, `Steer(message)` to add a user message and call
+the model again (even after a final answer), or `Stop(reason)`. The first answer
+other than continue decides. `StepCheck::step_count(n)` and
+`StepCheck::tool_called(names)` are built in. With no checks, the default, a run
+stops when the model gives a final answer. Checks do not run after a replayed
+step or after a step that ended on a deferred hook. A custom loop that does not
+run the default loop decides for itself.
+
+Once the stream ends, `stop_reason()` returns `StopReason::Done`, `Stopped(reason)`
+or `Deferred`; it is `None` while the run goes on and after an error.
+`usage()` returns the summed usage of the delivered model responses.
+`RunOptions::tool_concurrency` caps how many tool executions of one step run at
+once; the others start in call order as slots free up.
 
 MCP connections and telemetry span recording are outside this module.

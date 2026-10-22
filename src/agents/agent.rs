@@ -15,10 +15,14 @@
 //! The agent step loop and its owned stream handle.
 use super::{
     buffer::BufferedStream,
+    checks::{RunProgress, StepCheck, StepDecision, StopReason},
     hooks::HookRegistry,
     middleware::{self, Middleware, ModelContext},
     runtime::Runtime,
-    tools::{AgentTool, BoundToolCall, ToolContext, ToolResolver, ToolRunner},
+    tools::{
+        AgentTool, BoundToolCall, ToolContext, ToolResolver, ToolRunner, UnavailableToolError,
+        error_tool_result, tool_result,
+    },
 };
 use crate::{
     Error, Model, StreamOptions,
@@ -27,6 +31,7 @@ use crate::{
         Event, HookPart, HookStatus, Message, MessageRole, Part, ToolCallPart, ToolResultPart,
         events::{ModelEventMeta, RunStateTracker, StreamEnd, StreamStart, ToolCallResult},
         tools::Tool,
+        usage::Usage,
     },
 };
 use futures::{Stream, StreamExt, future::Either, stream};
@@ -34,6 +39,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use std::{
     collections::{BTreeMap, VecDeque},
+    num::NonZeroUsize,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context as TaskContext, Poll},
@@ -78,6 +84,12 @@ impl Context {
             self.add(message)
         }
     }
+    /// Whether the history ends with a result placeholder for a deferred hook.
+    fn ends_deferred(&self) -> bool {
+        self.messages
+            .last()
+            .is_some_and(|last| last.tool_results().iter().any(|r| r.is_hook_deferred))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -87,6 +99,12 @@ pub struct RunOptions {
     pub middleware: Vec<Arc<dyn Middleware>>,
     /// None runs ahead without a limit; Some(0) advances in lockstep.
     pub loop_buffer: Option<usize>,
+    /// Checks the default loop runs after each step. Empty by default, so a
+    /// run stops only when it is done.
+    pub step_checks: Vec<StepCheck>,
+    /// The most tool executions of one step that run at once. Unset runs
+    /// every call of a step at once.
+    pub tool_concurrency: Option<NonZeroUsize>,
 }
 impl RunOptions {
     pub fn with_output<T: JsonSchema>(mut self) -> Self {
@@ -152,12 +170,16 @@ impl Agent {
             .unwrap_or_default()
             .with_middleware(options.middleware.clone());
         let (runtime, events) = Runtime::new();
+        let outcome = Arc::new(Mutex::new(None));
         let call = RunContext {
             context: context.clone(),
             agent: Arc::new(self.clone()),
             runtime,
             hooks: hooks.clone(),
             middleware: options.middleware.clone(),
+            step_checks: options.step_checks.clone(),
+            tool_concurrency: options.tool_concurrency,
+            outcome: outcome.clone(),
         };
         // A middleware may call next again to retry a failed run. Each
         // invocation owns its source and queue; the first uses the exposed sink.
@@ -197,6 +219,10 @@ impl Agent {
             hooks,
             blocked: false,
             deferred: BTreeMap::new(),
+            outcome,
+            usage: None,
+            ended: false,
+            failed: false,
         }
     }
 }
@@ -209,6 +235,11 @@ pub struct RunContext {
     pub runtime: Runtime,
     pub hooks: HookRegistry,
     pub middleware: Vec<Arc<dyn Middleware>>,
+    /// Checks the default loop runs after each step.
+    pub step_checks: Vec<StepCheck>,
+    /// The most tool executions of one step that run at once.
+    pub tool_concurrency: Option<NonZeroUsize>,
+    outcome: Arc<Mutex<Option<StopReason>>>,
 }
 impl RunContext {
     pub fn context(&self) -> Context {
@@ -272,11 +303,16 @@ impl RunContext {
             ..Default::default()
         }
     }
+    /// Run every model step until the run is done, a step check stops it, or
+    /// a hook is deferred. The step checks run after each step, except a
+    /// replayed one or one that ended on a deferred hook.
     pub fn default_loop(&self) -> EventStream {
         stream::try_unfold(
             LoopState {
                 call: self.clone(),
                 step: None,
+                steps: 0,
+                usage: None,
             },
             |mut state| async move {
                 loop {
@@ -284,42 +320,113 @@ impl RunContext {
                         if let Some(event) = step.next(&state.call).await? {
                             return Ok(Some((event, state)));
                         }
-                        state
-                            .step
-                            .take()
-                            .expect("active agent step")
-                            .finish(&state.call)?;
+                        let step = state.step.take().expect("active agent step");
+                        let counted = !step.replay;
+                        if counted {
+                            state.steps += 1;
+                            if let Some(usage) = step.usage() {
+                                state.usage = Some(match state.usage.take() {
+                                    Some(total) => total + usage,
+                                    None => usage.clone(),
+                                });
+                            }
+                        }
+                        step.finish(&state.call)?;
+                        if counted && !state.call.context().ends_deferred() {
+                            match state
+                                .call
+                                .check_step(state.steps, state.usage.clone())
+                                .await?
+                            {
+                                StepDecision::Continue => {}
+                                StepDecision::Steer(message) => {
+                                    state.call.update(|context| context.add(message));
+                                }
+                                StepDecision::Stop(reason) => {
+                                    state.call.set_outcome(StopReason::Stopped(reason));
+                                    return Ok(None);
+                                }
+                            }
+                        }
                     }
-                    if !state.call.context().keep_running() {
+                    let context = state.call.context();
+                    if !context.keep_running() {
+                        state.call.set_outcome(if context.ends_deferred() {
+                            StopReason::Deferred
+                        } else {
+                            StopReason::Done
+                        });
                         return Ok(None);
                     }
-                    state.step = Some(Step::new(state.call.model_stream()));
+                    let replay = context.messages.last().is_some_and(|m| m.replay);
+                    state.step = Some(Step::new(&state.call, state.call.model_stream(), replay));
                 }
             },
         )
         .boxed()
     }
+    /// Run the step checks in order; the first answer other than continue decides.
+    async fn check_step(&self, steps: usize, usage: Option<Usage>) -> Result<StepDecision, Error> {
+        if self.step_checks.is_empty() {
+            return Ok(StepDecision::Continue);
+        }
+        let progress = RunProgress {
+            steps,
+            messages: self.context().messages.into(),
+            usage,
+        };
+        for check in &self.step_checks {
+            match check.run(progress.clone()).await? {
+                StepDecision::Continue => {}
+                StepDecision::Steer(message) if message.role != MessageRole::User => {
+                    return Err(Error::Validation(format!(
+                        "a step check steered with a {} message; a steering message must have the user role",
+                        message.role
+                    )));
+                }
+                decision => return Ok(decision),
+            }
+        }
+        Ok(StepDecision::Continue)
+    }
+    fn set_outcome(&self, reason: StopReason) {
+        *self.outcome.lock().expect("agent outcome mutex poisoned") = Some(reason);
+    }
 }
 struct LoopState {
     call: RunContext,
     step: Option<Step>,
+    steps: usize,
+    usage: Option<Usage>,
 }
 struct Step {
     source: EventStream,
     tools: ToolRunner,
+    resolver: ToolResolver,
     in_flight: usize,
     done: bool,
+    replay: bool,
     message: Option<Message>,
 }
 impl Step {
-    fn new(source: EventStream) -> Self {
+    fn new(call: &RunContext, source: EventStream, replay: bool) -> Self {
         Self {
             source,
-            tools: ToolRunner::new(),
+            tools: match call.tool_concurrency {
+                Some(limit) => ToolRunner::with_concurrency(limit),
+                None => ToolRunner::new(),
+            },
+            resolver: ToolResolver::new(call.agent.tools.clone()),
             in_flight: 0,
             done: false,
+            replay,
             message: None,
         }
+    }
+    fn usage(&self) -> Option<&Usage> {
+        self.message
+            .as_ref()
+            .and_then(|message| message.usage.as_ref())
     }
     fn finish(self, call: &RunContext) -> Result<(), Error> {
         let tool_message = self.tools.get_tool_message();
@@ -372,7 +479,25 @@ impl Step {
             self.message = Some(meta.message.clone())
         }
         if let Event::ToolEnd(value) = &event {
-            let tc = call.agent.resolve(value.tool_call.clone())?;
+            let Some(tool) = self.resolver.get(&value.tool_call.tool_name) else {
+                // The model sees the error and can correct the call.
+                let part = &value.tool_call;
+                let result = match &part.cached_result {
+                    Some(result) => tool_result(result.clone()),
+                    None => error_tool_result(
+                        UnavailableToolError {
+                            tool_name: part.tool_name.clone(),
+                            available: self.resolver.names().map(str::to_owned).collect(),
+                        },
+                        &part.tool_call_id,
+                        &part.tool_name,
+                    ),
+                };
+                self.tools.add_result(result);
+                self.in_flight += 1;
+                return Ok(event);
+            };
+            let tc = BoundToolCall::new(value.tool_call.clone(), tool.clone());
             let context = ToolContext {
                 runtime: call.runtime.clone(),
                 hooks: call.hooks.clone(),
@@ -505,6 +630,10 @@ pub struct AgentStream {
     hooks: HookRegistry,
     blocked: bool,
     deferred: BTreeMap<String, HookPart>,
+    outcome: Arc<Mutex<Option<StopReason>>>,
+    usage: Option<Usage>,
+    ended: bool,
+    failed: bool,
 }
 impl AgentStream {
     pub fn context(&self) -> Context {
@@ -524,6 +653,23 @@ impl AgentStream {
     }
     pub fn deferred_hooks(&self) -> Vec<HookPart> {
         self.deferred.values().cloned().collect()
+    }
+    /// The summed usage of the model responses delivered so far, or `None`
+    /// when none of them reported usage.
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage.clone()
+    }
+    /// Why the run stopped, once its stream has ended without an error.
+    /// `None` while it runs, after an error, and for a custom loop that does
+    /// not run the default loop.
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        if !self.ended || self.failed {
+            return None;
+        }
+        self.outcome
+            .lock()
+            .expect("agent outcome mutex poisoned")
+            .clone()
     }
     pub fn text(&self) -> Result<String, Error> {
         self.messages()
@@ -553,9 +699,25 @@ impl Stream for AgentStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         let event = match self.source.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(event))) => event,
-            other => return other,
+            Poll::Ready(Some(Err(error))) => {
+                self.failed = true;
+                return Poll::Ready(Some(Err(error)));
+            }
+            Poll::Ready(None) => {
+                self.ended = true;
+                return Poll::Ready(None);
+            }
+            Poll::Pending => return Poll::Pending,
         };
         match &event {
+            Event::StreamEnd(end) => {
+                if let Some(usage) = &end.event.message.usage {
+                    self.usage = Some(match self.usage.take() {
+                        Some(total) => total + usage,
+                        None => usage.clone(),
+                    });
+                }
+            }
             Event::RunBlocked(_) => self.blocked = true,
             Event::Hook(value) => match value.hook.status {
                 HookStatus::Pending => {

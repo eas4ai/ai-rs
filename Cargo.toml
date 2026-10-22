@@ -10,6 +10,8 @@ repository = "https://github.com/eas4ai/suprnova-ai-rs"
 [features]
 default = []
 reqwest = ["dep:reqwest"]
+# A scripted provider for tests that run without a network (`suprnova_ai::testing`).
+testing = []
 
 [dependencies]
 async-trait = "0.1.89"
@@ -26,6 +28,15 @@ thiserror = "2.0.17"
 url = "2.5.7"
 tokio = { version = "1.48.0", features = ["sync", "rt", "macros", "time", "net"] }
 reqwest = { version = "0.12.24", optional = true, default-features = false, features = ["rustls-tls", "stream", "gzip", "deflate", "brotli", "zstd"] }
+httpdate = "1.0.3"
 
 [dev-dependencies]
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "net", "io-util", "test-util"] }
+
+[[test]]
+name = "spec_models"
+required-features = ["testing"]
+
+[[test]]
+name = "spec_agents"
+required-features = ["testing"]

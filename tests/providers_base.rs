@@ -116,32 +116,21 @@ fn metadata_separates_credentials_and_endpoint_template_values() {
 }
 
 #[test]
-fn registry_supports_gateway_aliases_and_rejects_duplicate_handles() {
+fn registry_rejects_duplicate_handles() {
     let model = empty_model();
     let mut registry = ProviderRegistry::new();
-    registry
-        .register("gateway", model.provider.clone())
-        .unwrap();
-    for id in ["gateway", "ai-gateway", "vercel"] {
-        assert!(Arc::ptr_eq(
-            &model.provider,
-            &registry.get_provider(id).unwrap()
-        ));
-    }
-    registry.register("vercel", model.provider.clone()).unwrap();
-    assert!(
-        registry
-            .register("ai-gateway", empty_model().provider)
-            .is_err()
-    );
+    registry.register("custom", model.provider.clone()).unwrap();
+    // Registering the same provider again under its handle is allowed.
+    registry.register("custom", model.provider.clone()).unwrap();
+    assert!(registry.register("custom", empty_model().provider).is_err());
     assert!(registry.register("", model.provider.clone()).is_err());
     assert!(matches!(
         registry.get_provider("missing"),
         Err(Error::UnsupportedProvider(_))
     ));
     let metadata = ModelsDevProvider {
-        id: "custom".into(),
-        npm: Some("gateway".into()),
+        id: "unknown".into(),
+        npm: Some("custom".into()),
         api: None,
         env: vec![],
     };
@@ -289,6 +278,12 @@ fn factories_reject_duplicate_ids_and_missing_or_unknown_discriminators() {
     ] {
         assert!(registry.restore_protocol(value).is_err());
     }
+    // Without a provider registered under the snapshot's name, nothing supplies its credentials.
+    assert!(matches!(
+        registry.restore_provider(serde_json::json!({"provider_class_id":"empty","name":"empty"})),
+        Err(Error::Configuration(_))
+    ));
+    registry.register("empty", empty_model().provider).unwrap();
     let provider = registry
         .restore_provider(serde_json::json!({"provider_class_id":"empty","name":"empty"}))
         .unwrap();

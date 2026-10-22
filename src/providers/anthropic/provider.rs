@@ -140,7 +140,7 @@ impl Provider for AnthropicCompatibleProvider {
         self.api_key().is_some_and(|key| !key.is_empty()) && self.config.is_configured()
     }
     fn to_value(&self) -> Result<Value, Error> {
-        let mut value = serde_json::to_value(&self.config)?;
+        let mut value = self.config.snapshot()?;
         value["name"] = json!(self.name);
         value["provider_class_id"] = json!(self.provider_class_id());
         value["anthropic_version"] = json!(self.anthropic_version);
