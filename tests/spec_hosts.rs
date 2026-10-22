@@ -2293,3 +2293,13 @@ async fn hst_018_a_retryable_error_first_in_the_stream_is_retried() {
     assert_eq!(handle.text(), "hi");
     assert_eq!(transport.count(), 2);
 }
+
+#[tokio::test]
+async fn hst_014_mistral_rejects_a_named_tool_it_was_not_given() {
+    let options = StreamOptions {
+        tools: tools(&["a"]),
+        tool_choice: Some(ToolChoice::Tool("b".into())),
+        ..Default::default()
+    };
+    validation("mistral", "mistral-small-latest", options).await;
+}
