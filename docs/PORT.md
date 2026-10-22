@@ -172,8 +172,9 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.m
 - A Responses `response.failed` or `error` event ends the call with a
   `ProviderError` whose kind and retry flag come from the error's code and
   type; Python reports a failed response as the finish reason `error`.
-  `response.done` counts as `response.completed`, and a reasoning summary
-  that ends before its item keeps the item's encrypted content.
+  `response.done` counts as `response.completed`. An xAI reasoning item
+  streams as one reasoning block, ended by the finished item, so the block
+  keeps the encrypted content that xAI sends only with that item.
 - The OpenAI and Anthropic adapters share one HTTP layer. Both report a
   transport failure with a fixed message that keeps the original error as its
   source, and a broken response body as a connection error; an error response
