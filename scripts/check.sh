@@ -10,5 +10,6 @@ export RUSTC="$T/rustc" RUSTDOC="$T/rustdoc" RUSTUP_AUTO_INSTALL=0
 "$T/cargo" test --locked --no-default-features
 "$T/cargo" test --locked --all-features
 "$T/cargo" test --locked --all-features --features serde_json/preserve_order --test models_core
+"$T/cargo" clippy --locked --all-targets --no-default-features -- -D warnings
 "$T/cargo" clippy --locked --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" "$T/cargo" doc --locked --all-features --no-deps
