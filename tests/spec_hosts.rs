@@ -2413,3 +2413,47 @@ async fn hst_013_a_moonshot_text_url_is_downloaded_or_rejected() {
         json!({"type": "text", "text": "downloaded words"})
     );
 }
+
+#[tokio::test]
+async fn hst_012_moonshot_normalizes_tuples_in_every_subschema() {
+    let tuple = || json!({"type": "array", "items": [{"type": "string"}, {"type": "integer"}]});
+    let prefix =
+        || json!({"type": "array", "prefixItems": [{"type": "string"}, {"type": "integer"}]});
+    let schema = json!({
+        "type": "object",
+        "properties": {"list": {"type": "array", "additionalItems": tuple()}},
+        "definitions": {"Pair": tuple()},
+        "dependencies": {"list": {"properties": {"pair": tuple()}}, "other": ["list"]}
+    });
+    let tool = Tool::function(
+        "lookup",
+        ToolSpec {
+            description: None,
+            params: schema.try_into().unwrap(),
+        },
+    );
+    let options = StreamOptions {
+        tools: vec![tool],
+        ..Default::default()
+    };
+    let body = host_body(
+        "moonshotai",
+        "kimi-k3",
+        vec![user_message("hello")],
+        options,
+    )
+    .await;
+    let sent = &body["tools"][0]["function"]["parameters"];
+    assert_eq!(
+        sent["properties"]["list"]["additionalItems"],
+        prefix(),
+        "{sent}"
+    );
+    assert_eq!(sent["definitions"]["Pair"], prefix(), "{sent}");
+    assert_eq!(
+        sent["dependencies"]["list"]["properties"]["pair"],
+        prefix(),
+        "{sent}"
+    );
+    assert_eq!(sent["dependencies"]["other"], json!(["list"]));
+}
