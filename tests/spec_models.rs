@@ -531,6 +531,16 @@ async fn mod_005_transport_connection_failures_are_retried() {
     assert_eq!(provider.requests().len(), 2);
 }
 
+#[test]
+fn mod_005_without_a_tokio_runtime_a_retryable_error_is_returned_not_retried() {
+    let provider = rate_limit_then_text();
+    let model = provider.model("m");
+    let error = futures::executor::block_on(generate(&model, vec![], StreamOptions::default()))
+        .unwrap_err();
+    assert_eq!(provider_error(&error).kind, ProviderErrorKind::RateLimit);
+    assert_eq!(provider.requests().len(), 1);
+}
+
 // MOD-006
 
 fn timeout_kind(error: &Error) -> ProviderErrorKind {
@@ -575,6 +585,41 @@ async fn mod_006_total_timeout_ends_the_call() {
     assert_eq!(timeout_kind(&error.unwrap()), ProviderErrorKind::Timeout);
     assert_eq!(start.elapsed(), Duration::from_secs(60));
     assert!(provider.dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test(start_paused = true)]
+async fn mod_006_total_timeout_ends_a_buffered_call() {
+    let provider = SlowProvider::new(vec![Duration::from_secs(10)]);
+    let model = Model::new("m", provider);
+    let options = StreamOptions {
+        timeout: Some(Duration::from_secs(60)),
+        ..no_retry()
+    };
+    let start = Instant::now();
+    let error = generate(&model, vec![], options).await.unwrap_err();
+    assert_eq!(timeout_kind(&error), ProviderErrorKind::Timeout);
+    assert_eq!(start.elapsed(), Duration::from_secs(60));
+}
+
+#[test]
+fn mod_006_without_a_tokio_runtime_timeouts_are_a_configuration_error() {
+    let provider = ScriptedProvider::new("scripted", [ScriptedResponse::text("unused")]);
+    let model = provider.model("m");
+    let timed = StreamOptions {
+        timeout: Some(Duration::from_secs(1)),
+        ..StreamOptions::default()
+    };
+    let idle = StreamOptions {
+        idle_timeout: Some(Duration::from_secs(1)),
+        ..StreamOptions::default()
+    };
+    assert!(matches!(
+        futures::executor::block_on(generate(&model, vec![], timed)),
+        Err(Error::Configuration(_))
+    ));
+    let (_, error) = futures::executor::block_on(drain(&model, idle));
+    assert!(matches!(error, Some(Error::Configuration(_))), "{error:?}");
+    assert!(provider.requests().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

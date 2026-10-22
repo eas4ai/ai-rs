@@ -348,6 +348,53 @@ async fn runner_cancels_in_fifo_order_and_discards_without_results() {
 }
 
 #[tokio::test]
+async fn limited_runner_starts_queued_tasks_in_order_and_discards_queued_ones() {
+    use futures::StreamExt;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, Mutex},
+    };
+    use suprnova_ai::agents::tools::{ToolRunner, tool_result};
+    struct Dropped(&'static str, Arc<Mutex<Vec<&'static str>>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.1.lock().unwrap().push(self.0);
+        }
+    }
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let dropped = Arc::new(Mutex::new(Vec::new()));
+    let mut runner = ToolRunner::with_concurrency(NonZeroUsize::new(1).unwrap());
+    let (send, receive) = tokio::sync::oneshot::channel::<()>();
+    let mut handles = Vec::new();
+    let mut gate = Some(receive);
+    for name in ["first", "second", "third"] {
+        let started = started.clone();
+        let guard = Dropped(name, dropped.clone());
+        let gate = gate.take();
+        handles.push(runner.schedule(async move {
+            let _guard = guard;
+            started.lock().unwrap().push(name);
+            if let Some(gate) = gate {
+                gate.await.unwrap();
+            }
+            Ok(tool_result(ToolResultPart::new(name, "tool", json!(name))))
+        }));
+    }
+    assert!(futures::poll!(runner.events().next()).is_pending());
+    assert_eq!(*started.lock().unwrap(), ["first"]);
+    // A queued task that is discarded never starts.
+    runner.discard(&handles[1]);
+    assert_eq!(*dropped.lock().unwrap(), ["second"]);
+    send.send(()).unwrap();
+    let mut finished = Vec::new();
+    while let Some(result) = runner.events().next().await {
+        finished.push(result.unwrap().results[0].tool_call_id.clone());
+    }
+    assert_eq!(finished, ["first", "third"]);
+    assert_eq!(*started.lock().unwrap(), ["first", "third"]);
+}
+
+#[tokio::test]
 async fn runner_events_restart_and_collect_results_in_completion_order() {
     use futures::StreamExt;
     use suprnova_ai::agents::tools::{ToolRunner, tool_result};
