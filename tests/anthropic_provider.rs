@@ -214,3 +214,16 @@ async fn malformed_model_lists_are_response_errors() {
         assert_eq!(err.kind, suprnova_ai::errors::ProviderErrorKind::Response);
     }
 }
+#[tokio::test]
+async fn error_fields_read_the_top_level_first_as_python_does() {
+    let fake = ScriptedTransport::new(vec![Ok(response(
+        529,
+        json!({"type":"error","error":{"type":"overloaded_error","message":"slow down"}}),
+    ))]);
+    let suprnova_ai::Error::Provider(err) = provider(fake).list_models().await.unwrap_err() else {
+        panic!("wrong error")
+    };
+    assert_eq!(err.kind, suprnova_ai::errors::ProviderErrorKind::Overloaded);
+    assert_eq!(err.message, "slow down");
+    assert_eq!(err.error_type.as_deref(), Some("error"));
+}

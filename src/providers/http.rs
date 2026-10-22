@@ -42,6 +42,9 @@ pub(crate) struct ApiProfile {
     pub collapse_server_errors: bool,
     /// Keep only the `error` object of an error body as the error's body.
     pub keep_error_object: bool,
+    /// Read an error body's message, code, parameter and type from its top
+    /// level before its `error` object, as the Python Anthropic SDK does.
+    pub top_level_first: bool,
 }
 
 /// Where a request carries the API key.
@@ -145,7 +148,13 @@ pub(crate) async fn send(
         return Ok(response);
     }
     let status = response.status;
-    let (headers, bytes) = read_body(api, provider, response).await?;
+    let headers = response.headers.clone();
+    // The status says what failed; a body that cannot be read only loses the
+    // message, so a failed read must not turn the error into a retryable one.
+    let bytes = match read_body(api, provider, response).await {
+        Ok((_, bytes)) => bytes,
+        Err(_) => Bytes::new(),
+    };
     Err(status_error(
         api, provider, model_id, &request, status, headers, &bytes,
     ))
@@ -217,25 +226,35 @@ pub(crate) fn transport_error(api: &ApiProfile, provider: &str, error: Transport
 }
 
 /// The message of an error body: `{"error": {"message": ...}}`,
-/// `{"error": "<text>"}` or `{"message": ...}`.
-pub(crate) fn error_message(body: &Value) -> Option<&str> {
+/// `{"error": "<text>"}` or `{"message": ...}`, the top level first when the
+/// profile says so.
+pub(crate) fn error_message<'a>(api: &ApiProfile, body: &'a Value) -> Option<&'a str> {
+    let text = |value: Option<&'a Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+    };
     let error = body.get("error");
-    error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .or_else(|| error.and_then(Value::as_str))
-        .or_else(|| body.get("message").and_then(Value::as_str))
-        .filter(|message| !message.is_empty())
+    let nested = text(error.and_then(|error| error.get("message")));
+    let top = text(body.get("message"));
+    let first = if api.top_level_first { top } else { nested };
+    let second = if api.top_level_first { nested } else { top };
+    first.or_else(|| text(error)).or(second)
 }
 
-/// A field of an error body, from its `error` object first, then from the
-/// body itself. A number becomes its decimal text.
-pub(crate) fn error_field(body: &Value, key: &str) -> Option<String> {
-    let value = body
+/// A field of an error body from its `error` object and its top level, in
+/// the profile's order. A number becomes its decimal text.
+pub(crate) fn error_field(api: &ApiProfile, body: &Value, key: &str) -> Option<String> {
+    let nested = body
         .get("error")
         .and_then(|error| error.get(key))
-        .filter(|value| !value.is_null())
-        .or_else(|| body.get(key).filter(|value| !value.is_null()))?;
+        .filter(|value| !value.is_null());
+    let top = body.get(key).filter(|value| !value.is_null());
+    let value = if api.top_level_first {
+        top.or(nested)
+    } else {
+        nested.or(top)
+    }?;
     Some(match value {
         Value::String(text) => text.clone(),
         value => value.to_string(),
@@ -254,7 +273,7 @@ pub(crate) fn status_error(
 ) -> Error {
     let body = serde_json::from_slice::<Value>(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).into_owned()));
-    let message = error_message(&body)
+    let message = error_message(api, &body)
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{} request failed with HTTP {status}", api.label));
     let mut error = ProviderError::new(ProviderErrorKind::from_status(status), message)
@@ -276,9 +295,9 @@ pub(crate) fn status_error(
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(api.request_id_header))
         .map(|(_, value)| value.clone());
-    error.code = error_field(&body, "code");
-    error.param = error_field(&body, "param");
-    error.error_type = error_field(&body, "type");
+    error.code = error_field(api, &body, "code");
+    error.param = error_field(api, &body, "param");
+    error.error_type = error_field(api, &body, "type");
     error.body = Some(match body.get("error").filter(|_| api.keep_error_object) {
         Some(details) if details.is_object() => details.clone(),
         _ => body,
