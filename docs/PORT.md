@@ -2,7 +2,9 @@
 
 The source is AI SDK for Python 0.8.0 at
 `https://github.com/vercel-labs/ai-python`. `LICENSE` is copied unchanged.
-`NOTICE` records the port and upstream copyright.
+`NOTICE` records the port and upstream copyright. Behavior that the Python
+source lacks follows the AI SDK for TypeScript 7.0.148 where `docs/spec/` says so;
+"Departures from Python" below lists it.
 
 ## Module map
 
@@ -91,11 +93,10 @@ from explicit models.dev metadata. Concrete adapter packages can supply catalog
 integration later. Unknown or unregistered handles return `UnsupportedProvider`.
 
 Trait objects use explicit snapshot restoration factories in `ProviderRegistry`.
-`Model::to_value` and `Model::from_value` preserve the Python model/configuration
-shape without a global deserialization registry. Custom providers and protocols
-must include their settings in `to_value` and register corresponding factories.
-Snapshots can contain API keys, like the Python configuration objects; store them
-as credential material. Debug formatting of provider configuration redacts values.
+`Model::to_value` and `Model::from_value` keep the Python model/configuration
+shape without a global deserialization registry, minus the credentials. Custom
+providers and protocols must include their settings in `to_value` and register
+corresponding factories. Debug formatting of provider configuration redacts values.
 
 Deterministic IDs use `with_id_generator` scoped to the polled future. Tokio does
 not inherit task-local values into spawned tasks. Scope each spawned task
@@ -116,6 +117,32 @@ chunks. The bundled client supports gzip, deflate, Brotli, and Zstandard.
 `util::merge` uses `futures::stream::select_all`. It does not restart exhausted
 streams. Python queues, dynamic task groups, and exception-group teardown belong
 to the later agent runtime. Rust `Drop` handles stream and resource cancellation.
+
+## Departures from Python
+
+These follow `docs/spec/models.md` and `docs/spec/agents.md`.
+
+- Model ids must name their provider. Python routes an id without a colon to its
+  gateway provider and folds `gateway`, `ai-gateway` and `vercel` into one
+  registry entry; here such an id is a configuration error and every handle is
+  its own name. The gateway-only `routing` and `tags` request parameters are gone.
+- Snapshots leave out the API key value, the `env` map and the headers.
+  `Model::from_value` takes them from the provider registered under the
+  snapshot's name and fails when there is none. Python serializes them.
+- Calls retry a retryable error before the first event, with the TypeScript
+  defaults: 2 retries, waits of 2 s and 4 s, and `retry-after-ms` or
+  `retry-after` waits under 60 s. Optional idle and total timeouts end a call
+  with a `Timeout` provider error. Python has neither.
+- The agent loop runs async step checks after each step, which continue, steer
+  with a user message or stop with a reason. Python has no step limit or checks;
+  the TypeScript tool loop stops at 20 steps by default, while this default has
+  no checks, so a run stops when the model gives a final answer.
+- A call to a tool without an executor becomes an error result the model sees,
+  with the TypeScript message. Python ends the run.
+- `RunOptions::tool_concurrency` caps the tools a step runs at once,
+  `AgentStream::usage` sums the run's usage and `AgentStream::stop_reason` says
+  why the run stopped. Python has none of them.
+- The `testing` feature adds a scripted provider for tests without a network.
 
 ## UI adapter
 
@@ -171,6 +198,8 @@ rules follow the source.
 | `tests/ui/ai_sdk/test_outbound_stream.py` | `tests/ui_outbound_stream.rs` | Stream boundaries, retries, tools, typed partial results, hooks, files and SSE encoding |
 | Captured Python UI outputs | `tests/ui_python_compat.rs`, `tests/fixtures/ui-python-0.8.0.json` | Requests, histories, event streams and exact JSON encoding from the unmodified Python tests |
 | UI transport integration | `tests/ui_transport.rs`, `tests/ui_aggregator.rs` | Scripted `HttpTransport`, byte-split SSE, hydration, lazy conversion, error termination and typed reducer compatibility |
+| `docs/spec/models.md` (no Python source) | `tests/spec_models.rs` | MOD-001 to MOD-008: model ids, gateway removal, credential-free snapshots, retries, timeouts, drop cancellation, the scripted provider |
+| `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-005: step checks, unknown tools, tool concurrency, run usage, stop reasons |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
 not reproduce Python test counts. Python garbage-collector closure behavior,
@@ -197,7 +226,7 @@ tools, reasoning, streaming, errors), `agents` (Agent, tools, hooks, aggregators
 runtime, middleware, buffering) and `ui::ai_sdk`. Each keeps the core contracts and
 the Python tests' semantics; see its module documentation and tests.
 
-Still absent, by decision: the Vercel AI Gateway protocol and catalog, OIDC,
+Still absent, by decision: the Vercel AI Gateway protocol, routing and catalog, OIDC,
 telemetry spans, dedicated media and embedding operation front ends beyond the
 provider base contract, the MCP client, durable workflow integrations and
 environment-loading convenience factories.
