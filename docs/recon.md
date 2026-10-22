@@ -46,9 +46,9 @@ runs), clippy with `-D warnings`, and rustdoc with `-D warnings`.
 | # | Claim | Status | Citation |
 |---|---|---|---|
 | B1 | The library never reads process environment variables. | Exists | No `std::env`, `env::var` or `env!` in `src/`; `src/models/mod.rs:185-188` |
-| B2 | Model ids use `provider:model` and split at the first colon. An id with no colon routes to `gateway`. | Exists | `src/models/mod.rs:189-207`; `tests/models_core.rs:196` |
-| B3 | `gateway`, `ai-gateway` and `vercel` share one registry entry. | Exists | `src/providers/base.rs:638-643`; `tests/providers_base.rs:119` |
-| B4 | The provider registry starts empty. An unregistered id returns `UnsupportedProvider`. Because the gateway is not ported, an id with no colon fails unless the application registers its own `ai-gateway` provider. | Exists | `README.md:9`, `src/providers/base.rs:614-619` |
+| B2 | Model ids use `provider:model` and split at the first colon. An id with no colon routes to `gateway`. | Contradicted since core-hardening (2026-10-22): an id with no colon is an error (MOD-001) | `src/models/mod.rs` `get_model`; `tests/spec_models.rs` `mod_001_ids_without_a_provider_are_rejected` |
+| B3 | `gateway`, `ai-gateway` and `vercel` share one registry entry. | Contradicted since core-hardening (2026-10-22): each handle is its own name (MOD-002) | `src/providers/base.rs` `ProviderRegistry::register`; `tests/spec_models.rs` `mod_002_gateway_handles_are_separate_names` |
+| B4 | The provider registry starts empty. An unregistered id returns `UnsupportedProvider`. Because the gateway is not ported, an id with no colon fails unless the application registers its own `ai-gateway` provider. | Exists for the empty registry and `UnsupportedProvider`; the gateway clause is contradicted since core-hardening (2026-10-22), see B2 | `README.md:9`, `src/providers/base.rs` `get_provider` |
 | B5 | A stream that ends without `StreamEnd` returns a retryable incomplete-response error. | Exists | `docs/PORT.md` (Wire format); `tests/models_core.rs:387`, `tests/errors.rs:92` |
 | B6 | Event and part enums serialize with Python's `kind` discriminator and round-trip the upstream fixture. | Exists | `docs/PORT.md` (Wire format); `tests/python_compat.rs:36-78`, `tests/fixtures/python-0.8.0.json` |
 | B7 | Media downloads check public addresses, revalidate and pin every redirect, bound DNS, limit body size and scope cookies. | Exists | `docs/PORT.md` (Rust differences); `tests/models_files.rs:121-377`, `tests/transport_reqwest.rs:73-97` |
@@ -56,7 +56,7 @@ runs), clippy with `-D warnings`, and rustdoc with `-D warnings`.
 | B9 | UI conversion matches outputs captured from the unmodified Python tests. | Exists | `tests/ui_python_compat.rs:76-173`, `tests/fixtures/ui-python-0.8.0.json` |
 | B10 | Debug output of HTTP requests and provider configuration hides credentials. | Exists for `HttpRequest`; Documented for provider configuration | `src/transport/mod.rs:41-48`; `docs/PORT.md` (Rust differences) |
 | B11 | The local JSON Schema validator supports a stated subset, bounds nesting at 128 levels and decimals at 8192 bytes, and does not claim full conformance. | Documented | `docs/PORT.md:70-80`; validator in `src/types/tools.rs` |
-| B12 | Provider errors do not trigger automatic retries in the agent loop. | Exists | `src/agents/README.md`; `tests/agents_agent.rs` test `provider_error_is_returned_and_does_not_start_an_unrequested_retry` passed in check run |
+| B12 | Provider errors do not trigger automatic retries in the agent loop. | Contradicted since core-hardening (2026-10-22): the loop itself still does not retry, but every model call retries a retryable error before its first event (MOD-005) | `src/models/call.rs`; `tests/agents_agent.rs` `provider_error_is_returned_without_an_agent_level_retry`; `tests/spec_models.rs` `mod_005_*` |
 | B13 | The default agent loop buffer is unbounded, as in Python. The runtime side queue is also unbounded. | Documented | `src/agents/README.md:73-77` |
 | B14 | The test suite needs no live provider credentials. Tests use scripted transports. | Exists | `docs/PORT.md:180`; B1 (no environment reads); check run passed |
 

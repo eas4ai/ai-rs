@@ -3,8 +3,9 @@
 suprnova-ai is a Rust library crate. It ports the AI SDK for Python 0.8.0
 (`https://github.com/vercel-labs/ai-python`) to Rust. It covers model
 references, streaming and generation, OpenAI-compatible and
-Anthropic-compatible provider adapters, a tool-calling agent loop, and an
-adapter for Vercel AI SDK v6 UI messages. Its repository is
+Anthropic-compatible provider adapters and the hosted providers that use
+them, a tool-calling agent loop, and an adapter for Vercel AI SDK v6 UI
+messages. Its repository is
 `https://github.com/eas4ai/suprnova-ai-rs`.
 
 ## The problem
@@ -31,7 +32,8 @@ same streams. It departs from Python only where a requirement says so.
 |---|---|---|
 | package.md | PKG | package, library and repository names, the upstream credit, the origin remote and the check script |
 | models.md | MOD | model ids, model snapshots, retries, timeouts and dropping a call, and the scripted test provider |
-| agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency and run usage |
+| agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency, run usage and the history of an interrupted run |
+| hosts.md | HST | the hosted chat providers that use the Chat Completions or Messages protocol: Cerebras, DeepInfra, Fireworks, Together AI, Z.ai and MiniMax |
 
 ## Not yet specified
 

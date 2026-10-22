@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: core-hardening
+Current: chat-hosts
 
 ## rename-to-suprnova-ai
 
@@ -40,5 +40,31 @@ Python. Each requirement's tests in `tests/spec_models.rs` and
 reports one result per requirement.
 
 Done when the core, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## chat-hosts
+
+Requirements: HST-001, HST-002, HST-003, HST-004, HST-005, HST-006, HST-007, AGT-001, AGT-006, PKG-002, PKG-006
+
+Add the first hosted providers on one shared provider layer. Move the parts
+the OpenAI and Anthropic adapters each carry today into shared code under
+`src/providers/`: the HTTP request builder (URL joins, query, auth and
+header order, the bounded body read), the error mapping, and the SSE to JSON
+reader. Their behavior does not change, so today's tests keep passing.
+Give the Chat Completions protocol a host profile for the request and
+response differences in `docs/spec/hosts.md`, and stop choosing the default
+protocol by the provider name. Add `providers::hosts` with Cerebras,
+DeepInfra, Fireworks, Together AI and Z.ai on Chat Completions and MiniMax on
+the Anthropic Messages protocol, each restorable from a snapshot. Send
+`stream_options.include_usage` only where HST-002 says. In the agent loop,
+skip step checks after a step that ends on a deferred hook, count progress
+across every run of the loop, and add `AgentStream::interrupted_messages()`.
+Update `README.md`, `src/agents/README.md` and `docs/PORT.md`. Each
+requirement's tests in `tests/spec_hosts.rs` and `tests/spec_agents.rs` are
+named after it; `scripts/check-hosts.sh` and `scripts/check-core.sh` report
+one result per requirement through the shared `scripts/spec-tests.sh`.
+
+Done when the hosts, core, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
 adversary report have no open findings.
