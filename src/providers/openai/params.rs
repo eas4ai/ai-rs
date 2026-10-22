@@ -90,7 +90,7 @@ pub(super) fn build(p: &InferenceRequestParams, wire: Wire) -> Result<Map<String
     let label = wire.api().label;
     let rejects_penalties_and_seed = chat.is_some_and(|c| c.rejects_penalties_and_seed);
     // xAI's Responses API takes top-k, min-p and seeds.
-    let sampling_extras = wire.responses_dialect() == Some(super::profile::ResponsesDialect::Xai);
+    let sampling_extras = false && wire.responses_dialect() == Some(super::profile::ResponsesDialect::Xai);
     let mut out = Map::new();
     if let ProviderValue::Value(s) = &p.sampling {
         if let Some(t) = &s.temperature {

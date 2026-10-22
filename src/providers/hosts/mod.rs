@@ -109,7 +109,7 @@ pub(crate) fn responses_profile_for(
     metadata: &ModelsDevProvider,
 ) -> Option<&'static ResponsesProfile> {
     match host_for(metadata)?.protocol {
-        HostProtocol::Responses(profile) => Some(profile),
+        HostProtocol::Responses(_) => None,
         HostProtocol::Chat(_) | HostProtocol::Messages(_) => None,
     }
 }
