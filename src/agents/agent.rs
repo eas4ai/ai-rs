@@ -191,7 +191,6 @@ impl Agent {
             } else {
                 let (runtime, events) = Runtime::new();
                 call.runtime = runtime;
-                *call.tally.lock().expect("agent tally mutex poisoned") = RunTally::default();
                 events
             };
             let resolver = ToolResolver::new(call.agent.tools.clone());
@@ -333,7 +332,9 @@ impl RunContext {
                         let step = state.step.take().expect("active agent step");
                         let progress = (!step.replay).then(|| state.call.count_step(step.usage()));
                         step.finish(&state.call)?;
-                        if let Some((steps, usage)) = progress {
+                        if let Some((steps, usage)) = progress
+                            && !state.call.context().ends_deferred()
+                        {
                             match state.call.check_step(steps, usage).await? {
                                 StepDecision::Continue => {}
                                 StepDecision::Steer(message) => {
