@@ -50,7 +50,7 @@ static PROFILE: ChatProfile = ChatProfile {
     json_drops_tool_calls_after_text: false,
 };
 
-static HOST: Host = Host {
+pub(super) static HOST: Host = Host {
     name: "deepinfra",
     handle: "@ai-sdk/deepinfra",
     default_base_url: "https://api.deepinfra.com/v1/openai",

@@ -164,7 +164,9 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.m
   Anthropic from the top level first, as the Python SDKs do. An array in
   `extra_query` sends one pair per item, as httpx does.
 - `OpenAICompatibleProvider::from_modelsdev_provider` selects Responses when the
-  metadata names `@ai-sdk/openai`, not when the id is `openai`.
+  metadata names `@ai-sdk/openai`, not when the id is `openai`, and gives
+  metadata for a Chat Completions host of `providers::hosts`, by package or id,
+  that host's rules.
 
 ## UI adapter
 

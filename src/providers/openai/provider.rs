@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{OpenAIChatCompletionsProtocol, OpenAIResponsesProtocol, errors, protocol};
+use super::{
+    OpenAIChatCompletionsProtocol, OpenAIResponsesProtocol, errors, protocol,
+    protocol::HostChatProtocol,
+};
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
-    providers::{ModelsDevProvider, base::provider_config, http},
+    providers::{ModelsDevProvider, base::provider_config, hosts, http},
     transport::HttpTransport,
 };
 use async_trait::async_trait;
@@ -62,7 +65,9 @@ impl OpenAICompatibleProvider {
     }
     /// Build a provider from models.dev metadata. It speaks Responses when
     /// the metadata names OpenAI's own adapter package, `@ai-sdk/openai`, and
-    /// Chat Completions otherwise.
+    /// Chat Completions otherwise. Metadata that names a Chat Completions
+    /// host of `providers::hosts`, by package or id, gets that host's
+    /// request and response rules.
     pub fn from_modelsdev_provider(
         metadata: &ModelsDevProvider,
         mut config: ProviderConfig,
@@ -92,6 +97,8 @@ impl OpenAICompatibleProvider {
         let default_protocol: Arc<dyn ProviderProtocol> =
             if metadata.npm.as_deref() == Some("@ai-sdk/openai") {
                 Arc::new(OpenAIResponsesProtocol)
+            } else if let Some(profile) = hosts::chat_profile_for(metadata) {
+                Arc::new(HostChatProtocol(profile))
             } else {
                 Arc::new(OpenAIChatCompletionsProtocol)
             };

@@ -478,6 +478,51 @@ async fn hst_002_openai_and_hostless_compatible_providers_ask_for_usage() {
     }
 }
 
+#[tokio::test]
+async fn hst_002_models_dev_metadata_for_a_host_gets_its_rules() {
+    for (id, npm, sends) in [
+        ("deepinfra", "@ai-sdk/deepinfra", false),
+        ("deepinfra", "@ai-sdk/openai-compatible", false),
+        ("cerebras", "@ai-sdk/cerebras", false),
+        ("fireworks", "@ai-sdk/fireworks", true),
+    ] {
+        let transport = Recorder::new([chat_text("hi", "stop")]);
+        let metadata = ModelsDevProvider {
+            id: id.into(),
+            npm: Some(npm.into()),
+            api: Some("https://host.test/v1".into()),
+            env: vec![],
+        };
+        let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+            &metadata,
+            key_config(),
+            transport.clone(),
+        )
+        .unwrap();
+        let model = Model::new("m", Arc::new(provider));
+        let options = params(|p| {
+            p.output = Some(OutputParams {
+                max_tokens: Some(100),
+                ..Default::default()
+            })
+        });
+        let (_, events) = call(&model, vec![user_message("hello")], options).await;
+        ok(&events);
+        let body = transport.body();
+        assert_eq!(
+            body.get("stream_options").is_some(),
+            sends,
+            "{id} {npm}: {body}"
+        );
+        let limit = if id == "cerebras" {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        assert_eq!(body[limit], 100, "{id} {npm}: {body}");
+    }
+}
+
 // HST-003
 
 /// A history with an assistant turn that carries reasoning.

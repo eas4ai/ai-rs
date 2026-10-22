@@ -50,7 +50,7 @@ static PROFILE: ChatProfile = ChatProfile {
     json_drops_tool_calls_after_text: false,
 };
 
-static HOST: Host = Host {
+pub(super) static HOST: Host = Host {
     name: "togetherai",
     handle: "@ai-sdk/togetherai",
     default_base_url: "https://api.together.xyz/v1",

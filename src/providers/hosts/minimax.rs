@@ -42,7 +42,7 @@ static PROFILE: MessagesProfile = MessagesProfile {
     always_reasons: names_version_3_1_or_later,
 };
 
-static HOST: Host = Host {
+pub(super) static HOST: Host = Host {
     name: "minimax",
     handle: "@ai-sdk/minimax",
     default_base_url: "https://api.minimax.io/anthropic",

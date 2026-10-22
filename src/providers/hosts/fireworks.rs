@@ -51,7 +51,7 @@ static PROFILE: ChatProfile = ChatProfile {
     json_drops_tool_calls_after_text: false,
 };
 
-static HOST: Host = Host {
+pub(super) static HOST: Host = Host {
     name: "fireworks",
     handle: "@ai-sdk/fireworks",
     default_base_url: "https://api.fireworks.ai/inference/v1",
