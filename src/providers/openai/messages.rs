@@ -395,7 +395,7 @@ fn xai_assistant(msg: &Message, key: &str, out: &mut Vec<Value>) {
         let md = metadata(part, key);
         let id = item_id(md);
         match part {
-            Part::Text(t) if !t.text.is_empty() => {
+            Part::Text(t) => {
                 let mut item = json!({"role":"assistant","content":t.text});
                 if let Some(id) = id {
                     item["id"] = json!(id);
@@ -437,9 +437,7 @@ fn xai_assistant(msg: &Message, key: &str, out: &mut Vec<Value>) {
 fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
     for part in &msg.parts {
         match part {
-            Part::Text(TextPart { text, .. }) | Part::Reasoning(ReasoningPart { text, .. })
-                if !text.is_empty() =>
-            {
+            Part::Text(TextPart { text, .. }) | Part::Reasoning(ReasoningPart { text, .. }) => {
                 out.push(json!({"role":"assistant","content":[{"type":"output_text","text":text}]}));
             }
             Part::ToolCall(c) => out.push(json!({"type":"function_call","call_id":c.tool_call_id,"name":c.tool_name,"arguments":c.tool_args})),
