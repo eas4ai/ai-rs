@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for MOD-001 to MOD-008 in docs/spec/models.md. Each test name starts
+//! Tests for MOD-001 to MOD-009 in docs/spec/models.md. Each test name starts
 //! with the requirement it checks; scripts/check-core.sh selects them by it.
 
 use std::{
@@ -936,4 +936,117 @@ async fn mod_008_calls_after_the_script_fail_with_a_configuration_error() {
     ));
     let (_, error) = drain(&model, StreamOptions::default()).await;
     assert!(matches!(error, Some(Error::Configuration(_))));
+}
+
+// MOD-009
+
+#[cfg(feature = "reqwest")]
+mod reqwest_limits {
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use suprnova_ai::transport::{HttpRequest, HttpTransport, ReqwestTransport, TransportError};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpSocket},
+        time::{Instant, sleep, timeout},
+    };
+
+    fn get(url: String) -> HttpRequest {
+        HttpRequest {
+            method: "GET".into(),
+            url,
+            headers: vec![],
+            body: Default::default(),
+        }
+    }
+
+    /// A server that waits `before_headers`, sends the headers and `first`,
+    /// waits `between`, then sends `second` and closes.
+    async fn slow_server(before_headers: Duration, between: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            sleep(before_headers).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\n\r\nfirst ")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            sleep(between).await;
+            socket.write_all(b"second").await.unwrap();
+            socket.flush().await.unwrap();
+        });
+        url
+    }
+
+    async fn body(transport: &ReqwestTransport, url: String) -> Result<String, TransportError> {
+        let response = transport.send(get(url)).await?;
+        let mut body = response.body;
+        let mut text = Vec::new();
+        while let Some(chunk) = body.next().await {
+            text.extend_from_slice(&chunk?);
+        }
+        Ok(String::from_utf8(text).unwrap())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mod_009_a_response_may_pause_for_a_minute_after_its_headers() {
+        let transport = ReqwestTransport::new().unwrap();
+        let url = slow_server(Duration::ZERO, Duration::from_secs(60)).await;
+        assert_eq!(body(&transport, url).await.unwrap(), "first second");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mod_009_a_response_may_send_its_headers_after_a_minute() {
+        let transport = ReqwestTransport::new().unwrap();
+        let url = slow_server(Duration::from_secs(60), Duration::ZERO).await;
+        assert_eq!(body(&transport, url).await.unwrap(), "first second");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mod_009_a_connection_that_does_not_open_times_out_after_10_s() {
+        // A listener that never accepts, with its accept queue full: the
+        // kernel drops further connection attempts, so a connect hangs.
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            let address = address;
+            let connected = tokio::task::spawn_blocking(move || {
+                std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300))
+            })
+            .await
+            .unwrap();
+            match connected {
+                Ok(stream) => held.push(stream),
+                Err(_) => break,
+            }
+        }
+        assert!(held.len() < 8, "the accept queue never filled");
+        let transport = ReqwestTransport::new().unwrap();
+        let start = Instant::now();
+        let result = timeout(
+            Duration::from_secs(60),
+            transport.send(get(format!("http://{address}/"))),
+        )
+        .await
+        .expect("the connection attempt did not time out within 60 s");
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(TransportError::Timeout)),
+            "{:?}",
+            result.map(|r| r.status)
+        );
+        assert!(
+            elapsed >= Duration::from_secs(10) && elapsed < Duration::from_secs(11),
+            "{elapsed:?}"
+        );
+        drop(held);
+    }
 }

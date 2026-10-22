@@ -25,12 +25,18 @@ pub struct ReqwestTransport {
 }
 
 impl ReqwestTransport {
-    /// Build a client with a 30-second request timeout and no automatic redirects.
+    /// Build a client that gives up opening a connection after 10 s and sets
+    /// no other time limit, so a model may think for minutes before or while
+    /// it streams. TCP keepalive ends a connection whose peer is gone. Bound a
+    /// call with `StreamOptions::idle_timeout` or `StreamOptions::timeout`.
+    /// The client follows no redirects.
     pub fn new() -> Result<Self, TransportError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(30))
+            .tcp_keepalive_interval(Duration::from_secs(10))
+            .tcp_keepalive_retries(6)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(map_error)?;
