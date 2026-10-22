@@ -745,7 +745,7 @@ async fn agt_006_a_lockstep_run_keeps_the_partial_text() {
 }
 
 #[tokio::test]
-async fn agt_006_a_run_ahead_keeps_only_what_was_delivered() {
+async fn agt_006_a_run_ahead_keeps_the_steps_the_loop_finished() {
     let provider = ScriptedProvider::new("scripted", [hello_in_two_deltas()]);
     let mut run = Agent::default().run(provider.model("m"), vec![user_message("go")]);
     read_until(&mut run, |event| is_delta(event, "Hel")).await;
@@ -758,9 +758,9 @@ async fn agt_006_a_run_ahead_keeps_only_what_was_delivered() {
     .await
     .expect("the loop never ran ahead");
     assert_eq!(run.messages().last().unwrap().text(), "Hello");
+    // The finished step is the run's history; no step is in progress.
     let history = run.interrupted_messages();
-    assert_eq!(history.len(), 2, "{history:?}");
-    assert_eq!(history.last().unwrap().text(), "Hel");
+    assert_eq!(history, run.messages());
 }
 
 #[tokio::test]
@@ -1093,4 +1093,43 @@ async fn agt_006_a_stopped_buffered_run_keeps_what_the_loop_received() {
     finish(&mut run).await;
     assert_eq!(run.text().unwrap(), "done");
     assert_eq!(*starts.lock().unwrap(), [1, 0]);
+}
+
+#[tokio::test]
+async fn agt_006_stop_ends_a_lockstep_run_and_drops_its_tools() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let tool = {
+        let dropped = dropped.clone();
+        AgentTool::new::<Index, u32, _, _>("work", "Never finish", move |_, _| {
+            let dropped = dropped.clone();
+            async move {
+                let _guard = DropFlag(dropped);
+                std::future::pending::<()>().await;
+                Ok(0)
+            }
+        })
+        .unwrap()
+    };
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [ScriptedResponse::tool_call("a", "work", json!({"i": 0}))],
+    );
+    let mut run = Agent::new(vec![tool]).run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        lockstep(),
+    );
+    read_until(&mut run, |event| matches!(event, Event::StreamEnd(_))).await;
+    // The tool starts while the loop waits for its result.
+    let pending = tokio::time::timeout(Duration::from_millis(50), run.next()).await;
+    assert!(pending.is_err(), "{pending:?}");
+    run.stop().await;
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the tool's future was not dropped"
+    );
+    assert!(run.next().await.is_none());
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 3, "{history:?}");
+    assert_eq!(result_text(history[2].tool_results()[0]), CANCELLED);
 }

@@ -14,7 +14,7 @@
 
 //! The agent step loop and its owned stream handle.
 use super::{
-    buffer::BufferedStream,
+    buffer::{BufferStop, BufferedStream},
     checks::{RunProgress, StepCheck, StepDecision, StopReason},
     hooks::HookRegistry,
     middleware::{self, Middleware, ModelContext},
@@ -209,21 +209,27 @@ impl Agent {
             tracked(events.merge(source).boxed())
         });
         let source = middleware::run_chain(&options.middleware, real)(call);
-        let source = match options.loop_buffer {
-            Some(0) => source,
-            capacity => Box::pin(BufferedStream::new(source, capacity)),
+        let (source, buffer): (EventStream, _) = match options.loop_buffer {
+            Some(0) => (source, None),
+            capacity => {
+                let buffered = BufferedStream::new(source, capacity);
+                let stop = buffered.stopper();
+                (Box::pin(buffered), Some(stop))
+            }
         };
         AgentStream {
             source,
+            buffer,
             context,
             hooks,
             blocked: false,
             deferred: BTreeMap::new(),
             tally,
             usage: None,
-            step: None,
+            delivered: None,
             ended: false,
             failed: false,
+            stopped: false,
         }
     }
 }
@@ -251,6 +257,68 @@ struct RunTally {
     steps: usize,
     usage: Option<Usage>,
     outcome: Option<StopReason>,
+    /// The step in progress as the loop has it, which can be ahead of what
+    /// the consumer has read. `Step::finish` clears it under this lock while
+    /// it adds the step to the history, so a reader sees one or the other.
+    step: Option<LoopStep>,
+}
+
+/// The step in progress as the loop received it.
+#[derive(Debug)]
+struct LoopStep {
+    /// The model response so far, or for a replayed step the history's
+    /// response whose calls it runs.
+    message: Message,
+    replayed: bool,
+    /// The calls whose `ToolEnd` the loop received, in order.
+    calls: Vec<String>,
+    /// The results of the tools that finished.
+    results: Vec<ToolResultPart>,
+}
+impl LoopStep {
+    /// Add this step to `messages`, the history without it: the response up
+    /// to its last received call, without the calls whose `ToolEnd` did not
+    /// arrive, then each call's result, or a cancelled error result for a
+    /// tool that had not finished. A replayed response is in the history
+    /// already and keeps its calls and cached results.
+    fn add_to(&self, messages: &mut Vec<Message>) {
+        let calls: Vec<ToolCallPart> = if self.replayed {
+            self.message.tool_calls().into_iter().cloned().collect()
+        } else {
+            let mut message = self.message.clone();
+            let last = message.parts.iter().rposition(|part| {
+                matches!(part, Part::ToolCall(call) if self.calls.contains(&call.tool_call_id))
+            });
+            message.parts.truncate(last.map_or(0, |last| last + 1));
+            message.parts.retain(|part| match part {
+                Part::ToolCall(call) => self.calls.contains(&call.tool_call_id),
+                Part::Text(text) => !text.text.is_empty(),
+                _ => true,
+            });
+            let calls = message.tool_calls().into_iter().cloned().collect();
+            messages.push(message);
+            calls
+        };
+        let parts = calls
+            .iter()
+            .map(|call| {
+                self.results
+                    .iter()
+                    .find(|result| result.tool_call_id == call.tool_call_id)
+                    .or(call.cached_result.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ToolResultPart::error(
+                            call.tool_call_id.as_str(),
+                            call.tool_name.as_str(),
+                            serde_json::Value::String(CANCELLED_TOOL_CALL.into()),
+                        )
+                    })
+                    .into()
+            })
+            .collect();
+        messages.push(Message::new(MessageRole::Tool, parts));
+    }
 }
 impl RunContext {
     pub fn context(&self) -> Context {
@@ -399,6 +467,10 @@ impl RunContext {
         }
         (tally.steps, tally.usage.clone())
     }
+    /// Change the loop's record of the step in progress.
+    fn record(&self, change: impl FnOnce(&mut Option<LoopStep>)) {
+        change(&mut self.tally.lock().expect("agent tally mutex poisoned").step);
+    }
     fn set_outcome(&self, reason: StopReason) {
         self.tally
             .lock()
@@ -422,6 +494,7 @@ struct Step {
 }
 impl Step {
     fn new(call: &RunContext, source: EventStream, replay: bool) -> Self {
+        call.record(|step| *step = None);
         Self {
             source,
             tools: ToolRunner::new(),
@@ -459,6 +532,7 @@ impl Step {
                 result.tool_call_id
             )));
         }
+        let mut tally = call.tally.lock().expect("agent tally mutex poisoned");
         call.update(|context| {
             if let Some(message) = self.message {
                 context.add(message)
@@ -467,6 +541,7 @@ impl Step {
                 context.add(message)
             }
         });
+        tally.step = None;
         Ok(())
     }
     async fn next_ready(
@@ -488,9 +563,26 @@ impl Step {
     }
     fn accept_model_event(&mut self, call: &RunContext, event: Event) -> Result<Event, Error> {
         if let Some(meta) = event.model_event() {
-            self.message = Some(meta.message.clone())
+            self.message = Some(meta.message.clone());
+            let replayed = self.replay;
+            call.record(|step| match step {
+                Some(step) => step.message.clone_from(&meta.message),
+                None => {
+                    *step = Some(LoopStep {
+                        message: meta.message.clone(),
+                        replayed,
+                        calls: Vec::new(),
+                        results: Vec::new(),
+                    })
+                }
+            });
         }
         if let Event::ToolEnd(value) = &event {
+            call.record(|step| {
+                if let Some(step) = step {
+                    step.calls.push(value.tool_call_id.clone());
+                }
+            });
             let Some(tool) = self.resolver.get(&value.tool_call.tool_name) else {
                 // The model sees the error and can correct the call.
                 let part = &value.tool_call;
@@ -541,6 +633,11 @@ impl Step {
                 Either::Left(Some(result)) => {
                     let result = result?;
                     self.in_flight -= 1;
+                    call.record(|step| {
+                        if let Some(step) = step {
+                            step.results.extend(result.results.iter().cloned());
+                        }
+                    });
                     return Ok(Some(Event::ToolCallResult(result)));
                 }
                 Either::Right(None) => {
@@ -642,79 +739,22 @@ const CANCELLED_TOOL_CALL: &str = "Cancelled: the run stopped before this tool c
 /// Delivers events and exposes state consistent with those delivered events.
 pub struct AgentStream {
     source: EventStream,
+    /// Ends a buffered run's loop task; `None` for a lockstep run, whose loop
+    /// runs inside `source`.
+    buffer: Option<BufferStop>,
     context: Arc<Mutex<Context>>,
     hooks: HookRegistry,
     blocked: bool,
     deferred: BTreeMap<String, HookPart>,
     tally: Arc<Mutex<RunTally>>,
     usage: Option<Usage>,
-    step: Option<DeliveredStep>,
+    /// The model response of the last delivered model event, as delivered.
+    delivered: Option<Message>,
     ended: bool,
     failed: bool,
+    stopped: bool,
 }
 
-/// The step of the last delivered events, as far as they were delivered.
-/// The loop may run ahead of the consumer, so this is built from the
-/// delivered events and not from the shared history.
-#[derive(Debug)]
-struct DeliveredStep {
-    /// The model response so far, or for a replayed step the history's
-    /// response whose calls it runs.
-    message: Message,
-    replayed: bool,
-    /// The calls whose `ToolEnd` was delivered, or every call of a replayed step.
-    calls: Vec<String>,
-    /// The results delivered for those calls, in delivery order.
-    results: Vec<ToolResultPart>,
-    /// The response's `StreamEnd` was delivered; a replayed step has none.
-    response_ended: bool,
-}
-impl DeliveredStep {
-    fn new(message: Message) -> Self {
-        Self {
-            message,
-            replayed: false,
-            calls: Vec::new(),
-            results: Vec::new(),
-            response_ended: false,
-        }
-    }
-    /// Every event of the step was delivered: its whole response and a
-    /// result for each of its calls.
-    fn complete(&self) -> bool {
-        (self.replayed || self.response_ended)
-            && self
-                .calls
-                .iter()
-                .all(|id| self.results.iter().any(|r| r.tool_call_id == *id))
-    }
-    /// Whether `history` holds this step at `index`: its response and, when
-    /// it calls tools, the tool message with every result after it.
-    fn recorded_at(&self, history: &[Message], index: usize) -> bool {
-        self.calls.is_empty()
-            || history.get(index + 1).is_some_and(|next| {
-                next.role == MessageRole::Tool
-                    && self
-                        .calls
-                        .iter()
-                        .all(|id| next.tool_results().iter().any(|r| r.tool_call_id == *id))
-            })
-    }
-    /// A replayed step starts with the results the history already cached.
-    fn replayed(message: Message) -> Self {
-        let calls = message.tool_calls();
-        Self {
-            calls: calls.iter().map(|call| call.tool_call_id.clone()).collect(),
-            results: calls
-                .iter()
-                .filter_map(|call| call.cached_result.clone())
-                .collect(),
-            message,
-            replayed: true,
-            response_ended: false,
-        }
-    }
-}
 impl AgentStream {
     pub fn context(&self) -> Context {
         self.context
@@ -734,129 +774,62 @@ impl AgentStream {
     pub fn deferred_hooks(&self) -> Vec<HookPart> {
         self.deferred.values().cloned().collect()
     }
-    /// The history plus the step in progress, as delivered, for a next run
-    /// to continue from after this one stops (by drop) or fails. The step adds
-    /// its model response as delivered, keeping only the tool calls whose
-    /// `ToolEnd` was delivered, then a tool message with the results delivered
-    /// for them and an error result for each call that has none, so the next
-    /// run neither repeats a finished call nor runs an unfinished one. After a
-    /// step whose events were all delivered, it is the history up to the next
-    /// model response, with what the loop added before that call, such as a
-    /// steering message. Equals [`messages`](Self::messages) when no step is in
-    /// progress: before the first model event and after the stream ended
-    /// without an error.
+    /// The history plus the step in progress, for a next run to continue
+    /// from after this one stops or fails. When the loop has received a tool
+    /// call of that step, the step adds the response as the loop received it,
+    /// up to its last such call, and a tool message with the result of each
+    /// tool that finished and a cancelled error result for each one that did
+    /// not, so the next run neither repeats a finished call nor runs an
+    /// unfinished one. Otherwise it adds the response's text and reasoning as
+    /// delivered. A buffered loop may run ahead of the consumer; the history
+    /// holds every step it finished. Equals [`messages`](Self::messages) when
+    /// no step is in progress, and after the stream ended without an error.
+    /// Call [`stop`](Self::stop) first so that no tool finishes after the
+    /// history was read.
     pub fn interrupted_messages(&self) -> Vec<Message> {
+        let tally = self.tally.lock().expect("agent tally mutex poisoned");
         let mut messages = self.messages();
-        let Some(step) = self.step.as_ref().filter(|_| !self.ended || self.failed) else {
+        if self.ended && !self.failed {
+            return messages;
+        }
+        let Some(step) = tally.step.as_ref() else {
             return messages;
         };
-        // A loop that ran ahead may already hold this step and later ones.
-        let index = messages.iter().position(|m| m.id == step.message.id);
-        if let Some(index) = index
-            && step.complete()
-            && step.recorded_at(&messages, index)
+        if !step.calls.is_empty() {
+            step.add_to(&mut messages);
+            return messages;
+        }
+        if let Some(delivered) = self
+            .delivered
+            .as_ref()
+            .filter(|message| !step.replayed && message.id == step.message.id)
         {
-            // The history holds the whole step and, after it, what the loop
-            // added before its next model call, such as a steering message.
-            // The next model response was not delivered.
-            let next = messages[index + 1..]
-                .iter()
-                .position(|m| m.role == MessageRole::Assistant)
-                .map_or(messages.len(), |offset| index + 1 + offset);
-            messages.truncate(next);
-            return messages;
-        }
-        if let Some(index) = index {
-            messages.truncate(index);
-        }
-        let mut message = step.message.clone();
-        if !step.replayed {
+            let mut message = delivered.clone();
             message.parts.retain(|part| match part {
-                Part::ToolCall(call) => step.calls.contains(&call.tool_call_id),
                 Part::Text(text) => !text.text.is_empty(),
-                _ => true,
+                Part::Reasoning(_) => true,
+                _ => false,
             });
-        }
-        let calls: Vec<(String, String)> = message
-            .tool_calls()
-            .into_iter()
-            .map(|call| (call.tool_call_id.clone(), call.tool_name.clone()))
-            .collect();
-        if !message.parts.is_empty() {
-            messages.push(message);
-        }
-        if calls.is_empty() {
-            return messages;
-        }
-        let mut parts: Vec<Part> = step
-            .results
-            .iter()
-            .filter(|result| calls.iter().any(|(id, _)| *id == result.tool_call_id))
-            .map(|result| result.clone().into())
-            .collect();
-        for (id, name) in &calls {
-            if !step.results.iter().any(|result| result.tool_call_id == *id) {
-                parts.push(
-                    ToolResultPart::error(
-                        id.as_str(),
-                        name.as_str(),
-                        serde_json::Value::String(CANCELLED_TOOL_CALL.into()),
-                    )
-                    .into(),
-                );
+            if !message.parts.is_empty() {
+                messages.push(message);
             }
         }
-        messages.push(Message::new(MessageRole::Tool, parts));
         messages
     }
-    /// Record a delivered event in the step it belongs to.
-    fn observe(&mut self, event: &Event) {
-        if let Some(meta) = event.model_event() {
-            match self.step.as_mut() {
-                Some(step) if !step.replayed && step.message.id == meta.message.id => {
-                    step.message.clone_from(&meta.message);
-                }
-                _ => self.step = Some(DeliveredStep::new(meta.message.clone())),
-            }
-            if let Some(step) = self.step.as_mut() {
-                match event {
-                    Event::ToolEnd(end) => step.calls.push(end.tool_call.tool_call_id.clone()),
-                    Event::StreamEnd(_) => step.response_ended = true,
-                    _ => {}
-                }
-            }
-        } else if let Event::ToolCallResult(value) = event {
-            for result in &value.results {
-                self.observe_result(result);
-            }
+    /// Stop the run as dropping it does, and return once its work has ended:
+    /// the model call and the running tools are dropped. The stream then
+    /// yields no more events, and
+    /// [`interrupted_messages`](Self::interrupted_messages) holds the result
+    /// of every tool that finished before the stop.
+    pub async fn stop(&mut self) {
+        self.stopped = true;
+        // Wait for a buffered loop task before the source goes: dropping the
+        // source would only abort it. Dropping the source drops a lockstep
+        // loop with its tools at once.
+        if let Some(buffer) = self.buffer.take() {
+            buffer.stop().await;
         }
-    }
-    fn observe_result(&mut self, result: &ToolResultPart) {
-        let id = &result.tool_call_id;
-        if !self
-            .step
-            .as_ref()
-            .is_some_and(|step| step.calls.contains(id))
-        {
-            // A replayed step delivers no model events, only the results of
-            // calls in a response the history already holds.
-            let messages = self.messages();
-            let Some(message) = messages.iter().rev().find(|message| {
-                message.role == MessageRole::Assistant
-                    && message
-                        .tool_calls()
-                        .iter()
-                        .any(|call| call.tool_call_id == *id)
-            }) else {
-                return;
-            };
-            self.step = Some(DeliveredStep::replayed(message.clone()));
-        }
-        if let Some(step) = self.step.as_mut()
-            && !step.results.iter().any(|known| known.tool_call_id == *id)
-        {
-            step.results.push(result.clone());
-        }
+        self.source = stream::empty().boxed();
     }
     /// The summed usage of the model responses delivered so far, or `None`
     /// when none of them reported usage.
@@ -902,6 +875,9 @@ impl AgentStream {
 impl Stream for AgentStream {
     type Item = Result<Event, Error>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        if self.stopped {
+            return Poll::Ready(None);
+        }
         let event = match self.source.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(event))) => event,
             Poll::Ready(Some(Err(error))) => {
@@ -914,7 +890,9 @@ impl Stream for AgentStream {
             }
             Poll::Pending => return Poll::Pending,
         };
-        self.observe(&event);
+        if let Some(meta) = event.model_event() {
+            self.delivered = Some(meta.message.clone());
+        }
         match &event {
             Event::StreamEnd(end) => {
                 if let Some(usage) = &end.event.message.usage {
