@@ -310,7 +310,7 @@ pub(crate) fn wire_request(
     if let Some(profile) = chat
         && profile.dialect == Dialect::Mistral
     {
-        mistral_tools(&mut body, dialect::tool_choice(&p, options));
+        mistral_tools(&mut body, dialect::tool_choice(&p, options))?;
     }
     if let Some(schema) = &options.output_schema {
         let name = options.output_type_name.as_deref().unwrap_or("output");
@@ -358,11 +358,21 @@ pub(crate) fn wire_request(
 /// Mistral's tool choice: `any` for required or a named tool, whose name
 /// filters the tools, and neither `tool_choice` nor `parallel_tool_calls`
 /// without tools (`mistral-prepare-tools.ts`).
-fn mistral_tools(body: &mut serde_json::Map<String, Value>, choice: Option<&ToolChoice>) {
-    if let (Some(ToolChoice::Tool(tool)), Some(Value::Array(tools))) =
-        (choice, body.get_mut("tools"))
-    {
-        tools.retain(|t| t["function"]["name"].as_str() == Some(tool.0.as_str()));
+fn mistral_tools(
+    body: &mut serde_json::Map<String, Value>,
+    choice: Option<&ToolChoice>,
+) -> Result<(), Error> {
+    if let Some(ToolChoice::Tool(tool)) = choice {
+        let tools = body.get_mut("tools").and_then(Value::as_array_mut);
+        let found = tools.is_some_and(|tools| {
+            tools.retain(|t| t["function"]["name"].as_str() == Some(tool.0.as_str()));
+            !tools.is_empty()
+        });
+        if !found {
+            return Err(params::invalid(format!(
+                "Mistral tool choice names the tool {tool}, which the call does not declare"
+            )));
+        }
     }
     let has_tools = body
         .get("tools")
@@ -372,11 +382,12 @@ fn mistral_tools(body: &mut serde_json::Map<String, Value>, choice: Option<&Tool
         body.remove("tools");
         body.remove("tool_choice");
         body.remove("parallel_tool_calls");
-        return;
+        return Ok(());
     }
     if matches!(choice, Some(ToolChoice::Required | ToolChoice::Tool(_))) {
         body.insert("tool_choice".into(), json!("any"));
     }
+    Ok(())
 }
 fn tool_choice_name(choice: &ToolChoice) -> &'static str {
     match choice {
