@@ -108,10 +108,6 @@ struct Parser {
     responses_profile: Option<&'static ResponsesProfile>,
     /// The key of the part metadata this reader writes.
     metadata_key: &'static str,
-    /// Reasoning blocks whose summary part ended; each ends with its output
-    /// item, which can carry the encrypted content, or when the next part of
-    /// its item starts.
-    reasoning_parted: BTreeSet<String>,
     /// The request has an output schema.
     json_output: bool,
     /// Text arrived in this response.
@@ -172,7 +168,6 @@ pub(super) fn parse(
             Wire::Responses(profile) => profile.metadata_key,
             Wire::Chat(_) => "openai",
         },
-        reasoning_parted: BTreeSet::new(),
         json_output,
         has_text: false,
         held: Vec::new(),
@@ -528,7 +523,17 @@ impl Parser {
             | "response.failed" => {
                 let r = &data["response"];
                 if !r.is_object() {
-                    return Ok(());
+                    // A failed or incomplete response still ends as one.
+                    return match kind {
+                        "response.failed" => {
+                            Err(dialect::stream_error(true, self.api, &self.provider, data))
+                        }
+                        "response.incomplete" => {
+                            self.finish = Some("other".into());
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    };
                 }
                 let mut md = serde_json::Map::new();
                 for (src, dst) in [
@@ -616,15 +621,13 @@ impl Parser {
                 }
             }
             "response.reasoning_summary_part.added" => {
-                let id = reasoning_id(data);
-                self.end_parted_reasoning(&id);
+                let id = self.reasoning_id(data);
                 if self.reasoning.insert(id.clone()) {
                     self.queue.push_back(block("reasoning_start", &id, None));
                 }
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                let id = reasoning_id(data);
-                self.end_parted_reasoning(&id);
+                let id = self.reasoning_id(data);
                 if self.reasoning.insert(id.clone()) {
                     self.queue.push_back(block("reasoning_start", &id, None));
                 }
@@ -638,12 +641,13 @@ impl Parser {
                     }));
                 }
             }
-            // The block stays open for its output item, which can carry the
-            // encrypted content after the part ended, as xAI's does.
-            "response.reasoning_summary_part.done" => {
-                let id = reasoning_id(data);
-                if self.reasoning.contains(&id) {
-                    self.reasoning_parted.insert(id);
+            // xAI's one block per item ends with its output item, which
+            // carries the encrypted content after the summary ended.
+            "response.reasoning_summary_part.done" if !self.xai() => {
+                let id = self.reasoning_id(data);
+                if self.reasoning.remove(&id) {
+                    self.reasoning_ended.insert(id.clone());
+                    self.queue.push_back(block("reasoning_end", &id, None));
                 }
             }
             "response.image_generation_call.partial_image" => {
@@ -668,22 +672,18 @@ impl Parser {
         }
         Ok(())
     }
-    /// End the reasoning blocks of the same item whose summary part ended,
-    /// before a block other than them starts or grows.
-    fn end_parted_reasoning(&mut self, next: &str) {
-        let item = next.rsplit_once(':').map_or(next, |(item, _)| item);
-        let parted: Vec<_> = self
-            .reasoning_parted
-            .iter()
-            .filter(|id| id.as_str() != next && id.rsplit_once(':').is_some_and(|(i, _)| i == item))
-            .cloned()
-            .collect();
-        for id in parted {
-            self.reasoning_parted.remove(&id);
-            if self.reasoning.remove(&id) {
-                self.reasoning_ended.insert(id.clone());
-                self.queue.push_back(block("reasoning_end", &id, None));
-            }
+    fn xai(&self) -> bool {
+        self.responses_profile
+            .is_some_and(|p| p.dialect == ResponsesDialect::Xai)
+    }
+    /// The block of a reasoning event: one per summary part, or for xAI one
+    /// per item, as the TypeScript package keeps it, since its encrypted
+    /// content arrives only with the whole item.
+    fn reasoning_id(&self, data: &Value) -> String {
+        if self.xai() {
+            format!("{}:0", string(data, "item_id"))
+        } else {
+            reasoning_id(data)
         }
     }
     fn item_added(&mut self, item: &Value, data: &Value) {
@@ -868,6 +868,34 @@ impl Parser {
     fn reasoning_done(&mut self, item: &Value, key: &str) {
         let id = nonempty(string(item, "id"), key, "");
         let md = item_metadata(self.metadata_key, item);
+        if self.xai() {
+            // One block for the whole item: its streamed summary, or the
+            // summary text of the item when none streamed.
+            let block_id = format!("{id}:0");
+            if !self.reasoning_ended.contains(&block_id) {
+                let text: String = item["summary"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|s| string(s, "text"))
+                    .collect();
+                if self.reasoning.insert(block_id.clone()) {
+                    self.queue
+                        .push_back(block("reasoning_start", &block_id, md.clone()));
+                }
+                if !self.reasoning_delta.contains(&block_id) && !text.is_empty() {
+                    self.queue.push_back(Event::ReasoningDelta(ReasoningDelta {
+                        event: Default::default(),
+                        block_id: block_id.clone(),
+                        chunk: text,
+                    }));
+                }
+                self.reasoning.remove(&block_id);
+                self.reasoning_ended.insert(block_id.clone());
+                self.queue.push_back(block("reasoning_end", &block_id, md));
+            }
+            return;
+        }
         if let Some(summary) = item["summary"].as_array().filter(|s| !s.is_empty()) {
             for (index, summary) in summary.iter().enumerate() {
                 let block_id = format!("{id}:{index}");
@@ -887,7 +915,6 @@ impl Parser {
                     }));
                 }
                 self.reasoning.remove(&block_id);
-                self.reasoning_parted.remove(&block_id);
                 self.reasoning_ended.insert(block_id.clone());
                 self.queue
                     .push_back(block("reasoning_end", &block_id, md.clone()));
@@ -901,7 +928,6 @@ impl Parser {
                 .collect();
             for block_id in matching {
                 self.reasoning.remove(&block_id);
-                self.reasoning_parted.remove(&block_id);
                 self.queue
                     .push_back(block("reasoning_end", &block_id, md.clone()));
             }

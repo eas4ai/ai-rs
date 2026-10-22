@@ -3198,3 +3198,103 @@ async fn hst_025_done_incomplete_and_parted_reasoning() {
     ok(&events);
     assert_eq!(handle.finish_reason(), Some("length"));
 }
+
+#[tokio::test]
+async fn hst_025_xai_reasoning_in_two_summary_parts_keeps_its_encrypted_content() {
+    let stream = responses_sse(&[
+        json!({"type":"response.created","response":{"id":"resp_1","model":"grok-4.7","status":"in_progress"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"first "}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":0}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":1}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":1,"delta":"second"}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":1}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"first "},{"type":"summary_text","text":"second"}],"encrypted_content":"enc-2"}}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"answer"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}),
+        json!({"type":"response.completed","response":{"id":"resp_1","model":"grok-4.7","status":"completed","output":[]}}),
+    ]);
+    let transport = Recorder::new([stream, responses_text("ok")]);
+    let model = model("xai", "grok-4.7", transport.clone());
+    let (handle, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+    ok(&events);
+    let reasoning: Vec<_> = handle
+        .message()
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Reasoning(r) => Some((
+                r.text.clone(),
+                r.provider_metadata
+                    .as_ref()
+                    .map(|m| m["xai"]["reasoning_encrypted_content"].clone()),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasoning,
+        [("first second".to_owned(), Some(json!("enc-2")))]
+    );
+    let history = vec![
+        user_message("hello"),
+        handle.message().clone(),
+        user_message("again"),
+    ];
+    let (_, events) = call(&model, history, Default::default()).await;
+    ok(&events);
+    let requests = transport.requests.lock().unwrap();
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let sent: Vec<_> = items(&body)
+        .iter()
+        .filter(|i| i["type"] == "reasoning")
+        .collect();
+    assert_eq!(sent.len(), 1, "{body}");
+    assert_eq!(sent[0]["encrypted_content"], "enc-2");
+}
+
+#[tokio::test]
+async fn hst_025_openai_reasoning_in_two_summary_parts_is_referenced_once() {
+    let stream = responses_sse(&[
+        json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","status":"in_progress"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"enc"}}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"first"}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":0}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":1}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":1,"delta":"second"}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":1}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"first"},{"type":"summary_text","text":"second"}],"encrypted_content":"enc"}}),
+        json!({"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","output":[]}}),
+    ]);
+    let transport = Recorder::new([stream, responses_text("ok")]);
+    let model = openai_responses(transport.clone());
+    let (handle, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+    ok(&events);
+    let history = vec![
+        user_message("hello"),
+        handle.message().clone(),
+        user_message("again"),
+    ];
+    let (_, events) = call(&model, history, Default::default()).await;
+    ok(&events);
+    let requests = transport.requests.lock().unwrap();
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let references: Vec<_> = items(&body)
+        .iter()
+        .filter(|i| i["type"] == "item_reference" && i["id"] == "rs_1")
+        .collect();
+    assert_eq!(references.len(), 1, "{body}");
+}
+
+#[tokio::test]
+async fn hst_025_a_failed_event_without_a_response_still_fails() {
+    let stream = responses_sse(&[
+        json!({"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}),
+        json!({"type":"response.failed"}),
+    ]);
+    let error = responses_error(openai_responses(Recorder::new([stream]))).await;
+    assert_eq!(error.kind, ProviderErrorKind::Response, "{error:?}");
+}
