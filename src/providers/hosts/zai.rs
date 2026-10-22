@@ -45,7 +45,7 @@ static PROFILE: ChatProfile = ChatProfile {
     effort_aliases: &[],
     json_schema: JsonSchemaModels::None,
     openai_params: false,
-    auto_tool_choice_only: false,
+    auto_tool_choice_only: true,
     rejects_penalties_and_seed: true,
     finish_reasons: &[
         ("sensitive", "content_filter"),

@@ -223,6 +223,7 @@ pub(crate) fn error_message(body: &Value) -> Option<&str> {
     error
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
+        .or_else(|| error.and_then(Value::as_str))
         .or_else(|| body.get("message").and_then(Value::as_str))
         .filter(|message| !message.is_empty())
 }

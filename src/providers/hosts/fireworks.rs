@@ -53,7 +53,7 @@ static PROFILE: ChatProfile = ChatProfile {
 static HOST: Host = Host {
     name: "fireworks",
     handle: "@ai-sdk/fireworks",
-    default_base_url: "https://api.fireworks.ai/v1",
+    default_base_url: "https://api.fireworks.ai/inference/v1",
     api_key_env: "FIREWORKS_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
 };

@@ -38,7 +38,7 @@ static PROFILE: MessagesProfile = MessagesProfile {
         collapse_server_errors: false,
         keep_error_object: false,
     },
-    always_reasons: |_| false,
+    always_reasons: names_version_3_1_or_later,
 };
 
 static HOST: Host = Host {
