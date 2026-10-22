@@ -84,3 +84,13 @@ fail with `Error::Configuration`.
 Falsifier: A test that uses only the scripted provider cannot drive an `Agent` through one tool step and a final answer; or the recorded requests differ from the messages and tool declarations the agent sent; or a scripted error reaches the caller as a different error; or a call after the last scripted response does not fail with `Error::Configuration`.
 Mechanism: core
 Status: Agreed 2026-10-22
+
+[MOD-009] The client that `ReqwestTransport::new()` builds MUST give up on
+opening a connection after 10 s, with `TransportError::Timeout`, and MUST
+set no other time limit: once the connection is open, it MUST NOT end a
+request while it waits for the response headers, or while the response body
+streams or pauses.
+Falsifier: A request through `ReqwestTransport::new()` to a local listener whose accept queue is full does not fail with `TransportError::Timeout` 10 s after it starts; or a request to a local server that sends the response headers only after 60 s, or that sends the headers and one body chunk, then nothing for 60 s, then a second chunk and the end, fails or does not deliver both chunks.
+Mechanism: core
+Rationale: A thinking model can stream nothing for minutes, and a 30 s request limit cut those responses off; an application that wants a bound on a call sets `StreamOptions::idle_timeout` or `StreamOptions::timeout` (MOD-006).
+Status: Agreed 2026-10-22

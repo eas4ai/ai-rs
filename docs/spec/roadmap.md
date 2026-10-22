@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: chat-hosts
+Current: dialect-hosts
 
 ## rename-to-suprnova-ai
 
@@ -64,6 +64,34 @@ Update `README.md`, `src/agents/README.md` and `docs/PORT.md`. Each
 requirement's tests in `tests/spec_hosts.rs` and `tests/spec_agents.rs` are
 named after it; `scripts/check-hosts.sh` and `scripts/check-core.sh` report
 one result per requirement through the shared `scripts/spec-tests.sh`.
+
+Done when the hosts, core, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## dialect-hosts
+
+Requirements: HST-001, HST-002, HST-008, HST-009, HST-010, HST-011, HST-012, HST-013, HST-014, HST-015, HST-016, HST-017, HST-018, MOD-009, AGT-006, PKG-002, PKG-006
+
+Add DeepSeek, Moonshot AI and Mistral to `providers::hosts` on the Chat
+Completions protocol, each restorable from a snapshot. Their profiles also
+change how messages, schemas and stream content are written and read: the
+DeepSeek `thinking` field, V4 reasoning history and schema system message;
+the Moonshot AI model families, MFJS schemas, video input and image
+downloads through a provider built with a download transport; and the
+Mistral seed, tool choice, thinking chunks, document parts and content
+arrays. Each rejects the settings its TypeScript provider never sends. Key
+Chat Completions tool call deltas without an index by their position, and
+give the three hosts' stream errors a kind and a retry flag. Give
+`ReqwestTransport::new()` only a 10 s connect limit and TCP keepalive. Make
+`AgentStream::interrupted_messages()` keep the loop's copy of a response up
+to its last received tool call, with the results of the tools that
+finished, and add `AgentStream::stop()`. Update `README.md`,
+`src/agents/README.md` and `docs/PORT.md`. Each requirement's tests in
+`tests/spec_hosts.rs`, `tests/spec_models.rs` and `tests/spec_agents.rs`
+are named after it; `scripts/check-hosts.sh` and `scripts/check-core.sh`
+report one result per requirement through the shared
+`scripts/spec-tests.sh`.
 
 Done when the hosts, core, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the

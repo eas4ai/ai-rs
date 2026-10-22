@@ -66,14 +66,20 @@ Mechanism: core
 Status: Agreed 2026-10-22
 
 [AGT-006] `AgentStream::interrupted_messages()` MUST return the run's
-history plus the step in progress, if any, as a history a next run can use:
-the step's model response as delivered so far (its text and reasoning, and
-only the tool calls whose `ToolEnd` event was delivered), then a tool
-message holding the results delivered for those calls and, for each of them
-without a result, an error result with the text `Cancelled: the run stopped
-before this tool call finished.` When no step is in progress it MUST return
-`messages()`.
-Falsifier: After a lockstep run is read up to a text delta of `Hel`, `interrupted_messages()` does not end with an assistant message whose text is `Hel`; after a step that asked for two tools, with one result delivered and the other tool still running, the returned history lacks the delivered result, lacks the cancelled error result for the other call, or keeps a tool call whose `ToolEnd` was not delivered; or a new run started from the returned history runs the finished tool again.
+history plus the step in progress, if any, as a history a next run can use.
+When the loop has received the `ToolEnd` of at least one tool call of that
+step, the step MUST add the model response as the loop received it, up to
+and including the last such call: its text, reasoning and tool calls in the
+order the model sent them, without the calls whose `ToolEnd` the loop did
+not receive. A tool message MUST follow, with each of those calls' result
+when its tool finished and otherwise an error result with the text
+`Cancelled: the run stopped before this tool call finished.` When the loop
+has received no `ToolEnd` of that step, the step MUST add the model
+response's text and reasoning as delivered so far. When no step is in
+progress it MUST return `messages()`. `AgentStream::stop()` MUST stop the
+run as dropping it does (MOD-007) and return once the run's work has ended;
+the stream then yields no more events.
+Falsifier: After a lockstep run is read up to a text delta of `Hel`, `interrupted_messages()` does not end with an assistant message whose text is `Hel`; or for a buffered run whose model sends reasoning `R`, complete calls to tools `a` and `b`, text `T`, and the start of a call to `c` and then nothing, read only up to its first event while `a` has finished and `b` still runs, `stop().await` returns before `b`'s future is dropped, the stream yields an event after it, or the history returned after it lacks `R` before the calls, lacks `a`'s result, lacks the cancelled error result for `b`, or holds `T` or the call to `c`; or a new run started from that history runs `a` again.
 Mechanism: core
-Rationale: Dropping a run stops it (MOD-007), and a stop button in a chat app then saves what the user saw; a resumed job must not repeat finished, possibly paid, tool calls.
+Rationale: A stop button saves the interrupted history and a resumed job must not repeat a finished, possibly paid, tool call; with thinking on, the Anthropic Messages protocol needs the reasoning that came before a call.
 Status: Agreed 2026-10-22
