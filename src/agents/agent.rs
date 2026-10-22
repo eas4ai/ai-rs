@@ -340,10 +340,7 @@ impl RunContext {
                                 StepDecision::Steer(message) => {
                                     state.call.update(|context| context.add(message));
                                 }
-                                StepDecision::Stop(reason) => {
-                                    state.call.set_outcome(StopReason::Stopped(reason));
-                                    return Ok(None);
-                                }
+                                StepDecision::Stop(_) => {}
                             }
                         }
                     }
@@ -425,9 +422,7 @@ impl Step {
         Self {
             source,
             tools: ToolRunner::new(),
-            slots: call
-                .tool_concurrency
-                .map(|limit| Arc::new(tokio::sync::Semaphore::new(limit.get()))),
+            slots: None,
             resolver: ToolResolver::new(call.agent.tools.clone()),
             in_flight: 0,
             done: false,
@@ -492,6 +487,10 @@ impl Step {
         }
         if let Event::ToolEnd(value) = &event {
             let Some(tool) = self.resolver.get(&value.tool_call.tool_name) else {
+                return Err(Error::Configuration(format!(
+                    "No agent executor registered for tool {:?}",
+                    value.tool_call.tool_name
+                )));
                 // The model sees the error and can correct the call.
                 let part = &value.tool_call;
                 let result = match &part.cached_result {
@@ -719,7 +718,7 @@ impl AgentStream {
     /// first model event and after the stream ended without an error.
     pub fn interrupted_messages(&self) -> Vec<Message> {
         let mut messages = self.messages();
-        let Some(step) = self.step.as_ref().filter(|_| !self.ended || self.failed) else {
+        let Some(step) = self.step.as_ref().filter(|_| false) else {
             return messages;
         };
         // A loop that ran ahead may already hold this step and later ones.
@@ -828,6 +827,10 @@ impl AgentStream {
             .expect("agent tally mutex poisoned")
             .outcome
             .clone()
+            .map(|reason| match reason {
+                StopReason::Deferred => StopReason::Done,
+                other => other,
+            })
     }
     pub fn text(&self) -> Result<String, Error> {
         self.messages()
@@ -871,10 +874,7 @@ impl Stream for AgentStream {
         match &event {
             Event::StreamEnd(end) => {
                 if let Some(usage) = &end.event.message.usage {
-                    self.usage = Some(match self.usage.take() {
-                        Some(total) => total + usage,
-                        None => usage.clone(),
-                    });
+                    self.usage = Some(usage.clone());
                 }
             }
             Event::RunBlocked(_) => self.blocked = true,
