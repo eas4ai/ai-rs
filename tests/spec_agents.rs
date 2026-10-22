@@ -909,3 +909,58 @@ async fn agt_006_a_replayed_step_keeps_the_results_it_delivered() {
     finish(&mut run).await;
     assert_eq!(*starts.lock().unwrap(), [5], "a finished call ran again");
 }
+
+#[tokio::test]
+async fn agt_006_a_steer_after_a_delivered_step_stays_in_the_history() {
+    for buffer in [Some(0), None] {
+        for with_tool in [false, true] {
+            let mut script = Vec::new();
+            if with_tool {
+                script.push(ScriptedResponse::tool_call("c1", "work", json!({"i": 1})));
+            } else {
+                script.push(ScriptedResponse::text("done"));
+            }
+            // The model call after the steer fails, so the run stops there.
+            script.push(ScriptedResponse::error(ProviderError::from_status(
+                "broken", 400, None,
+            )));
+            let provider = ScriptedProvider::new("scripted", script);
+            let steer_once = StepCheck::new(|progress: RunProgress| async move {
+                Ok(if progress.steps == 1 {
+                    StepDecision::Steer(user_message("go on"))
+                } else {
+                    StepDecision::Continue
+                })
+            });
+            let mut run = Agent::new(vec![noop("work")]).run_with_options(
+                provider.model("m"),
+                vec![user_message("go")],
+                RunOptions {
+                    step_checks: vec![steer_once],
+                    loop_buffer: buffer,
+                    ..RunOptions::default()
+                },
+            );
+            let mut failed = false;
+            while let Some(event) = run.next().await {
+                failed |= event.is_err();
+            }
+            assert!(failed, "{buffer:?} {with_tool}");
+            let history = run.interrupted_messages();
+            let roles: Vec<_> = history.iter().map(|m| m.role).collect();
+            let expected = if with_tool {
+                vec![
+                    MessageRole::User,
+                    MessageRole::Assistant,
+                    MessageRole::Tool,
+                    MessageRole::User,
+                ]
+            } else {
+                vec![MessageRole::User, MessageRole::Assistant, MessageRole::User]
+            };
+            assert_eq!(roles, expected, "{buffer:?} {with_tool}: {history:?}");
+            assert_eq!(history.last().unwrap().text(), "go on");
+            assert_eq!(history, run.messages(), "{buffer:?} {with_tool}");
+        }
+    }
+}

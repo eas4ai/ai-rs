@@ -666,6 +666,8 @@ struct DeliveredStep {
     calls: Vec<String>,
     /// The results delivered for those calls, in delivery order.
     results: Vec<ToolResultPart>,
+    /// The response's `StreamEnd` was delivered; a replayed step has none.
+    response_ended: bool,
 }
 impl DeliveredStep {
     fn new(message: Message) -> Self {
@@ -674,7 +676,29 @@ impl DeliveredStep {
             replayed: false,
             calls: Vec::new(),
             results: Vec::new(),
+            response_ended: false,
         }
+    }
+    /// Every event of the step was delivered: its whole response and a
+    /// result for each of its calls.
+    fn complete(&self) -> bool {
+        (self.replayed || self.response_ended)
+            && self
+                .calls
+                .iter()
+                .all(|id| self.results.iter().any(|r| r.tool_call_id == *id))
+    }
+    /// Whether `history` holds this step at `index`: its response and, when
+    /// it calls tools, the tool message with every result after it.
+    fn recorded_at(&self, history: &[Message], index: usize) -> bool {
+        self.calls.is_empty()
+            || history.get(index + 1).is_some_and(|next| {
+                next.role == MessageRole::Tool
+                    && self
+                        .calls
+                        .iter()
+                        .all(|id| next.tool_results().iter().any(|r| r.tool_call_id == *id))
+            })
     }
     /// A replayed step starts with the results the history already cached.
     fn replayed(message: Message) -> Self {
@@ -687,6 +711,7 @@ impl DeliveredStep {
                 .collect(),
             message,
             replayed: true,
+            response_ended: false,
         }
     }
 }
@@ -714,16 +739,34 @@ impl AgentStream {
     /// its model response as delivered, keeping only the tool calls whose
     /// `ToolEnd` was delivered, then a tool message with the results delivered
     /// for them and an error result for each call that has none, so the next
-    /// run neither repeats a finished call nor runs an unfinished one. Equals
-    /// [`messages`](Self::messages) when no step is in progress: before the
-    /// first model event and after the stream ended without an error.
+    /// run neither repeats a finished call nor runs an unfinished one. After a
+    /// step whose events were all delivered, it is the history up to the next
+    /// model response, with what the loop added before that call, such as a
+    /// steering message. Equals [`messages`](Self::messages) when no step is in
+    /// progress: before the first model event and after the stream ended
+    /// without an error.
     pub fn interrupted_messages(&self) -> Vec<Message> {
         let mut messages = self.messages();
         let Some(step) = self.step.as_ref().filter(|_| !self.ended || self.failed) else {
             return messages;
         };
         // A loop that ran ahead may already hold this step and later ones.
-        if let Some(index) = messages.iter().position(|m| m.id == step.message.id) {
+        let index = messages.iter().position(|m| m.id == step.message.id);
+        if let Some(index) = index
+            && step.complete()
+            && step.recorded_at(&messages, index)
+        {
+            // The history holds the whole step and, after it, what the loop
+            // added before its next model call, such as a steering message.
+            // The next model response was not delivered.
+            let next = messages[index + 1..]
+                .iter()
+                .position(|m| m.role == MessageRole::Assistant)
+                .map_or(messages.len(), |offset| index + 1 + offset);
+            messages.truncate(next);
+            return messages;
+        }
+        if let Some(index) = index {
             messages.truncate(index);
         }
         let mut message = step.message.clone();
@@ -775,8 +818,12 @@ impl AgentStream {
                 }
                 _ => self.step = Some(DeliveredStep::new(meta.message.clone())),
             }
-            if let (Event::ToolEnd(end), Some(step)) = (event, self.step.as_mut()) {
-                step.calls.push(end.tool_call.tool_call_id.clone());
+            if let Some(step) = self.step.as_mut() {
+                match event {
+                    Event::ToolEnd(end) => step.calls.push(end.tool_call.tool_call_id.clone()),
+                    Event::StreamEnd(_) => step.response_ended = true,
+                    _ => {}
+                }
             }
         } else if let Event::ToolCallResult(value) = event {
             for result in &value.results {
