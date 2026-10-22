@@ -598,7 +598,9 @@ impl ProviderRegistry {
     }
     /// Restore a provider snapshot. The credentials (API key value, `env` map
     /// and headers) come from the provider registered under the snapshot's
-    /// name, never from the snapshot.
+    /// name, never from the snapshot. The snapshot's provider class and
+    /// endpoint fields (`default_base_url`, `base_url_env`, `api_key_env` and
+    /// `config_envs`) must equal that provider's.
     pub fn restore_provider(&self, mut value: Value) -> Result<Arc<dyn Provider>, Error> {
         let id = value
             .get("provider_class_id")
@@ -621,7 +623,36 @@ impl ProviderRegistry {
                 "cannot restore provider {name:?}: the registry holds no provider under that name to supply its credentials"
             ))
         })?;
-        let credentials = serde_json::to_value(registered.config())?;
+        // Credentials go only where the registered provider sends them, so a
+        // tampered snapshot cannot point them at another host.
+        if registered.provider_class_id() != id {
+            return Err(Error::Configuration(format!(
+                "cannot restore provider {name:?}: its snapshot class {id:?} differs from the registered provider's class {:?}",
+                registered.provider_class_id()
+            )));
+        }
+        let endpoint: ProviderConfig = serde_json::from_value(value.clone())?;
+        let expected = registered.config();
+        let differs = [
+            (
+                "default_base_url",
+                endpoint.default_base_url == expected.default_base_url,
+            ),
+            (
+                "base_url_env",
+                endpoint.base_url_env == expected.base_url_env,
+            ),
+            ("api_key_env", endpoint.api_key_env == expected.api_key_env),
+            ("config_envs", endpoint.config_envs == expected.config_envs),
+        ]
+        .into_iter()
+        .find_map(|(field, same)| (!same).then_some(field));
+        if let Some(field) = differs {
+            return Err(Error::Configuration(format!(
+                "cannot restore provider {name:?}: its snapshot {field} differs from the registered provider's; register that provider under its own name"
+            )));
+        }
+        let credentials = serde_json::to_value(expected)?;
         let fields = value
             .as_object_mut()
             .ok_or_else(|| Error::Configuration("provider data must be a JSON object".into()))?;
