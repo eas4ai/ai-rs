@@ -21,8 +21,8 @@ its records to it, because it is this project's authority remote.
 names such as the Python package `ai` and the module `ai.types` keep their
 spelling here.
 
-**Model id.** A `provider:model` string that `Model` parses. It splits at the
-first colon; an id with no colon routes to the `gateway` provider.
+**Model id.** A `provider:model` string that `get_model` parses. It splits
+at the first colon; an id with no colon is an error.
 
 **Provider.** An implementation of the `Provider` trait for one vendor API.
 The `ProviderRegistry` maps provider names to providers and starts empty.
@@ -33,6 +33,33 @@ serializes with the upstream `kind` discriminator.
 **Agent.** The `Agent` type: it streams a model, runs the requested tools,
 appends the results to the history, and repeats until the model gives a
 final answer.
+
+**Call.** One `stream` or `generate` call to a model, including its retries.
+
+**Snapshot.** The JSON value `Model::to_value` returns, which
+`Model::from_value` restores through a provider registry.
+
+**Credential.** A value that authenticates a request: the API key value,
+the values of a provider configuration's `env` map, and its header values.
+
+**Retryable error.** An `Error::Provider` whose `is_retryable` is true, or an
+`Error::Transport` connection failure or timeout.
+
+**Step.** One model response in an agent run together with the tool calls it
+asked for. A response replayed from an earlier run is not a step.
+
+**Done (agent run).** An agent run is done when the model's last response is
+a final answer: an assistant message with no tool calls. A run stops when it
+is done, unless a step check or a deferred hook stops it first; a step check
+can also send it on after a final answer.
+
+**Step check.** A `StepCheck` in `RunOptions::step_checks`. The default loop
+runs the checks after each step; each answers continue, steer with a user
+message, or stop with a reason. The default list is empty.
+
+**Scripted provider.** The provider in `suprnova_ai::testing`, behind the
+`testing` feature. It answers each call with the next scripted response and
+records what it received.
 
 **Transport.** An implementation of the `HttpTransport` trait. It sends the
 HTTP requests of a provider. The `reqwest` feature adds `ReqwestTransport`.

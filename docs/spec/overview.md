@@ -10,9 +10,9 @@ adapter for Vercel AI SDK v6 UI messages. Its repository is
 ## The problem
 
 Rust applications, suprchat first, need the behavior of the Python SDK: the
-same event and message shapes, the same provider routing and the same tool
-loop. The port keeps that behavior, so Rust code and Python or JavaScript
-clients can exchange the same streams.
+same event and message shapes and the same tool loop. The port keeps that
+behavior, so Rust code and Python or JavaScript clients can exchange the
+same streams. It departs from Python only where a requirement says so.
 
 ## What it is not
 
@@ -30,12 +30,15 @@ clients can exchange the same streams.
 | File | Prefix | Covers |
 |---|---|---|
 | package.md | PKG | package, library and repository names, the upstream credit, the origin remote and the check script |
+| models.md | MOD | model ids, model snapshots, retries, timeouts and dropping a call, and the scripted test provider |
+| agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency and run usage |
 
 ## Not yet specified
 
-These areas have code and tests but no requirements yet. `docs/recon.md`
-describes what each one does today. A later commitment specifies an area
-before it changes it.
+These areas have code and tests but no requirements yet, apart from the
+parts that the files in the spec map cover. `docs/recon.md` describes what
+each one does today. A later commitment specifies an area before it changes
+it.
 
 | Area | Code |
 |---|---|
