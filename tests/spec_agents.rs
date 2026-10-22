@@ -1133,3 +1133,48 @@ async fn agt_006_stop_ends_a_lockstep_run_and_drops_its_tools() {
     assert_eq!(history.len(), 3, "{history:?}");
     assert_eq!(result_text(history[2].tool_results()[0]), CANCELLED);
 }
+
+#[tokio::test]
+async fn agt_006_tools_that_finish_together_both_keep_their_results() {
+    // Both tools wait on one gate, so they finish in the same poll of the
+    // step's tools; the consumer reads only the first result, then stops.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let tool = {
+        let gate = gate.clone();
+        AgentTool::new::<Index, u32, _, _>("work", "Wait for the gate", move |input, _| {
+            let gate = gate.clone();
+            async move {
+                gate.acquire().await.unwrap().forget();
+                Ok(input.i)
+            }
+        })
+        .unwrap()
+    };
+    let calls = [("a", 1), ("b", 2)]
+        .map(|(id, i)| ToolCallPart::new(id, "work", json!({ "i": i }).to_string()));
+    let provider = ScriptedProvider::new("scripted", [ScriptedResponse::tool_calls(calls)]);
+    let mut run = Agent::new(vec![tool]).run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        lockstep(),
+    );
+    read_until(&mut run, |event| matches!(event, Event::StreamEnd(_))).await;
+    // Both tools start and wait at the gate.
+    let pending = tokio::time::timeout(Duration::from_millis(50), run.next()).await;
+    assert!(pending.is_err(), "{pending:?}");
+    gate.add_permits(2);
+    let first = run.next().await;
+    assert!(
+        matches!(first, Some(Ok(Event::ToolCallResult(_)))),
+        "{first:?}"
+    );
+    run.stop().await;
+    let history = run.interrupted_messages();
+    assert_eq!(history.len(), 3, "{history:?}");
+    let results: Vec<_> = history[2]
+        .tool_results()
+        .iter()
+        .map(|r| (r.tool_call_id.clone(), r.is_error()))
+        .collect();
+    assert_eq!(results, [("a".to_owned(), false), ("b".to_owned(), false)]);
+}

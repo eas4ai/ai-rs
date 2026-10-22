@@ -724,6 +724,14 @@ impl ToolRunner {
     pub fn add_result(&mut self, result: ToolCallResult) {
         self.schedule(async move { Ok(result) });
     }
+    /// The results of the tools that finished and wait to be yielded: tools
+    /// that finish in the same poll are yielded one per poll.
+    pub(crate) fn finished(&self) -> impl Iterator<Item = &ToolCallResult> {
+        self.ready
+            .iter()
+            .filter(|(_, abort, _)| !abort.is_aborted())
+            .filter_map(|(_, _, result)| result.as_ref().ok())
+    }
     /// A fresh borrow resumes iteration after an earlier borrow was dropped.
     pub fn events(&mut self) -> &mut Self {
         self
