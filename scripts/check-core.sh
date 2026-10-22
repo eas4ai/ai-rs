@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks MOD-001 to MOD-008 in docs/spec/models.md and AGT-001 to AGT-006 in
+# Checks MOD-001 to MOD-009 in docs/spec/models.md and AGT-001 to AGT-006 in
 # docs/spec/agents.md through scripts/spec-tests.sh, with the tests in
 # tests/spec_models.rs and tests/spec_agents.rs. MOD-002 also needs the
 # gateway names gone from the sources and the README.
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 . scripts/spec-tests.sh
 
 tests=(spec_models spec_agents)
-reqs=(MOD-001 MOD-002 MOD-003 MOD-004 MOD-005 MOD-006 MOD-007 MOD-008
+reqs=(MOD-001 MOD-002 MOD-003 MOD-004 MOD-005 MOD-006 MOD-007 MOD-008 MOD-009
   AGT-001 AGT-002 AGT-003 AGT-004 AGT-005 AGT-006)
 
 # MOD-002 names that only the Vercel AI Gateway routing used.
