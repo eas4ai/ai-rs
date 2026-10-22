@@ -1941,6 +1941,7 @@ async fn hst_014_mistral_request_fields_reasoning_and_schema() {
         (Some("low"), "high"),
         (Some("max"), "high"),
         (Some("high"), "high"),
+        (Some("auto"), "high"),
         (None, "none"),
     ] {
         let body = host_body(
