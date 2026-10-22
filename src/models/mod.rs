@@ -200,8 +200,11 @@ impl StreamOptions {
 /// Configuration is supplied by the registry and its provider objects. This
 /// function deliberately never reads process environment variables.
 pub fn get_model(model_id: &str, registry: &ProviderRegistry) -> Result<Model> {
-    let (provider_id, provider_model_id) =
-        model_id.split_once(':').unwrap_or(("gateway", model_id));
+    let Some((provider_id, provider_model_id)) = model_id.split_once(':') else {
+        return Err(Error::Configuration(format!(
+            "get_model: model id {model_id:?} has no provider; use the form provider:model"
+        )));
+    };
     if provider_id.is_empty() || provider_model_id.is_empty() {
         return Err(Error::Configuration(format!(
             "get_model: malformed model_id: {model_id:?}"
