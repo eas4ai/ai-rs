@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{AnthropicMessagesProtocol, http};
+use super::{AnthropicMessagesProtocol, errors::API};
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     errors::{ProviderError, ProviderErrorKind},
-    providers::{ModelsDevProvider, base::provider_config},
+    providers::{ModelsDevProvider, base::provider_config, http},
     transport::HttpTransport,
 };
 use async_trait::async_trait;
@@ -151,6 +151,7 @@ impl Provider for AnthropicCompatibleProvider {
     }
     async fn list_models(&self) -> Result<Vec<String>, Error> {
         let request = http::request(
+            &API,
             &self.config,
             "GET",
             &["v1", "models"],
@@ -158,9 +159,9 @@ impl Provider for AnthropicCompatibleProvider {
             Default::default(),
             Default::default(),
         )?;
-        let data = http::json(self.transport.clone(), request, &self.name, None).await?;
+        let data = http::json(&API, self.transport.as_ref(), request, &self.name, None).await?;
         let models = data.get("data").and_then(Value::as_array).ok_or_else(|| {
-            super::errors::response(&self.name, "Anthropic model list is missing data")
+            http::response_error(&self.name, "Anthropic model list is missing data")
         })?;
         let mut ids = models
             .iter()
@@ -169,10 +170,7 @@ impl Provider for AnthropicCompatibleProvider {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                     .ok_or_else(|| {
-                        super::errors::response(
-                            &self.name,
-                            "Anthropic model list entry is missing id",
-                        )
+                        http::response_error(&self.name, "Anthropic model list entry is missing id")
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -189,6 +187,7 @@ impl Provider for AnthropicCompatibleProvider {
             .into());
         }
         let request = http::request(
+            &API,
             &self.config,
             "GET",
             &["v1", "models", &model.id],
@@ -196,7 +195,14 @@ impl Provider for AnthropicCompatibleProvider {
             Default::default(),
             Default::default(),
         )?;
-        http::json(self.transport.clone(), request, &self.name, Some(&model.id)).await?;
+        http::json(
+            &API,
+            self.transport.as_ref(),
+            request,
+            &self.name,
+            Some(&model.id),
+        )
+        .await?;
         Ok(())
     }
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::params::invalid;
+use super::{params::invalid, protocol::Wire};
 use crate::{
     Error,
     types::{
@@ -230,9 +230,14 @@ fn flush_content(out: &mut Vec<Value>, content: &mut Vec<Value>) {
 }
 pub(super) fn convert(
     messages: Vec<Message>,
-    responses: bool,
+    wire: Wire,
     references: bool,
 ) -> Result<Vec<Value>, Error> {
+    let responses = matches!(wire, Wire::Responses);
+    let reasoning_field = match wire {
+        Wire::Chat(profile) => profile.reasoning_field,
+        Wire::Responses => "reasoning",
+    };
     let mut out = vec![];
     for msg in repair(messages)? {
         match msg.role {
@@ -267,13 +272,13 @@ pub(super) fn convert(
                     entry["content"] = json!(text);
                 }
                 if !reasoning.is_empty() {
-                    entry["reasoning"] = json!(reasoning);
+                    entry[reasoning_field] = json!(reasoning);
                 }
                 let mut calls = vec![];
                 for p in &msg.parts {
                     match p {
                     Part::ToolCall(c)=>calls.push(json!({"id":c.tool_call_id,"type":"function","function":{"name":c.tool_name,"arguments":c.tool_args}})),
-                    Part::BuiltinToolCall(_)|Part::BuiltinToolReturn(_)=>return Err(Error::UnsupportedOperation("OpenAI chat completions does not support BuiltinTool history".into())),_=>{}
+                    Part::BuiltinToolCall(_)|Part::BuiltinToolReturn(_)=>return Err(Error::UnsupportedOperation(format!("{} chat completions does not support BuiltinTool history", wire.api().label))),_=>{}
                 }
                 }
                 if !calls.is_empty() {

@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{errors, messages, params, streaming};
+use super::{
+    errors, messages, params,
+    profile::{self, ChatProfile},
+    streaming,
+};
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
     models::params::{ExtraHeaderValue, InferenceRequestParams},
-    providers::EventStream,
+    providers::{EventStream, http},
     transport::HttpRequest,
-    types::Message,
+    types::{Message, ToolChoice},
 };
-use futures::{StreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -28,6 +32,9 @@ use std::sync::Arc;
 pub struct OpenAIChatCompletionsProtocol;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpenAIResponsesProtocol;
+/// The protocol a provider of this name defaults to: Responses for
+/// `openai`, Chat Completions for every other name.
+/// `OpenAICompatibleProvider` decides when it is built instead.
 pub fn default_protocol(provider: &str) -> Arc<dyn ProviderProtocol> {
     if provider == "openai" {
         Arc::new(OpenAIResponsesProtocol)
@@ -35,9 +42,32 @@ pub fn default_protocol(provider: &str) -> Arc<dyn ProviderProtocol> {
         Arc::new(OpenAIChatCompletionsProtocol)
     }
 }
-impl ProviderProtocol for OpenAIChatCompletionsProtocol {
+
+/// The API a request uses: Responses, or Chat Completions as a server's
+/// profile describes it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Wire {
+    Responses,
+    Chat(&'static ChatProfile),
+}
+impl Wire {
+    pub(crate) fn api(self) -> &'static http::ApiProfile {
+        match self {
+            Self::Responses => &errors::API,
+            Self::Chat(profile) => &profile.api,
+        }
+    }
+    fn responses(self) -> bool {
+        matches!(self, Self::Responses)
+    }
+}
+
+/// Chat Completions for a host, as its profile describes it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostChatProtocol(pub(crate) &'static ChatProfile);
+impl ProviderProtocol for HostChatProtocol {
     fn protocol_class_id(&self) -> &str {
-        "openai_chat_completions"
+        self.0.protocol_class_id
     }
     fn stream(
         &self,
@@ -46,7 +76,28 @@ impl ProviderProtocol for OpenAIChatCompletionsProtocol {
         options: StreamOptions,
         provider: &dyn Provider,
     ) -> EventStream {
-        start(model, messages, options, provider, false, None)
+        start(model, messages, options, provider, Wire::Chat(self.0), None)
+    }
+}
+impl ProviderProtocol for OpenAIChatCompletionsProtocol {
+    fn protocol_class_id(&self) -> &str {
+        profile::OPENAI.protocol_class_id
+    }
+    fn stream(
+        &self,
+        model: &Model,
+        messages: Vec<Message>,
+        options: StreamOptions,
+        provider: &dyn Provider,
+    ) -> EventStream {
+        start(
+            model,
+            messages,
+            options,
+            provider,
+            Wire::Chat(&profile::OPENAI),
+            None,
+        )
     }
 }
 impl ProviderProtocol for OpenAIResponsesProtocol {
@@ -60,7 +111,7 @@ impl ProviderProtocol for OpenAIResponsesProtocol {
         options: StreamOptions,
         provider: &dyn Provider,
     ) -> EventStream {
-        start(model, messages, options, provider, true, None)
+        start(model, messages, options, provider, Wire::Responses, None)
     }
 }
 /// Chat Completions with explicit public-network media downloads.
@@ -80,7 +131,7 @@ impl OpenAIChatCompletionsProtocol {
 }
 impl ProviderProtocol for OpenAIChatCompletionsWithDownloads {
     fn protocol_class_id(&self) -> &str {
-        "openai_chat_completions"
+        profile::OPENAI.protocol_class_id
     }
     fn stream(
         &self,
@@ -94,7 +145,7 @@ impl ProviderProtocol for OpenAIChatCompletionsWithDownloads {
             messages,
             options,
             provider,
-            false,
+            Wire::Chat(&profile::OPENAI),
             Some(self.downloads.clone()),
         )
     }
@@ -104,7 +155,7 @@ fn start(
     messages: Vec<Message>,
     options: StreamOptions,
     provider: &dyn Provider,
-    responses: bool,
+    wire: Wire,
     downloads: Option<Arc<dyn crate::models::files::DownloadTransport>>,
 ) -> EventStream {
     let config = provider.config().clone();
@@ -113,16 +164,21 @@ fn start(
     let transport = provider.shared_transport();
     stream::once(async move {
         let messages = messages::download_files(messages, downloads.as_deref()).await?;
-        let request = build_request(&model_id, &config, messages, &options, responses)?;
+        let request = wire_request(wire, &model_id, &config, messages, &options)?;
         let transport = transport.ok_or_else(|| {
-            Error::Configuration("OpenAI protocols require Provider::shared_transport".into())
+            Error::Configuration(format!(
+                "{} protocols require Provider::shared_transport",
+                wire.api().label
+            ))
         })?;
-        let response = transport
-            .send(request.clone())
-            .await
-            .map_err(|e| errors::map_transport(e, &provider_name))?;
-        let response =
-            errors::check_status(response, &request, &provider_name, Some(&model_id)).await?;
+        let response = http::send(
+            wire.api(),
+            transport.as_ref(),
+            request,
+            &provider_name,
+            Some(&model_id),
+        )
+        .await?;
         let image_type = options
             .tools
             .iter()
@@ -141,14 +197,14 @@ fn start(
         Ok::<_, Error>(streaming::parse(
             response.body,
             provider_name,
-            responses,
+            wire,
             format!("image/{image_type}"),
+            options.output_schema.is_some(),
         ))
     })
     .try_flatten()
     .boxed()
 }
-use futures::TryStreamExt;
 /// Build a complete HTTP request without sending it.
 pub fn build_request(
     model: &str,
@@ -157,116 +213,141 @@ pub fn build_request(
     options: &StreamOptions,
     responses: bool,
 ) -> Result<HttpRequest, Error> {
+    let wire = if responses {
+        Wire::Responses
+    } else {
+        Wire::Chat(&profile::OPENAI)
+    };
+    wire_request(wire, model, config, messages, options)
+}
+pub(crate) fn wire_request(
+    wire: Wire,
+    model: &str,
+    config: &ProviderConfig,
+    messages: Vec<Message>,
+    options: &StreamOptions,
+) -> Result<HttpRequest, Error> {
+    let responses = wire.responses();
     let p = options.params.clone().unwrap_or_default();
-    let mut body = params::build(&p, responses)?;
+    let mut body = params::build(&p, wire)?;
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
     body.insert("stream".into(), json!(true));
     body.insert(
         if responses { "input" } else { "messages" }.into(),
-        messages::convert(messages, responses, use_references)?.into(),
+        messages::convert(messages, wire, use_references)?.into(),
     );
-    if !responses {
+    if let Wire::Chat(profile) = wire
+        && profile.include_usage
+    {
         body.insert("stream_options".into(), json!({"include_usage":true}));
     }
-    if !options.tools.is_empty() {
+    // A server that takes only automatic tool choice gets no tools for none.
+    let mut send_tools = true;
+    if let Wire::Chat(profile) = wire
+        && profile.auto_tool_choice_only
+    {
+        let choice = options
+            .tool_choice
+            .as_ref()
+            .or(p.tool_calling.as_ref().map(|t| &t.tool_choice));
+        match choice {
+            None | Some(ToolChoice::Auto) => {}
+            Some(ToolChoice::None) => {
+                send_tools = false;
+                for key in ["tool_choice", "parallel_tool_calls"] {
+                    body.remove(key);
+                }
+            }
+            Some(other) => {
+                return Err(params::invalid(format!(
+                    "{} supports only automatic tool choice, not {}",
+                    profile.api.label,
+                    tool_choice_name(other)
+                )));
+            }
+        }
+    }
+    if send_tools && !options.tools.is_empty() {
         body.insert(
             "tools".into(),
             super::tools::convert(&options.tools, responses)?.into(),
         );
     }
-    if let Some(choice) = &options.tool_choice {
-        body.insert(
-            "tool_choice".into(),
-            params::tool_choice(choice, responses)?,
-        );
+    if send_tools && let Some(choice) = &options.tool_choice {
+        body.insert("tool_choice".into(), params::tool_choice(choice, wire)?);
     }
     if let Some(schema) = &options.output_schema {
-        let mut schema = serde_json::to_value(schema)?;
-        strict_schema(&mut schema, 0)?;
         let name = options.output_type_name.as_deref().unwrap_or("output");
-        if responses {
-            let text = body.entry("text").or_insert_with(|| json!({}));
-            text["format"] =
-                json!({"type":"json_schema","name":name,"schema":schema,"strict":true});
-        } else {
-            body.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":name,"schema":schema,"strict":true}}));
+        match wire {
+            Wire::Responses => {
+                let schema = strict_output_schema(schema)?;
+                let text = body.entry("text").or_insert_with(|| json!({}));
+                text["format"] =
+                    json!({"type":"json_schema","name":name,"schema":schema,"strict":true});
+            }
+            Wire::Chat(profile) if profile.sends_json_schema(model) => {
+                let schema = strict_output_schema(schema)?;
+                body.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":name,"schema":schema,"strict":true}}));
+            }
+            Wire::Chat(_) => {
+                body.insert("response_format".into(), json!({"type":"json_object"}));
+            }
         }
     }
     // Match SDK extra_body merging: explicit escape-hatch keys win at the wire boundary.
     if let Some(extra) = &p.extra_body {
         body.extend(extra.clone());
     }
+    let suffix: &[&str] = if responses {
+        &["responses"]
+    } else {
+        &["chat", "completions"]
+    };
     http_request(
+        wire.api(),
         "POST",
         config,
-        if responses {
-            "responses"
-        } else {
-            "chat/completions"
-        },
+        suffix,
         Some(Value::Object(body)),
         Some(&p),
     )
 }
+fn tool_choice_name(choice: &ToolChoice) -> &'static str {
+    match choice {
+        ToolChoice::Auto => "auto",
+        ToolChoice::None => "none",
+        ToolChoice::Required => "required",
+        ToolChoice::Tool(_) => "a named tool",
+        ToolChoice::Selection(_) => "a tool selection",
+    }
+}
 pub(super) fn http_request(
+    api: &http::ApiProfile,
     method: &str,
     config: &ProviderConfig,
-    suffix: &str,
+    path: &[&str],
     body: Option<Value>,
     params: Option<&InferenceRequestParams>,
 ) -> Result<HttpRequest, Error> {
-    let base = config.base_url();
-    let mut url = url::Url::parse(&base)
-        .map_err(|_| Error::Configuration("invalid OpenAI base URL".into()))?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(Error::Configuration(
-            "OpenAI base URL must use HTTP or HTTPS".into(),
-        ));
-    }
-    let path = format!(
-        "{}/{}",
-        url.path().trim_end_matches('/'),
-        suffix.trim_start_matches('/')
-    );
-    url.set_path(&path);
-    if let Some(query) = params.and_then(|p| p.extra_query.as_ref()) {
-        let mut pairs = url.query_pairs_mut();
-        for (key, v) in query {
-            pairs.append_pair(
-                key,
-                &v.as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| v.to_string()),
-            );
-        }
-    }
-    let mut headers = std::collections::BTreeMap::from([
-        ("accept".into(), "application/json".into()),
-        ("content-type".into(), "application/json".into()),
-    ]);
-    if let Some(key) = config.api_key().filter(|k| !k.is_empty()) {
-        headers.insert("authorization".into(), format!("Bearer {key}"));
-    }
-    for (name, value) in &config.headers {
-        headers.insert(name.to_ascii_lowercase(), value.clone());
-    }
-    if let Some(extra) = params.and_then(|p| p.extra_headers.as_ref()) {
-        for (name, value) in extra {
-            if let ExtraHeaderValue::Value(value) = value {
-                headers.insert(name.to_ascii_lowercase(), value.clone());
-            }
-        }
-    }
-    Ok(HttpRequest {
-        method: method.into(),
-        url: url.into(),
-        headers: headers.into_iter().collect(),
-        body: match body {
-            Some(body) => serde_json::to_vec(&body)?.into(),
-            None => bytes::Bytes::new(),
-        },
-    })
+    let headers = params
+        .and_then(|p| p.extra_headers.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| match value {
+            ExtraHeaderValue::Value(value) => Some((name.clone(), value.clone())),
+            _ => None,
+        })
+        .collect();
+    let query = params
+        .and_then(|p| p.extra_query.clone())
+        .unwrap_or_default();
+    http::request(api, config, method, path, body, headers, query)
+}
+fn strict_output_schema(schema: &schemars::Schema) -> Result<Value, Error> {
+    let mut schema = serde_json::to_value(schema)?;
+    strict_schema(&mut schema, 0)?;
+    Ok(schema)
 }
 fn strict_schema(schema: &mut Value, _depth: usize) -> Result<(), Error> {
     let root = schema.clone();

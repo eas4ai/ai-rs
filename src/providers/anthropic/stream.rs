@@ -16,8 +16,11 @@ use super::{errors, messages::metadata};
 use crate::{
     Error,
     errors::ProviderError,
-    providers::EventStream,
-    transport::{Body, sse},
+    providers::{
+        EventStream,
+        http::{self, ApiProfile, SseJson},
+    },
+    transport::Body,
     types::{
         events::*,
         messages::{BuiltinToolCallPart, BuiltinToolReturnPart, ToolCallPart, generate_id},
@@ -36,11 +39,9 @@ struct Block {
     wire: Value,
 }
 struct Parser {
-    source: futures::stream::BoxStream<
-        'static,
-        Result<sse::SseEvent, crate::transport::TransportError>,
-    >,
+    source: futures::stream::BoxStream<'static, Result<SseJson, Error>>,
     provider: String,
+    api: &'static ApiProfile,
     blocks: HashMap<u64, Block>,
     tool_names: HashMap<String, String>,
     pending: VecDeque<Event>,
@@ -51,10 +52,11 @@ struct Parser {
     stop_reason: Option<String>,
     usage: Map<String, Value>,
 }
-pub(super) fn parse(body: Body, provider: String) -> EventStream {
+pub(super) fn parse(body: Body, provider: String, api: &'static ApiProfile) -> EventStream {
     let state = Parser {
-        source: sse::parse(body),
+        source: http::sse_json(*api, provider.clone(), body),
         provider,
+        api,
         blocks: HashMap::new(),
         tool_names: HashMap::new(),
         pending: VecDeque::from([Event::StreamStart(StreamStart::default())]),
@@ -73,20 +75,17 @@ pub(super) fn parse(body: Body, provider: String) -> EventStream {
             if parser.finished {
                 return Ok(None);
             }
-            let Some(event) = parser.source.next().await else {
-                return Err(ProviderError::incomplete_response(
-                    "Anthropic stream ended without message_stop",
-                    Some(parser.provider),
-                )
-                .into());
+            let value = match parser.source.next().await {
+                Some(Ok(SseJson::Object(value))) => value,
+                Some(Err(error)) => return Err(error),
+                Some(Ok(SseJson::Done)) | None => {
+                    return Err(ProviderError::incomplete_response(
+                        format!("{} stream ended without message_stop", parser.api.label),
+                        Some(parser.provider),
+                    )
+                    .into());
+                }
             };
-            let event = event.map_err(|e| errors::transport(&parser.provider, e))?;
-            let value: Value = serde_json::from_str(&event.data).map_err(|_| {
-                errors::response(
-                    &parser.provider,
-                    "Anthropic stream event was not valid JSON",
-                )
-            })?;
             parser.feed(value)?;
         }
     })
@@ -99,17 +98,20 @@ impl Parser {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| {
-                errors::response(
+                http::response_error(
                     &self.provider,
-                    format!("Anthropic stream event is missing string {key}"),
+                    format!("{} stream event is missing string {key}", self.api.label),
                 )
             })
     }
     fn index(&self, value: &Value) -> Result<u64, Error> {
         value.get("index").and_then(Value::as_u64).ok_or_else(|| {
-            errors::response(
+            http::response_error(
                 &self.provider,
-                "Anthropic stream event is missing a nonnegative index",
+                format!(
+                    "{} stream event is missing a nonnegative index",
+                    self.api.label
+                ),
             )
         })
     }
@@ -118,9 +120,9 @@ impl Parser {
         match kind.as_str() {
             "message_start" => {
                 if self.started {
-                    return Err(errors::response(
+                    return Err(http::response_error(
                         &self.provider,
-                        "Anthropic stream has duplicate message_start",
+                        format!("{} stream has duplicate message_start", self.api.label),
                     ));
                 }
                 let message = &value["message"];
@@ -148,9 +150,9 @@ impl Parser {
             }
             "message_stop" => {
                 if !self.started {
-                    return Err(errors::response(
+                    return Err(http::response_error(
                         &self.provider,
-                        "Anthropic stream has no message_start",
+                        format!("{} stream has no message_start", self.api.label),
                     ));
                 }
                 self.pending.push_back(self.end()?);
@@ -158,6 +160,7 @@ impl Parser {
             }
             "error" => {
                 return Err(errors::stream_error(
+                    self.api,
                     &self.provider,
                     value.get("error").cloned().unwrap_or(value),
                 ));
@@ -170,9 +173,12 @@ impl Parser {
         if usage.is_null() {
             return Ok(());
         }
-        let object = usage
-            .as_object()
-            .ok_or_else(|| errors::response(&self.provider, "Anthropic usage must be an object"))?;
+        let object = usage.as_object().ok_or_else(|| {
+            http::response_error(
+                &self.provider,
+                format!("{} usage must be an object", self.api.label),
+            )
+        })?;
         for (key, value) in object {
             if value.is_null() {
                 continue;
@@ -185,9 +191,12 @@ impl Parser {
                     | "cache_creation_input_tokens"
             ) && value.as_u64().is_none()
             {
-                return Err(errors::response(
+                return Err(http::response_error(
                     &self.provider,
-                    format!("Anthropic usage {key} must be a nonnegative integer"),
+                    format!(
+                        "{} usage {key} must be a nonnegative integer",
+                        self.api.label
+                    ),
                 ));
             }
             self.usage.insert(key.clone(), value.clone());
@@ -239,9 +248,12 @@ impl Parser {
             _ => None,
         };
         if self.blocks.insert(idx, block).is_some() {
-            return Err(errors::response(
+            return Err(http::response_error(
                 &self.provider,
-                "Anthropic stream has duplicate content block index",
+                format!(
+                    "{} stream has duplicate content block index",
+                    self.api.label
+                ),
             ));
         }
         if let Some(event) = event {
@@ -372,7 +384,10 @@ impl Parser {
             .unwrap_or(0)
             .checked_add(cache_read.unwrap_or(0))
             .ok_or_else(|| {
-                errors::response(&self.provider, "Anthropic input token usage overflowed")
+                http::response_error(
+                    &self.provider,
+                    format!("{} input token usage overflowed", self.api.label),
+                )
             })?;
         let usage = Usage {
             input_tokens: input,

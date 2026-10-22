@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::protocol::MessagesProfile;
 use crate::{
     Error,
     models::params::*,
@@ -26,12 +27,12 @@ pub(super) struct RequestParams {
     pub query: BTreeMap<String, Value>,
     pub extra_body: BTreeMap<String, Value>,
 }
-fn unsupported(name: &str) -> Error {
-    Error::Validation(format!("Anthropic does not support {name}"))
+fn unsupported(label: &str, name: &str) -> Error {
+    Error::Validation(format!("{label} does not support {name}"))
 }
-fn reject_value<T>(value: &ProviderValue<Option<T>>, name: &str) -> Result<(), Error> {
+fn reject_value<T>(label: &str, value: &ProviderValue<Option<T>>, name: &str) -> Result<(), Error> {
     if matches!(value, ProviderValue::Value(Some(_))) {
-        Err(unsupported(name))
+        Err(unsupported(label, name))
     } else {
         Ok(())
     }
@@ -56,6 +57,7 @@ pub(super) fn tool_choice(choice: &ToolChoice) -> Result<Value, Error> {
     })
 }
 fn sampling(
+    label: &str,
     body: &mut Map<String, Value>,
     sampling: &ProviderValue<SamplerParams>,
 ) -> Result<(), Error> {
@@ -81,23 +83,23 @@ fn sampling(
     if let Some(p) = &s.top_k
         && let ProviderValue::Value(v) = p.top_k
     {
-        let v = v.ok_or_else(|| Error::Validation("Anthropic top_k cannot be None".into()))?;
+        let v = v.ok_or_else(|| Error::Validation(format!("{label} top_k cannot be None")))?;
         body.insert("top_k".into(), json!(v));
     }
     if let Some(p) = &s.seed
         && let ProviderValue::Value(Some(Seed::Value(seed))) = p.seed
         && seed != -1
     {
-        return Err(unsupported("seed"));
+        return Err(unsupported(label, "seed"));
     }
     if let Some(p) = &s.min_p {
-        reject_value(&p.min_p, "min_p")?;
+        reject_value(label, &p.min_p, "min_p")?;
     }
     if let Some(p) = &s.repetition_penalty {
-        reject_value(&p.repetition_penalty, "repetition_penalty")?;
-        reject_value(&p.frequency_penalty, "frequency_penalty")?;
-        reject_value(&p.presence_penalty, "presence_penalty")?;
-        reject_value(&p.consideration_window, "consideration_window")?;
+        reject_value(label, &p.repetition_penalty, "repetition_penalty")?;
+        reject_value(label, &p.frequency_penalty, "frequency_penalty")?;
+        reject_value(label, &p.presence_penalty, "presence_penalty")?;
+        reject_value(label, &p.consideration_window, "consideration_window")?;
     }
     Ok(())
 }
@@ -113,19 +115,31 @@ pub(super) fn add_betas(headers: &mut BTreeMap<String, String>, betas: &BTreeSet
         );
     }
 }
-pub(super) fn translate(params: Option<&InferenceRequestParams>) -> Result<RequestParams, Error> {
+pub(super) fn translate(
+    params: Option<&InferenceRequestParams>,
+    profile: &MessagesProfile,
+    model: &str,
+) -> Result<RequestParams, Error> {
+    let label = profile.api.label;
     let mut out = RequestParams::default();
     let Some(p) = params else {
         return Ok(out);
     };
     let b = &mut out.body;
-    sampling(b, &p.sampling)?;
+    sampling(label, b, &p.sampling)?;
     if let ProviderValue::Value(reasoning) = &p.reasoning
         && let ProviderValue::Value(effort) = &reasoning.effort
     {
-        match effort {
+        match effort.as_deref() {
+            // A model that always reasons cannot turn it off; it thinks least at low.
+            None if (profile.always_reasons)(model) => {
+                b.insert("output_config".into(), json!({"effort":"low"}));
+            }
             None => {
                 b.insert("thinking".into(), json!({"type":"disabled"}));
+            }
+            Some("minimal") if (profile.always_reasons)(model) => {
+                b.insert("output_config".into(), json!({"effort":"low"}));
             }
             Some(v) => {
                 b.insert("output_config".into(), json!({"effort":v}));
@@ -145,18 +159,18 @@ pub(super) fn translate(params: Option<&InferenceRequestParams>) -> Result<Reque
             b.insert("max_tokens".into(), json!(max));
         }
         if output.include.is_some() {
-            return Err(unsupported("output include"));
+            return Err(unsupported(label, "output include"));
         }
-        reject_value(&output.text_verbosity, "text verbosity")?;
+        reject_value(label, &output.text_verbosity, "text verbosity")?;
     }
     if let Some(tc) = &p.tool_calling {
-        reject_value(&tc.max_tool_calls, "max_tool_calls")?;
+        reject_value(label, &tc.max_tool_calls, "max_tool_calls")?;
         let mut choice = tool_choice(&tc.tool_choice)?;
         if let ProviderValue::Value(parallel) = tc.parallel_tool_calls {
             if choice["type"] == "none" {
-                return Err(Error::Validation(
-                    "Anthropic cannot set parallel tool calls with tool none".into(),
-                ));
+                return Err(Error::Validation(format!(
+                    "{label} cannot set parallel tool calls with tool none"
+                )));
             }
             choice["disable_parallel_tool_use"] = json!(!parallel);
         }
@@ -176,7 +190,7 @@ pub(super) fn translate(params: Option<&InferenceRequestParams>) -> Result<Reque
     }
     if let Some(cache) = &p.cache {
         if cache.key.is_some() {
-            return Err(unsupported("cache keys"));
+            return Err(unsupported(label, "cache keys"));
         }
         let mut control = json!({"type":"ephemeral"});
         if let ProviderValue::Value(ttl) = &cache.retention {

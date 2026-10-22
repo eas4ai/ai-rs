@@ -44,7 +44,6 @@
 //! Schemars nullable type arrays become `anyOf`. The core decodes the resulting
 //! assistant text through `StreamHandle::output`.
 mod errors;
-mod http;
 mod messages;
 mod params;
 pub mod protocol;

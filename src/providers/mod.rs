@@ -16,6 +16,8 @@
 
 pub mod anthropic;
 pub mod base;
+pub mod hosts;
+pub(crate) mod http;
 pub mod openai;
 pub mod operations;
 pub use base::{

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! OpenAI-specific parameters. Use the stable `openai` provider-parameter key.
+use super::protocol::Wire;
 use crate::{
     Error,
     models::params::*,
@@ -44,13 +45,14 @@ fn put<T: Serialize>(
     }
     Ok(())
 }
-fn reject<T>(value: &ProviderValue<Option<T>>, name: &str) -> Result<(), Error> {
+fn reject<T>(label: &str, value: &ProviderValue<Option<T>>, name: &str) -> Result<(), Error> {
     if matches!(value, ProviderValue::Value(Some(_))) {
-        return Err(invalid(format!("OpenAI does not support {name}")));
+        return Err(invalid(format!("{label} does not support {name}")));
     }
     Ok(())
 }
-pub(super) fn tool_choice(choice: &ToolChoice, responses: bool) -> Result<Value, Error> {
+pub(super) fn tool_choice(choice: &ToolChoice, wire: Wire) -> Result<Value, Error> {
+    let responses = matches!(wire, Wire::Responses);
     let named = |name: String| {
         if responses {
             json!({"type":"function","name":name})
@@ -65,9 +67,10 @@ pub(super) fn tool_choice(choice: &ToolChoice, responses: bool) -> Result<Value,
         ToolChoice::Tool(t) => named(t.to_string()),
         ToolChoice::Selection(s) => {
             if s.mode == ToolChoiceMode::None {
-                return Err(invalid(
-                    "OpenAI allowed tool selection does not support none",
-                ));
+                return Err(invalid(format!(
+                    "{} allowed tool selection does not support none",
+                    wire.api().label
+                )));
             }
             let tools: Vec<_> = s.tools.iter().map(|t| named(t.to_string())).collect();
             if responses {
@@ -78,10 +81,14 @@ pub(super) fn tool_choice(choice: &ToolChoice, responses: bool) -> Result<Value,
         }
     })
 }
-pub(super) fn build(
-    p: &InferenceRequestParams,
-    responses: bool,
-) -> Result<Map<String, Value>, Error> {
+pub(super) fn build(p: &InferenceRequestParams, wire: Wire) -> Result<Map<String, Value>, Error> {
+    let responses = matches!(wire, Wire::Responses);
+    let chat = match wire {
+        Wire::Chat(profile) => Some(profile),
+        Wire::Responses => None,
+    };
+    let label = wire.api().label;
+    let rejects_penalties_and_seed = chat.is_some_and(|c| c.rejects_penalties_and_seed);
     let mut out = Map::new();
     if let ProviderValue::Value(s) = &p.sampling {
         if let Some(t) = &s.temperature {
@@ -91,10 +98,10 @@ pub(super) fn build(
             put(&mut out, "top_p", &t.top_p)?;
         }
         if let Some(t) = &s.top_k {
-            reject(&t.top_k, "top_k")?;
+            reject(label, &t.top_k, "top_k")?;
         }
         if let Some(t) = &s.min_p {
-            reject(&t.min_p, "min_p")?;
+            reject(label, &t.min_p, "min_p")?;
         }
         if let Some(t) = &s.seed
             && let ProviderValue::Value(Some(Seed::Value(seed))) = &t.seed
@@ -103,24 +110,35 @@ pub(super) fn build(
             if responses {
                 return Err(invalid("OpenAI responses does not support seed"));
             }
+            if rejects_penalties_and_seed {
+                return Err(invalid(format!("{label} does not support seed")));
+            }
             out.insert("seed".into(), json!(seed));
         }
         if let Some(r) = &s.repetition_penalty {
-            put(&mut out, "frequency_penalty", &r.frequency_penalty)?;
-            put(&mut out, "presence_penalty", &r.presence_penalty)?;
-            reject(&r.repetition_penalty, "repetition_penalty")?;
-            reject(&r.consideration_window, "consideration_window")?;
+            if rejects_penalties_and_seed {
+                reject(label, &r.frequency_penalty, "frequency_penalty")?;
+                reject(label, &r.presence_penalty, "presence_penalty")?;
+            } else {
+                put(&mut out, "frequency_penalty", &r.frequency_penalty)?;
+                put(&mut out, "presence_penalty", &r.presence_penalty)?;
+            }
+            reject(label, &r.repetition_penalty, "repetition_penalty")?;
+            reject(label, &r.consideration_window, "consideration_window")?;
         }
     }
     let mut reasoning = Map::new();
     if let ProviderValue::Value(r) = &p.reasoning
         && let ProviderValue::Value(effort) = &r.effort
     {
-        let effort = json!(effort.as_deref().unwrap_or("none"));
-        if responses {
-            reasoning.insert("effort".into(), effort);
-        } else {
-            out.insert("reasoning_effort".into(), effort);
+        let effort = effort.as_deref().unwrap_or("none");
+        match chat {
+            None => {
+                reasoning.insert("effort".into(), json!(effort));
+            }
+            Some(profile) => {
+                out.insert("reasoning_effort".into(), json!(profile.effort(effort)));
+            }
         }
     }
     if let Some(o) = &p.output {
@@ -128,16 +146,16 @@ pub(super) fn build(
             put(&mut reasoning, "summary", &o.reasoning_summary)?;
         } else {
             reject(
+                label,
                 &o.reasoning_summary,
                 "reasoning summary in chat completions",
             )?;
         }
         if let Some(max) = o.max_tokens {
             out.insert(
-                if responses {
-                    "max_output_tokens"
-                } else {
-                    "max_completion_tokens"
+                match chat {
+                    None => "max_output_tokens",
+                    Some(profile) => profile.max_tokens_field,
                 }
                 .into(),
                 json!(max),
@@ -145,9 +163,9 @@ pub(super) fn build(
         }
         if let Some(include) = &o.include {
             if !responses {
-                return Err(invalid(
-                    "OpenAI chat completions does not support output include",
-                ));
+                return Err(invalid(format!(
+                    "{label} chat completions does not support output include"
+                )));
             }
             out.insert("include".into(), json!(include));
         }
@@ -158,7 +176,11 @@ pub(super) fn build(
                 out.insert("text".into(), text.into());
             }
         } else {
-            reject(&o.text_verbosity, "text verbosity in chat completions")?;
+            reject(
+                label,
+                &o.text_verbosity,
+                "text verbosity in chat completions",
+            )?;
         }
     }
     if !reasoning.is_empty() {
@@ -168,13 +190,14 @@ pub(super) fn build(
         if responses {
             put(&mut out, "max_tool_calls", &t.max_tool_calls)?;
         } else {
-            reject(&t.max_tool_calls, "max_tool_calls in chat completions")?;
+            reject(
+                label,
+                &t.max_tool_calls,
+                "max_tool_calls in chat completions",
+            )?;
         }
         put(&mut out, "parallel_tool_calls", &t.parallel_tool_calls)?;
-        out.insert(
-            "tool_choice".into(),
-            tool_choice(&t.tool_choice, responses)?,
-        );
+        out.insert("tool_choice".into(), tool_choice(&t.tool_choice, wire)?);
     }
     if let Some(s) = &p.provider_service {
         put(&mut out, "service_tier", &s.service_tier)?;
@@ -188,6 +211,7 @@ pub(super) fn build(
     if let Some(provider) = p
         .provider_params
         .as_ref()
+        .filter(|_| chat.is_none_or(|c| c.openai_params))
         .and_then(|p| p.get(OpenAIParams::KEY))
     {
         let options: OpenAIParams = serde_json::from_value(provider.clone())
@@ -198,9 +222,9 @@ pub(super) fn build(
     }
     if let Some(threshold) = p.context_management.as_ref().and_then(|m| m.compaction) {
         if !responses {
-            return Err(invalid(
-                "OpenAI chat completions does not support context management",
-            ));
+            return Err(invalid(format!(
+                "{label} chat completions does not support context management"
+            )));
         }
         out.insert(
             "context_management".into(),
