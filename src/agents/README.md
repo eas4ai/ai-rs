@@ -111,7 +111,9 @@ call, with its reasoning, and a tool message with the result of each tool that
 finished; each call whose tool had not finished gets the error result
 `Cancelled: the run stopped before this tool call finished.` A next run started
 from it repeats no finished call. Otherwise the step adds the response's text
-and reasoning as delivered. With no step in progress it equals `messages()`.
+and reasoning as delivered. With no step in progress it equals `messages()`, and
+so it does for a custom loop that does not run the default loop, which keeps no
+record of its step.
 Read it after `stop()`: a running loop can finish a tool after the read.
 `RunOptions::tool_concurrency` caps how many tool executions of one step run at
 once; the others start in call order as slots free up. A call waiting for its

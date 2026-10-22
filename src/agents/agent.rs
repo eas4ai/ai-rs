@@ -798,7 +798,9 @@ impl AgentStream {
     /// unfinished one. Otherwise it adds the response's text and reasoning as
     /// delivered. A buffered loop may run ahead of the consumer; the history
     /// holds every step it finished. Equals [`messages`](Self::messages) when
-    /// no step is in progress, and after the stream ended without an error.
+    /// no step is in progress, after the stream ended without an error, and
+    /// for a custom loop ([`Agent::with_loop`]) that does not run the default
+    /// loop, which keeps no record of its step.
     /// Call [`stop`](Self::stop) first so that no tool finishes after the
     /// history was read.
     pub fn interrupted_messages(&self) -> Vec<Message> {
