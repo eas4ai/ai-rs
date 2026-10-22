@@ -170,7 +170,7 @@ impl Agent {
             .unwrap_or_default()
             .with_middleware(options.middleware.clone());
         let (runtime, events) = Runtime::new();
-        let outcome = Arc::new(Mutex::new(None));
+        let tally = Arc::new(Mutex::new(RunTally::default()));
         let call = RunContext {
             context: context.clone(),
             agent: Arc::new(self.clone()),
@@ -179,7 +179,7 @@ impl Agent {
             middleware: options.middleware.clone(),
             step_checks: options.step_checks.clone(),
             tool_concurrency: options.tool_concurrency,
-            outcome: outcome.clone(),
+            tally: tally.clone(),
         };
         // A middleware may call next again to retry a failed run. Each
         // invocation owns its source and queue; the first uses the exposed sink.
@@ -219,7 +219,7 @@ impl Agent {
             hooks,
             blocked: false,
             deferred: BTreeMap::new(),
-            outcome,
+            tally,
             usage: None,
             ended: false,
             failed: false,
@@ -239,7 +239,17 @@ pub struct RunContext {
     pub step_checks: Vec<StepCheck>,
     /// The most tool executions of one step that run at once.
     pub tool_concurrency: Option<NonZeroUsize>,
-    outcome: Arc<Mutex<Option<StopReason>>>,
+    tally: Arc<Mutex<RunTally>>,
+}
+
+/// Loop state for the whole run. Every default-loop invocation of the run
+/// shares it, so a middleware that runs the loop again keeps the step count
+/// and usage that the step checks budget against.
+#[derive(Debug, Default)]
+struct RunTally {
+    steps: usize,
+    usage: Option<Usage>,
+    outcome: Option<StopReason>,
 }
 impl RunContext {
     pub fn context(&self) -> Context {
@@ -311,8 +321,6 @@ impl RunContext {
             LoopState {
                 call: self.clone(),
                 step: None,
-                steps: 0,
-                usage: None,
             },
             |mut state| async move {
                 loop {
@@ -321,23 +329,12 @@ impl RunContext {
                             return Ok(Some((event, state)));
                         }
                         let step = state.step.take().expect("active agent step");
-                        let counted = !step.replay;
-                        if counted {
-                            state.steps += 1;
-                            if let Some(usage) = step.usage() {
-                                state.usage = Some(match state.usage.take() {
-                                    Some(total) => total + usage,
-                                    None => usage.clone(),
-                                });
-                            }
-                        }
+                        let progress = (!step.replay).then(|| state.call.count_step(step.usage()));
                         step.finish(&state.call)?;
-                        if counted && !state.call.context().ends_deferred() {
-                            match state
-                                .call
-                                .check_step(state.steps, state.usage.clone())
-                                .await?
-                            {
+                        if let Some((steps, usage)) = progress
+                            && !state.call.context().ends_deferred()
+                        {
+                            match state.call.check_step(steps, usage).await? {
                                 StepDecision::Continue => {}
                                 StepDecision::Steer(message) => {
                                     state.call.update(|context| context.add(message));
@@ -389,15 +386,28 @@ impl RunContext {
         }
         Ok(StepDecision::Continue)
     }
+    /// Count a finished step and return the run's step count and usage.
+    fn count_step(&self, usage: Option<&Usage>) -> (usize, Option<Usage>) {
+        let mut tally = self.tally.lock().expect("agent tally mutex poisoned");
+        tally.steps += 1;
+        if let Some(usage) = usage {
+            tally.usage = Some(match tally.usage.take() {
+                Some(total) => total + usage,
+                None => usage.clone(),
+            });
+        }
+        (tally.steps, tally.usage.clone())
+    }
     fn set_outcome(&self, reason: StopReason) {
-        *self.outcome.lock().expect("agent outcome mutex poisoned") = Some(reason);
+        self.tally
+            .lock()
+            .expect("agent tally mutex poisoned")
+            .outcome = Some(reason);
     }
 }
 struct LoopState {
     call: RunContext,
     step: Option<Step>,
-    steps: usize,
-    usage: Option<Usage>,
 }
 struct Step {
     source: EventStream,
@@ -630,7 +640,7 @@ pub struct AgentStream {
     hooks: HookRegistry,
     blocked: bool,
     deferred: BTreeMap<String, HookPart>,
-    outcome: Arc<Mutex<Option<StopReason>>>,
+    tally: Arc<Mutex<RunTally>>,
     usage: Option<Usage>,
     ended: bool,
     failed: bool,
@@ -666,9 +676,10 @@ impl AgentStream {
         if !self.ended || self.failed {
             return None;
         }
-        self.outcome
+        self.tally
             .lock()
-            .expect("agent outcome mutex poisoned")
+            .expect("agent tally mutex poisoned")
+            .outcome
             .clone()
     }
     pub fn text(&self) -> Result<String, Error> {

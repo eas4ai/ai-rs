@@ -236,6 +236,81 @@ async fn agt_001_checks_receive_steps_history_and_usage() {
     );
 }
 
+/// Runs the loop again once after the first error, as a run middleware may.
+struct RerunOnce;
+impl suprnova_ai::agents::Middleware for RerunOnce {
+    fn wrap_agent_run(
+        &self,
+        call: suprnova_ai::agents::RunContext,
+        next: suprnova_ai::agents::middleware::RunNext,
+    ) -> suprnova_ai::providers::EventStream {
+        let source = next(call.clone());
+        futures::stream::unfold(
+            (call, next, source, false),
+            |(call, next, mut source, rerun)| async move {
+                match source.next().await {
+                    Some(Err(_)) if !rerun => {
+                        let source = next(call.clone());
+                        Some((
+                            Ok(Event::Retry(Default::default())),
+                            (call, next, source, true),
+                        ))
+                    }
+                    Some(event) => Some((event, (call, next, source, rerun))),
+                    None => None,
+                }
+            },
+        )
+        .boxed()
+    }
+}
+
+#[tokio::test]
+async fn agt_001_a_rerun_of_the_loop_keeps_the_step_count_and_usage() {
+    let usage = |input, output| Usage {
+        input_tokens: input,
+        output_tokens: output,
+        ..Usage::default()
+    };
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [
+            ScriptedResponse::tool_call("c1", "work", json!({})).with_usage(usage(10, 5)),
+            ScriptedResponse::error(ProviderError::from_status("bad", 400, None)),
+            ScriptedResponse::tool_call("c2", "work", json!({})).with_usage(usage(20, 7)),
+            ScriptedResponse::tool_call("c3", "work", json!({})),
+            ScriptedResponse::text("unused"),
+        ],
+    );
+    let seen: Arc<Mutex<Vec<(usize, Option<u64>)>>> = Arc::default();
+    let record = {
+        let seen = seen.clone();
+        StepCheck::new(move |progress: RunProgress| {
+            seen.lock()
+                .unwrap()
+                .push((progress.steps, progress.usage.map(|u| u.input_tokens)));
+            async { Ok(StepDecision::Continue) }
+        })
+    };
+    let mut run = Agent::new(vec![noop("work")]).run_with_options(
+        provider.model("m"),
+        vec![user_message("go")],
+        RunOptions {
+            step_checks: vec![record, StepCheck::step_count(2)],
+            middleware: vec![Arc::new(RerunOnce)],
+            ..RunOptions::default()
+        },
+    );
+    finish(&mut run).await;
+    // Step 1, the failed call, then step 2 in the rerun, which meets the budget.
+    assert_eq!(provider.requests().len(), 3);
+    assert_eq!(*seen.lock().unwrap(), vec![(1, Some(10)), (2, Some(30))]);
+    assert_eq!(
+        run.stop_reason(),
+        Some(StopReason::Stopped("step count 2 reached".into()))
+    );
+}
+
 #[tokio::test]
 async fn agt_001_steering_with_another_role_ends_the_run_with_a_validation_error() {
     let provider = ScriptedProvider::new("scripted", [ScriptedResponse::text("draft")]);
