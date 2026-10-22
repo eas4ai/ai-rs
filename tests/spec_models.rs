@@ -365,6 +365,20 @@ fn mod_004_restore_without_a_registered_provider_fails() {
     }
 }
 
+#[test]
+fn mod_004_restore_into_an_empty_registry_names_the_provider() {
+    let transport: Arc<dyn HttpTransport> = Arc::new(RecordingTransport::default());
+    let custom =
+        AnthropicCompatibleProvider::new(keyed("sk-old"), transport).with_name("custom-anthropic");
+    let snapshot = Model::new("claude", Arc::new(custom)).to_value().unwrap();
+    match Model::from_value(snapshot, &ProviderRegistry::new()) {
+        Err(Error::Configuration(message)) => {
+            assert!(message.contains("\"custom-anthropic\""), "{message}")
+        }
+        other => panic!("expected a configuration error, got {other:?}"),
+    }
+}
+
 // MOD-005
 
 fn two_rate_limits_then_text() -> ScriptedProvider {
