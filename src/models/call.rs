@@ -306,14 +306,20 @@ impl StreamCall {
                 Some(Err(error)) => {
                     let policy = &self.options.retry;
                     if self.started || self.retries >= policy.max_retries || !is_retryable(&error) {
-                        if self.attempt.is_none() {
-                            // The idle attempt was dropped and will not resume.
+                        // An error before the first event that is not retried
+                        // is the call's result, so the call ends with it. An
+                        // idle attempt was dropped and will not resume either.
+                        if !self.started || self.attempt.is_none() {
+                            self.attempt = None;
                             self.finished = true;
                         }
                         return Some(Err(error));
                     }
                     if require_timer().is_err() {
-                        // Without a timer the call cannot wait, so it returns the error.
+                        // Without a timer the call cannot wait, so it ends
+                        // with the error.
+                        self.attempt = None;
+                        self.finished = true;
                         return Some(Err(error));
                     }
                     let wait = retry_delay(policy, self.retries, &error, SystemTime::now());

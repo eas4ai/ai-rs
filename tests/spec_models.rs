@@ -584,6 +584,58 @@ fn mod_005_without_a_tokio_runtime_a_retryable_error_is_returned_not_retried() {
     assert_eq!(provider.requests().len(), 1);
 }
 
+/// Poll a call to its end and return its errors.
+async fn errors_until_end(model: &Model, options: StreamOptions) -> Vec<Error> {
+    let mut response = model_stream(model, vec![user_message("hi")], options);
+    let mut errors = Vec::new();
+    while let Some(item) = response.next().await {
+        errors.push(item.expect_err("the call sends no event"));
+    }
+    errors
+}
+
+#[tokio::test(start_paused = true)]
+async fn mod_005_a_call_ends_after_it_returns_an_error_before_the_first_event() {
+    let provider = ScriptedProvider::new(
+        "scripted",
+        [
+            ScriptedResponse::error(status_error(400, "bad request", &[])),
+            ScriptedResponse::text("unused"),
+        ],
+    );
+    let errors = errors_until_end(&provider.model("m"), StreamOptions::default()).await;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        provider_error(&errors[0]).kind,
+        ProviderErrorKind::BadRequest
+    );
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.remaining(), 1);
+
+    let provider = ScriptedProvider::new(
+        "scripted",
+        ["first", "second", "third", "fourth"]
+            .map(|message| ScriptedResponse::error(status_error(503, message, &[]))),
+    );
+    let errors = errors_until_end(&provider.model("m"), StreamOptions::default()).await;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(provider_error(&errors[0]).message, "third");
+    assert_eq!(provider.requests().len(), 3);
+}
+
+#[test]
+fn mod_005_without_a_tokio_runtime_a_call_ends_after_its_returned_error() {
+    let provider = rate_limit_then_text();
+    let model = provider.model("m");
+    let errors = futures::executor::block_on(errors_until_end(&model, StreamOptions::default()));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        provider_error(&errors[0]).kind,
+        ProviderErrorKind::RateLimit
+    );
+    assert_eq!(provider.requests().len(), 1);
+}
+
 // MOD-006
 
 fn timeout_kind(error: &Error) -> ProviderErrorKind {
