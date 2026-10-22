@@ -51,7 +51,7 @@ impl Default for RetryPolicy {
     /// Two retries, waiting 2 s and then 4 s.
     fn default() -> Self {
         Self {
-            max_retries: 0,
+            max_retries: 2,
             initial_delay: Duration::from_secs(2),
             backoff_factor: 2,
         }
@@ -165,8 +165,7 @@ async fn bounded<T>(
     idle: Option<Duration>,
     deadline: Option<Instant>,
 ) -> Wait<T> {
-    let _ = idle;
-    let idle_deadline: Option<Instant> = None;
+    let idle_deadline = idle.map(|idle| Instant::now() + idle);
     let limit = match (idle_deadline, deadline) {
         (Some(idle), Some(total)) => Some((idle.min(total), idle < total)),
         (Some(idle), None) => Some((idle, true)),

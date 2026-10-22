@@ -779,7 +779,7 @@ impl Stream for ToolRunner {
 impl Drop for ToolRunner {
     fn drop(&mut self) {
         for task in self.tasks.drain(..) {
-            std::mem::forget(task);
+            drop(task);
         }
     }
 }

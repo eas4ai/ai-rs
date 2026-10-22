@@ -109,6 +109,11 @@ impl ProviderConfig {
     /// the `env` map and the headers. A restore takes them from the registry.
     pub fn snapshot(&self) -> Result<Value, Error> {
         let mut value = serde_json::to_value(self)?;
+        if let Value::Object(fields) = &mut value {
+            for field in CREDENTIAL_FIELDS {
+                fields.remove(field);
+            }
+        }
         Ok(value)
     }
 
@@ -552,10 +557,6 @@ impl ProviderRegistry {
                 "provider handle must not be empty".into(),
             ));
         }
-        let id = match id.as_str() {
-            "vercel" | "gateway" | "ai-gateway" => "ai-gateway".to_owned(),
-            _ => id,
-        };
         if self
             .providers
             .get(&id)
@@ -623,10 +624,39 @@ impl ProviderRegistry {
             .filter(|name| !name.is_empty())
             .ok_or_else(|| Error::Configuration("provider data must include a name".into()))?
             .to_owned();
-        let _ = &name;
-        let factory = self.provider_factories.get(&id).ok_or_else(|| {
-            Error::Configuration(format!("unknown provider_class_id {id:?}"))
+        // Look the provider up first, so every failure to restore it names it.
+        let registered = self.providers.get(&name).ok_or_else(|| {
+            Error::Configuration(format!(
+                "cannot restore provider {name:?}: the registry holds no provider under that name to supply its credentials"
+            ))
         })?;
+        let factory = self.provider_factories.get(&id).ok_or_else(|| {
+            Error::Configuration(format!(
+                "cannot restore provider {name:?}: unknown provider_class_id {id:?}"
+            ))
+        })?;
+        // The registered provider decides where requests go and how they
+        // authenticate: a changed snapshot cannot send its credentials to
+        // another host, and an endpoint change applies to older snapshots.
+        if registered.provider_class_id() != id {
+            return Err(Error::Configuration(format!(
+                "cannot restore provider {name:?}: its snapshot class {id:?} differs from the registered provider's class {:?}",
+                registered.provider_class_id()
+            )));
+        }
+        let registered_config = serde_json::to_value(registered.config())?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| Error::Configuration("provider data must be a JSON object".into()))?;
+        for field in CREDENTIAL_FIELDS.into_iter().chain(ENDPOINT_FIELDS) {
+            match registered_config
+                .get(field)
+                .filter(|value| !value.is_null())
+            {
+                Some(setting) => fields.insert(field.to_owned(), setting.clone()),
+                None => fields.remove(field),
+            };
+        }
         factory(value, self)
     }
     pub fn restore_protocol(&self, value: Value) -> Result<Arc<dyn ProviderProtocol>, Error> {
@@ -643,10 +673,7 @@ impl ProviderRegistry {
     }
     pub fn get_provider(&self, id: &str) -> Result<Arc<dyn Provider>, Error> {
         self.providers
-            .get(match id {
-                "vercel" | "gateway" | "ai-gateway" => "ai-gateway",
-                _ => id,
-            })
+            .get(id)
             .cloned()
             .ok_or_else(|| Error::UnsupportedProvider(id.to_owned()))
     }

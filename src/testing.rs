@@ -272,11 +272,12 @@ impl ScriptedProvider {
             at: tokio::time::Instant::now(),
         });
         let call = state.requests.len();
-        let _ = call;
-        Ok(state
-            .responses
-            .pop_front()
-            .unwrap_or_else(|| ScriptedResponse::text("")))
+        state.responses.pop_front().ok_or_else(|| {
+            Error::Configuration(format!(
+                "scripted provider {:?} has no response left for call {call}",
+                self.name
+            ))
+        })
     }
 }
 
