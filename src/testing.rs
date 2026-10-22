@@ -20,6 +20,13 @@
 //! time of the call. A call after the last response fails with
 //! `Error::Configuration`.
 //!
+//! Calls retry a retryable error before the first event (`StreamOptions::retry`),
+//! and each retry is another call to this provider. Script a response for every
+//! retry, or set `RetryPolicy::none()`, when a test expects a retryable scripted
+//! error (HTTP 429 or 5xx, a connection failure) to reach the caller; otherwise
+//! the retry finds the script empty and the caller sees `Error::Configuration`.
+//! Run such tests under paused Tokio time to skip the waits.
+//!
 //! ```
 //! use suprnova_ai::testing::{ScriptedProvider, ScriptedResponse};
 //! use suprnova_ai::{StreamOptions, generate, user_message};
