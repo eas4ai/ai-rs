@@ -48,8 +48,10 @@ mod provider;
 mod streaming;
 pub mod tools;
 pub use params::OpenAIParams;
+// Kept for callers of the old name-based choice; it is deprecated.
+#[allow(deprecated)]
+pub use protocol::default_protocol;
 pub use protocol::{
     OpenAIChatCompletionsProtocol, OpenAIChatCompletionsWithDownloads, OpenAIResponsesProtocol,
-    default_protocol,
 };
 pub use provider::{OpenAICompatibleProvider, register, register_factories};

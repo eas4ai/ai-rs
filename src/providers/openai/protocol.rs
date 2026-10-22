@@ -32,9 +32,12 @@ use std::sync::Arc;
 pub struct OpenAIChatCompletionsProtocol;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpenAIResponsesProtocol;
-/// The protocol a provider of this name defaults to: Responses for
-/// `openai`, Chat Completions for every other name.
-/// `OpenAICompatibleProvider` decides when it is built instead.
+/// Responses for the name `openai`, Chat Completions for every other name.
+/// This is not the protocol a provider uses: `OpenAICompatibleProvider`
+/// decides when it is built, from the API it targets.
+#[deprecated(
+    note = "choose by the API, not the name: use `Provider::default_protocol` of the provider"
+)]
 pub fn default_protocol(provider: &str) -> Arc<dyn ProviderProtocol> {
     if provider == "openai" {
         Arc::new(OpenAIResponsesProtocol)
