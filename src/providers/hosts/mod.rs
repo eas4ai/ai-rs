@@ -38,10 +38,12 @@
 //! }
 //! ```
 //!
-//! Requests reject what a host does not take with `Error::Validation`, as the
-//! OpenAI and Anthropic adapters do, where the TypeScript SDK drops it with a
-//! warning. An output schema goes to a host without JSON schema support as
-//! JSON mode, which does not enforce the schema.
+//! Options a host profile marks unsupported, such as Z.ai's penalties and
+//! seed, fail with `Error::Validation` before any request, as the OpenAI and
+//! Anthropic adapters reject theirs; the TypeScript SDK drops them with a
+//! warning. An output schema goes to a host without JSON schema support as JSON
+//! mode, which does not enforce the schema. Hosts stream and generate only:
+//! `list_models` and `probe` return `Error::UnsupportedOperation`.
 use crate::{
     Error, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     providers::{

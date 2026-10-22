@@ -94,10 +94,11 @@ Chat Completions and MiniMax on the Anthropic Messages protocol. Register one wi
 its module's `register`, for example
 `hosts::cerebras::register(&mut registry, config, transport)`, under its name
 (`cerebras`) and package handle (`@ai-sdk/cerebras`). Each host follows its
-package in the AI SDK for TypeScript 7.0.148. An option a host does not take fails
-with `Error::Validation` instead of being dropped with a warning, and an output
-schema goes to a host without JSON schema support as JSON mode, which does not
-enforce the schema.
+package in the AI SDK for TypeScript 7.0.148. Options that package drops with a
+warning, such as Z.ai's penalties, seed and forced tool choices, fail here with
+`Error::Validation` before any request. An output schema goes to a host without
+JSON schema support as JSON mode, which does not enforce the schema. Hosts do not
+support `list_models` or `probe`.
 
 Enable the `testing` feature for `testing::ScriptedProvider`. It answers each call
 with the next scripted response and records each request, with no network.

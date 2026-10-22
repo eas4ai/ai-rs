@@ -105,8 +105,10 @@ stops a run by dropping it, or when the run fails. The step adds the model
 response so far, keeping only the tool calls whose `ToolEnd` was delivered, and
 a tool message with the delivered results; each of those calls without a result
 gets the error result `Cancelled: the run stopped before this tool call
-finished.` A next run started from it repeats no finished call. With no step in
-progress it equals `messages()`.
+finished.` A next run started from it repeats no finished call. After a step
+whose events were all delivered, it is the history up to the next model
+response, with what the loop added before that call, such as a steering
+message. With no step in progress it equals `messages()`.
 `RunOptions::tool_concurrency` caps how many tool executions of one step run at
 once; the others start in call order as slots free up. A call waiting for its
 approval holds no slot, so approvals and `blocked()` work as without a cap.
