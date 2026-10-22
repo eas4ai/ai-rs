@@ -637,9 +637,20 @@ impl Step {
                 Either::Left(Some(result)) => {
                     let result = result?;
                     self.in_flight -= 1;
+                    // Record the results that wait in the runner too: a stop
+                    // before they are yielded must not report them cancelled.
+                    let finished = std::iter::once(&result).chain(self.tools.finished());
                     call.record(|step| {
                         if let Some(step) = step {
-                            step.results.extend(result.results.iter().cloned());
+                            for part in finished.flat_map(|r| r.results.iter()) {
+                                if !step
+                                    .results
+                                    .iter()
+                                    .any(|known| known.tool_call_id == part.tool_call_id)
+                                {
+                                    step.results.push(part.clone());
+                                }
+                            }
                         }
                     });
                     return Ok(Some(Event::ToolCallResult(result)));
