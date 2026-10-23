@@ -298,7 +298,7 @@ impl Reader {
                     json!([source["title"], source["filename"], source["mediaType"]])
                 ),
             };
-            if { self.seen_sources.insert(key); true } {
+            if self.seen_sources.insert(key) {
                 self.sources.push(source);
             }
         }
@@ -838,7 +838,7 @@ pub(crate) fn finish_reason(raw: &str, has_tool_calls: bool) -> &'static str {
     match raw {
         "STOP" if has_tool_calls => "tool_call",
         "STOP" => "stop",
-        "CONTINUATION" => "length",
+        "MAX_TOKENS" | "CONTINUATION" => "length",
         "IMAGE_SAFETY" | "RECITATION" | "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" => {
             "content_filter"
         }

@@ -233,6 +233,12 @@ impl Reader {
                 .with_provider(&self.provider)
                 .with_body(value.clone())
                 .with_error_type("error");
+                if let Some(code) = code {
+                    failure.code = Some(match code {
+                        Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    });
+                }
                 if let Some(status) = status {
                     failure.is_retryable = matches!(status, 408 | 409 | 429) || status >= 500;
                 }

@@ -32,7 +32,7 @@ pub(crate) const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis
 
 /// The most bytes of a generate content, image, speech, video or
 /// Interactions response body, and of one of their stream events.
-pub(crate) const MEDIA_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MEDIA_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) static GEMINI_API: ApiProfile = ApiProfile {
     label: "Google Generative AI",
@@ -314,7 +314,7 @@ pub(crate) fn stream_error(provider: &str, error: &Value) -> Error {
     let mut provider_error = ProviderError::new(kind, message)
         .with_provider(provider)
         .with_body(serde_json::json!({ "error": error }))
-        .with_retryable(false);
+        .with_retryable(code.is_some_and(|code| matches!(code, 408 | 409 | 429) || code >= 500));
     if let Some(code) = code {
         provider_error.code = Some(code.to_string());
     }

@@ -107,7 +107,7 @@ pub(crate) async fn start(
             "Google batches require every request to use the same model because the model is part of the batch endpoint.",
         ));
     }
-    let display_name = format!("batch-{}", generate_id(""));
+    let display_name = format!("ai-sdk-batch-{}", generate_id(""));
     let mut batch = Map::new();
     batch.insert("displayName".into(), json!(display_name));
     if let Some(url) = &params.webhook_url {
@@ -259,6 +259,7 @@ pub(crate) fn status_of(operation: &Value) -> Result<BatchStatus, Error> {
             Some(raw) => {
                 let state = raw
                     .strip_prefix("BATCH_STATE_")
+                    .or_else(|| raw.strip_prefix("JOB_STATE_"))
                     .unwrap_or(raw);
                 match state {
                     "SUCCEEDED" => BatchState::Completed,

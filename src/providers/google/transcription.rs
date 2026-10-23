@@ -39,7 +39,7 @@ pub(crate) const API_REVISION: &str = "2026-05-20";
 
 /// How long after the audio ends a session waits for a transcript or a
 /// terminal signal before it finishes.
-const FINISH_GRACE: Duration = Duration::from_secs(1);
+const FINISH_GRACE: Duration = Duration::from_secs(3);
 
 const LIVE_PATH: &str = "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const VERTEX_LIVE_PATH: &str = "google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent";
@@ -101,7 +101,7 @@ fn transcription_config(options: &TranscriptionOptions) -> Option<Value> {
         || options.word_timestamp == Some(true)
     {
         let mut mode =
-            json!({"type": options.mode.as_deref().unwrap_or("VERBATIM")});
+            json!({"type": options.mode.as_deref().unwrap_or("VERBATIM").to_ascii_lowercase()});
         if options.diarization == Some(true) {
             mode["diarization_mode"] = json!("speaker");
         }

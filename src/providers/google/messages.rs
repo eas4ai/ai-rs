@@ -151,7 +151,11 @@ pub(crate) async fn download_files(
                 continue;
             };
             let Some(transport) = downloads else {
-                continue;
+                return Err(Error::Validation(format!(
+                    "{} does not fetch the file URL of type {}; build the provider with a download transport to send it",
+                    target.flavor.api().label,
+                    file.media_type
+                )));
             };
             let (bytes, _) =
                 download(transport, &url, DEFAULT_MAX_BYTES)
@@ -375,7 +379,11 @@ fn user_file(file: &FilePart, target: Target<'_>) -> Result<Value, Error> {
         if fetches(target, url, &file.media_type) {
             return Ok(json!({"fileData": {"mimeType": file.media_type, "fileUri": url}}));
         }
-        return Ok(json!({"fileData": {"mimeType": file.media_type, "fileUri": url}}));
+        return Err(Error::Validation(format!(
+            "{} does not fetch the file URL of type {}; build the provider with a download transport to send it",
+            target.flavor.api().label,
+            file.media_type
+        )));
     }
     let (mime_type, data) = inline_data(file);
     Ok(json!({"inlineData": {"mimeType": mime_type, "data": data}}))
@@ -632,7 +640,7 @@ fn tool_result(
         if result.is_error() {
             "error"
         } else {
-            "result"
+            "content"
         }
         .into(),
         value,

@@ -123,7 +123,7 @@ pub(crate) fn request(
     let image_config = google.remove("imageConfig");
     // Check the rest against the language model options.
     let _: LanguageOptions = options::from_value(key, Value::Object(google.clone()))?;
-    google.insert("responseModalities".into(), json!(["TEXT", "IMAGE"]));
+    google.insert("responseModalities".into(), json!(["IMAGE"]));
     if image_config.is_some() || params.aspect_ratio.is_some() {
         let mut config = match image_config {
             Some(Value::Object(config)) => config,

@@ -28,7 +28,7 @@ use crate::{
 };
 
 /// The most values one Gemini embedding call takes.
-pub(crate) const MAX_VALUES: usize = 99;
+pub(crate) const MAX_VALUES: usize = 100;
 
 const TASK_TYPES: &[&str] = &[
     "SEMANTIC_SIMILARITY",

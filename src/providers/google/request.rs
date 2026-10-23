@@ -219,7 +219,7 @@ fn derived_thinking(model_id: &str, effort: &Option<String>) -> Result<ThinkingC
         let level = match effort.as_deref() {
             None | Some("minimal") => minimum,
             Some("low") => "low",
-            Some("medium") => "high",
+            Some("medium") => "medium",
             Some("high" | "xhigh" | "max") => "high",
             Some(other) => {
                 return Err(Error::Validation(format!(
@@ -300,7 +300,7 @@ pub(crate) fn sanitize_schema(schema: &Value) -> Value {
     for (key, value) in object {
         match key.as_str() {
             "const" => {
-                out.insert("const".into(), value.clone());
+                out.insert("enum".into(), json!([value]));
             }
             "properties" | "$defs" => {
                 out.insert(key.clone(), sanitize_map(value));
@@ -405,6 +405,7 @@ pub(crate) fn build(
     let mut generation = Map::new();
     set(&mut generation, "maxOutputTokens", settings.max_tokens);
     set(&mut generation, "temperature", settings.temperature);
+    set(&mut generation, "topK", settings.top_k);
     set(&mut generation, "topP", settings.top_p);
     set(
         &mut generation,
@@ -469,6 +470,7 @@ pub(crate) fn build(
     body.insert("generationConfig".into(), Value::Object(generation));
     body.insert("contents".into(), json!(contents));
     set(&mut body, "systemInstruction", system);
+    set(&mut body, "safetySettings", google.safety_settings());
     set(&mut body, "tools", wire_tools);
     set(&mut body, "toolConfig", tool_config);
     set(&mut body, "cachedContent", google.cached_content.clone());

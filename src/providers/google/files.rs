@@ -66,7 +66,7 @@ pub(crate) async fn resumable_upload(
         file.insert("display_name".into(), json!(name));
     }
     let headers = [
-        ("X-Goog-Upload-Protocol", "multipart".to_owned()),
+        ("X-Goog-Upload-Protocol", "resumable".to_owned()),
         ("X-Goog-Upload-Command", "start".to_owned()),
         (
             "X-Goog-Upload-Header-Content-Length",
