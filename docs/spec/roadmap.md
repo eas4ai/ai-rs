@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: openai-history-replay
+Current: license-attribution
 
 ## rename-to-suprnova-ai
 
@@ -198,3 +198,22 @@ after it, and `scripts/check-openai.sh` reports its result.
 Done when the openai, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
 adversary report have no open findings.
+
+## license-attribution
+
+Requirements: PKG-002, PKG-004, PKG-006, PKG-007
+
+Credit the crate's own author and keep the Vercel credit. Replace `LICENSE`
+with the full Apache License 2.0 text; rewrite `NOTICE` to name
+`suprnova-ai-rs` and `Copyright 2026 Shawn McAllister <@eas4ai>`, say that the
+crate began as a port of the AI SDK for Python 0.8.0 and has changed from it
+as `docs/PORT.md` lists, and keep both Vercel copyrights and upstream URLs.
+Remove the license header from every file under `src/`, `tests/` and
+`scripts/`. List the author in `Cargo.toml` `authors`, and say in the opening
+of `README.md` what the crate derives from and that it is licensed under the
+Apache License 2.0. `docs/PORT.md` states where the license and notice live.
+`scripts/check-identity.sh` reports PKG-007 with the other identity checks.
+
+Done when the identity and checks mechanisms pass for every requirement
+above, their receipts are current, and the review and the adversary report
+have no open findings.
