@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::{
     errors,
-    files::Files,
+    files::{Files, path_id},
     params::invalid,
     profile,
     protocol::{Wire, http_request, wire_request},
@@ -350,11 +350,13 @@ impl Files<'_> {
     }
 
     pub(super) async fn batch_status(&self, batch_id: &str) -> Result<BatchStatus, Error> {
+        let batch_id = path_id("batch", batch_id)?;
         let batch = self.get(&["batches", batch_id], &[]).await?;
         status(&batch, self.provider)
     }
 
     pub(super) async fn batch_cancel(&self, batch_id: &str) -> Result<(), Error> {
+        let batch_id = path_id("batch", batch_id)?;
         let request = http_request(
             &errors::API,
             "POST",
@@ -396,6 +398,7 @@ impl Files<'_> {
     }
 
     pub(super) async fn batch_results(&self, batch_id: &str) -> Result<BatchResults, Error> {
+        let batch_id = path_id("batch", batch_id)?;
         let batch = self.get(&["batches", batch_id], &[]).await?;
         let state = status(&batch, self.provider)?.state;
         if state == BatchState::Pending {

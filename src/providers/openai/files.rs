@@ -36,13 +36,22 @@ struct FileOptions {
     expires_after: Option<serde_json::Number>,
 }
 
+/// An id that goes into a URL path as one segment. A URL path drops a `.`
+/// or `..` segment, so such an id, like an empty one, would send the call
+/// to another endpoint.
+pub(super) fn path_id<'a>(what: &str, id: &'a str) -> Result<&'a str, Error> {
+    if id.trim().is_empty() || id == "." || id == ".." {
+        return Err(invalid(format!("{id:?} is not an OpenAI {what} id")));
+    }
+    Ok(id)
+}
+
 /// The OpenAI file id of a provider reference.
 pub(super) fn file_id(reference: &BTreeMap<String, String>) -> Result<&str, Error> {
-    reference
+    let id = reference
         .get("openai")
-        .map(String::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| invalid("the file reference has no openai file id"))
+        .ok_or_else(|| invalid("the file reference has no openai file id"))?;
+    path_id("file", id)
 }
 
 fn time(seconds: &Value) -> Option<String> {
