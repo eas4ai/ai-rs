@@ -467,3 +467,149 @@ fn oai_002_an_unstored_call_asks_for_and_sends_encrypted_reasoning() {
         "{body}"
     );
 }
+
+/// A response whose reasoning item streams two summary parts: OpenAI sends
+/// an encrypted content at the item's start and the item's own at its end.
+fn reasoning_then_text() -> (u16, Vec<u8>) {
+    let summary = json!([{"type": "summary_text", "text": "first"}, {"type": "summary_text", "text": "second"}]);
+    responses_sse(&[
+        json!({"type": "response.created", "response": {"id": "resp_1", "model": "gpt-5.4", "status": "in_progress"}}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "early"}}),
+        json!({"type": "response.reasoning_summary_part.added", "item_id": "rs_1", "output_index": 0, "summary_index": 0}),
+        json!({"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 0, "summary_index": 0, "delta": "first"}),
+        json!({"type": "response.reasoning_summary_part.done", "item_id": "rs_1", "output_index": 0, "summary_index": 0}),
+        json!({"type": "response.reasoning_summary_part.added", "item_id": "rs_1", "output_index": 0, "summary_index": 1}),
+        json!({"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 0, "summary_index": 1, "delta": "second"}),
+        json!({"type": "response.reasoning_summary_part.done", "item_id": "rs_1", "output_index": 0, "summary_index": 1}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "summary": summary, "encrypted_content": "final"}}),
+        json!({"type": "response.output_item.added", "output_index": 1, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1, "delta": "answer"}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}}),
+        json!({"type": "response.completed", "response": {"id": "resp_1", "model": "gpt-5.4", "status": "completed", "output": [], "usage": {"input_tokens": 5, "output_tokens": 9}}}),
+    ])
+}
+
+#[tokio::test]
+async fn oai_002_unstored_reasoning_goes_back_with_its_items_final_content() {
+    for value in [Some(false), None] {
+        let transport = Recorder::new([reasoning_then_text(), text_reply()]);
+        let model = Model::new(
+            "gpt-5.4",
+            Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+        );
+        let mut handle = suprnova_ai::stream(&model, vec![user("hello")], store(value));
+        while let Some(event) = handle.next().await {
+            event.unwrap();
+        }
+        let history = vec![user("hello"), handle.message().clone(), user("again")];
+        let mut handle = suprnova_ai::stream(&model, history, store(value));
+        while let Some(event) = handle.next().await {
+            event.unwrap();
+        }
+        let body = transport.body(1);
+        let reasoning: Vec<_> = items(&body)
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .collect();
+        if value == Some(false) {
+            assert!(!body.to_string().contains("early"), "{body}");
+            assert_eq!(reasoning.len(), 1, "{body}");
+            assert_eq!(reasoning[0]["encrypted_content"], "final", "{body}");
+            assert_eq!(
+                reasoning[0]["summary"],
+                json!([{"type": "summary_text", "text": "first"}, {"type": "summary_text", "text": "second"}]),
+                "{body}"
+            );
+        } else {
+            assert!(reasoning.is_empty(), "{body}");
+            assert_eq!(references(&body, "rs_1"), 1, "{body}");
+            assert_eq!(references(&body, "msg_1"), 1, "{body}");
+        }
+    }
+}
+
+/// Assistant text with an item id and a `phase`, on its raw item or, as
+/// TypeScript keeps it, on the metadata.
+fn phased_text(text: &str, id: &str, phase: &str, on_raw: bool) -> Part {
+    let metadata = if on_raw {
+        json!({"item_id": id, "raw_item": {"id": id, "type": "message", "role": "assistant", "phase": phase, "content": [{"type": "output_text", "text": text}]}})
+    } else {
+        json!({"itemId": id, "phase": phase})
+    };
+    let mut part = TextPart::new(text);
+    part.provider_metadata = Some([("openai".to_owned(), metadata)].into());
+    Part::Text(part)
+}
+
+#[test]
+fn oai_002_text_in_full_is_one_message_per_part_with_its_phase() {
+    for on_raw in [true, false] {
+        for value in [None, Some(true), Some(false)] {
+            let parts = vec![
+                phased_text("working", "msg_c", "commentary", on_raw),
+                phased_text("done", "msg_f", "final_answer", on_raw),
+            ];
+            let body = body_for("gpt-5.3-codex", turn(parts), &store(value));
+            let input = items(&body);
+            assert_eq!(
+                &input[1..3],
+                &[
+                    json!({"role": "assistant", "content": "working", "phase": "commentary"}),
+                    json!({"role": "assistant", "content": "done", "phase": "final_answer"}),
+                ],
+                "raw {on_raw}, store {value:?}: {body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn oai_002_unstored_reasoning_parts_of_one_item_go_out_once() {
+    // Two parts of rs_1 without raw items are one item with both summaries.
+    let mut first = ReasoningPart::new("first");
+    first.provider_metadata = Some(
+        [(
+            "openai".to_owned(),
+            json!({"item_id": "rs_1", "reasoning_encrypted_content": "enc"}),
+        )]
+        .into(),
+    );
+    let mut second = first.clone();
+    second.text = "second".into();
+    let body = body_for(
+        "gpt-5.4",
+        turn(vec![
+            Part::Reasoning(first),
+            Part::Reasoning(second.clone()),
+        ]),
+        &store(Some(false)),
+    );
+    let reasoning: Vec<_> = items(&body)
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect();
+    assert_eq!(reasoning.len(), 1, "{body}");
+    assert_eq!(
+        reasoning[0]["summary"],
+        json!([{"type": "summary_text", "text": "first"}, {"type": "summary_text", "text": "second"}])
+    );
+    // A raw item already holds every summary, so a later part adds none.
+    let body = body_for(
+        "gpt-5.4",
+        turn(vec![
+            stored_reasoning("rs_1", "first", Some("enc")),
+            Part::Reasoning(second),
+        ]),
+        &store(Some(false)),
+    );
+    let reasoning: Vec<_> = items(&body)
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect();
+    assert_eq!(reasoning.len(), 1, "{body}");
+    assert_eq!(
+        reasoning[0]["summary"],
+        json!([{"type": "summary_text", "text": "first"}]),
+        "{body}"
+    );
+}

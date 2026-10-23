@@ -51,6 +51,18 @@ fn reject<T>(label: &str, value: &ProviderValue<Option<T>>, name: &str) -> Resul
     }
     Ok(())
 }
+/// Whether the call's provider parameters set `store` false: the history and
+/// the stream reader follow it (OAI-002).
+pub(super) fn unstored(p: &InferenceRequestParams, wire: Wire) -> bool {
+    let key = match wire {
+        Wire::Chat(profile) => profile.openai_params.then_some(OpenAIParams::KEY),
+        Wire::Responses(profile) => profile.params_key,
+    };
+    key.and_then(|key| p.provider_params.as_ref()?.get(key))
+        .and_then(|options| options.get("store"))
+        .and_then(Value::as_bool)
+        == Some(false)
+}
 pub(super) fn tool_choice(choice: &ToolChoice, wire: Wire) -> Result<Value, Error> {
     let responses = matches!(wire, Wire::Responses(_));
     let named = |name: String| {

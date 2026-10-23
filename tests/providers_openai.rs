@@ -639,10 +639,7 @@ async fn history_repair_store_false_shapes_and_calls_in_full() {
             assert_eq!(input[2], json!({"type":"item_reference","id":"msg_1"}));
         } else {
             assert_eq!(input[1], reasoning_raw);
-            assert_eq!(
-                input[2],
-                json!({"role":"assistant","content":[{"type":"output_text","text":"hello"}]})
-            );
+            assert_eq!(input[2], json!({"role":"assistant","content":"hello"}));
         }
     }
 }

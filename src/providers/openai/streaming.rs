@@ -124,6 +124,12 @@ struct Parser {
     reasoning: BTreeSet<String>,
     reasoning_delta: BTreeSet<String>,
     reasoning_ended: BTreeSet<String>,
+    /// Reasoning blocks whose summary part ended while their item goes on:
+    /// without stored responses they end with the item's final metadata.
+    reasoning_held: BTreeSet<String>,
+    /// Hold reasoning blocks to their item's end, as an unstored OpenAI
+    /// response needs (OAI-002).
+    hold_reasoning: bool,
     calls: BTreeMap<String, Call>,
     indices: BTreeMap<String, String>,
     /// Chat Completions tool calls in the order they started, and the slot
@@ -143,12 +149,16 @@ struct Parser {
     metadata: Option<Metadata>,
     image_type: String,
 }
+/// `hold_reasoning` keeps each reasoning block open until its item ends, so
+/// that every block carries the item's final encrypted content; an unstored
+/// OpenAI response needs it to send the reasoning back.
 pub(super) fn parse(
     body: Body,
     provider: String,
     wire: Wire,
     image_type: String,
     json_output: bool,
+    hold_reasoning: bool,
 ) -> EventStream {
     let api = wire.api();
     let state = Parser {
@@ -178,6 +188,8 @@ pub(super) fn parse(
         reasoning: BTreeSet::new(),
         reasoning_delta: BTreeSet::new(),
         reasoning_ended: BTreeSet::new(),
+        reasoning_held: BTreeSet::new(),
+        hold_reasoning,
         calls: BTreeMap::new(),
         indices: BTreeMap::new(),
         chat_calls: Vec::new(),
@@ -628,6 +640,7 @@ impl Parser {
             }
             "response.reasoning_summary_part.added" => {
                 let id = self.reasoning_id(data);
+                self.end_held_reasoning(string(data, "item_id"), &id);
                 if self.reasoning.insert(id.clone()) {
                     self.queue.push_back(block("reasoning_start", &id, None));
                 }
@@ -649,6 +662,14 @@ impl Parser {
             }
             // xAI's one block per item ends with its output item, which
             // carries the encrypted content after the summary ended.
+            // Without stored responses the item's final encrypted content
+            // comes with its output item, so the block stays open until then.
+            "response.reasoning_summary_part.done" if !self.xai() && self.hold_reasoning => {
+                let id = self.reasoning_id(data);
+                if self.reasoning.contains(&id) {
+                    self.reasoning_held.insert(id);
+                }
+            }
             "response.reasoning_summary_part.done" if !self.xai() => {
                 let id = self.reasoning_id(data);
                 if self.reasoning.remove(&id) {
@@ -677,6 +698,25 @@ impl Parser {
             _ => {}
         }
         Ok(())
+    }
+    /// End the held reasoning blocks of an item when its next summary part
+    /// starts, with the item id only: the item's last block ends with its
+    /// output item and carries its final metadata.
+    fn end_held_reasoning(&mut self, item_id: &str, next: &str) {
+        let prefix = format!("{item_id}:");
+        let held: Vec<_> = self
+            .reasoning_held
+            .iter()
+            .filter(|block| block.starts_with(&prefix) && block.as_str() != next)
+            .cloned()
+            .collect();
+        for block_id in held {
+            self.reasoning_held.remove(&block_id);
+            self.reasoning.remove(&block_id);
+            self.reasoning_ended.insert(block_id.clone());
+            let md = metadata(self.metadata_key, json!({ "item_id": item_id }));
+            self.queue.push_back(block("reasoning_end", &block_id, md));
+        }
     }
     fn xai(&self) -> bool {
         self.responses_profile
@@ -921,22 +961,26 @@ impl Parser {
                     }));
                 }
                 self.reasoning.remove(&block_id);
+                self.reasoning_held.remove(&block_id);
                 self.reasoning_ended.insert(block_id.clone());
                 self.queue
                     .push_back(block("reasoning_end", &block_id, md.clone()));
             }
-        } else {
-            let matching: Vec<_> = self
-                .reasoning
-                .iter()
-                .filter(|b| b.starts_with(&format!("{id}:")))
-                .cloned()
-                .collect();
-            for block_id in matching {
-                self.reasoning.remove(&block_id);
-                self.queue
-                    .push_back(block("reasoning_end", &block_id, md.clone()));
-            }
+        }
+        // Blocks of the item still open, a held one among them, end with the
+        // item's metadata.
+        let matching: Vec<_> = self
+            .reasoning
+            .iter()
+            .filter(|b| b.starts_with(&format!("{id}:")))
+            .cloned()
+            .collect();
+        for block_id in matching {
+            self.reasoning.remove(&block_id);
+            self.reasoning_held.remove(&block_id);
+            self.reasoning_ended.insert(block_id.clone());
+            self.queue
+                .push_back(block("reasoning_end", &block_id, md.clone()));
         }
     }
 }

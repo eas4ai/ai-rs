@@ -197,9 +197,12 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   full item.
 - On OpenAI's Responses API, stored text goes out as a reference only when the
   model is not a reasoning model or a reasoning item precedes the text in its
-  turn, and each stored item is referenced once. With `store` false, a
-  reasoning model is asked for encrypted reasoning, text goes out without its
-  item id and reasoning only with its encrypted content. Python references
+  turn, and each stored item is referenced once. Text that goes out in full
+  is one assistant message per part, with the `phase` of its item. With
+  `store` false, a reasoning model is asked for encrypted reasoning, the
+  stream holds each reasoning block open until its item ends so that the
+  block keeps the item's final encrypted content, text goes out without its
+  item id, and reasoning only with its encrypted content. Python references
   every stored part and replays raw items; TypeScript sends these shapes.
 - `OpenAICompatibleProvider::from_modelsdev_provider` selects Responses when the
   metadata names `@ai-sdk/openai`, not when the id is `openai`, and gives
