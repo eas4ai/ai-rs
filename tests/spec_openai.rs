@@ -4000,3 +4000,257 @@ async fn oai_022_a_skill_uploads_its_files_named_by_their_paths() {
     );
     assert_eq!(transport.requests.lock().unwrap().len(), 1);
 }
+
+// OAI-023
+
+fn text_request(id: &str, model: &str) -> suprnova_ai::providers::operations::BatchRequest {
+    suprnova_ai::providers::operations::BatchRequest {
+        id: id.into(),
+        model_id: model.into(),
+        kind: suprnova_ai::providers::operations::BatchRequestKind::Text {
+            messages: vec![user("hi")],
+            options: StreamOptions::default(),
+        },
+    }
+}
+fn batch_object(status: &str) -> Value {
+    json!({"id": "batch_1", "status": status, "output_file_id": "file-out", "error_file_id": "file-err",
+           "created_at": 1_800_000_000u64, "expires_at": 1_800_086_400u64,
+           "request_counts": {"total": 3, "completed": 1, "failed": 1},
+           "errors": {"data": [{"code": "bad_line", "message": "line 2"}]}})
+}
+
+#[tokio::test]
+async fn oai_023_a_batch_uploads_its_requests_and_creates_the_batch() {
+    use suprnova_ai::providers::operations::{BatchParams, BatchState};
+    let transport = Recorder::new([
+        json_reply(json!({"id": "file-in", "object": "file", "expires_at": 1_800_172_800u64})),
+        json_reply(batch_object("validating")),
+    ]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let started = suprnova_ai::ops::batch::start(
+        &provider,
+        vec![text_request("r1", "gpt-4.1"), text_request("r2", "gpt-4.1")],
+        BatchParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/files");
+    let sent = form(&transport, 0);
+    assert!(sent.contains(&field("purpose", "batch")), "{sent}");
+    assert!(
+        sent.contains(&field("expires_after[anchor]", "created_at")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains(&field("expires_after[seconds]", "172800")),
+        "{sent}"
+    );
+    let lines: Vec<Value> = sent
+        .lines()
+        .filter(|line| line.starts_with("{\"custom_id\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{sent}");
+    assert_eq!(lines[0]["custom_id"], "r1");
+    assert_eq!(lines[0]["method"], "POST");
+    assert_eq!(lines[0]["url"], "/v1/responses");
+    assert_eq!(lines[0]["body"]["model"], "gpt-4.1");
+    assert_eq!(lines[0]["body"].get("stream"), None);
+    assert_eq!(url(&transport, 1), "https://api.openai.com/v1/batches");
+    assert_eq!(
+        transport.body(1),
+        json!({"input_file_id": "file-in", "endpoint": "/v1/responses", "completion_window": "24h"})
+    );
+    assert_eq!(started.status.batch_id, "batch_1");
+    assert_eq!(started.status.state, BatchState::Pending);
+    let counts = started.status.request_counts.unwrap();
+    assert_eq!(
+        (
+            counts.total,
+            counts.pending,
+            counts.completed,
+            counts.failed
+        ),
+        (3, 1, 1, 1)
+    );
+    assert_eq!(started.status.error.as_ref().unwrap().message, "line 2");
+    assert_eq!(
+        started.status.provider_metadata.as_ref().unwrap()["openai"]["inputFileId"],
+        "file-in"
+    );
+}
+
+#[tokio::test]
+async fn oai_023_batches_with_other_requests_or_models_fail_before_a_request() {
+    use suprnova_ai::providers::operations::{
+        BatchParams, BatchRequest, BatchRequestKind, ImagePrompt,
+    };
+    let image = BatchRequest {
+        id: "r2".into(),
+        model_id: "gpt-4.1".into(),
+        kind: BatchRequestKind::Image {
+            prompt: ImagePrompt::default(),
+            params: Default::default(),
+        },
+    };
+    for (requests, params) in [
+        (
+            vec![text_request("r1", "gpt-4.1"), image],
+            BatchParams::default(),
+        ),
+        (
+            vec![text_request("r1", "gpt-4.1"), text_request("r2", "gpt-5.4")],
+            BatchParams::default(),
+        ),
+        (
+            vec![text_request("r1", "gpt-4.1")],
+            BatchParams {
+                provider_options: [("openai".to_owned(), json!({"inputFileExpiresAfter": 60}))]
+                    .into(),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let transport = Recorder::new([]);
+        let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+        let error = suprnova_ai::ops::batch::start(&provider, requests, params, Default::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn oai_023_statuses_cancels_and_lists_map_as_typescript_maps_them() {
+    use suprnova_ai::providers::operations::BatchState;
+    let transport = Recorder::new([
+        json_reply(batch_object("completed")),
+        json_reply(batch_object("expired")),
+        json_reply(batch_object("cancelling")),
+        json_reply(batch_object("cancelled")),
+        json_reply(
+            json!({"data": [batch_object("in_progress")], "has_more": true, "last_id": "batch_1"}),
+        ),
+        json_reply(json!({"data": [], "has_more": false, "last_id": null})),
+    ]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let state = |status: suprnova_ai::providers::operations::BatchStatus| status.state;
+    let none = || suprnova_ai::ops::OperationOptions::default();
+    assert_eq!(
+        state(
+            suprnova_ai::ops::batch::status(&provider, "batch_1", none())
+                .await
+                .unwrap()
+        ),
+        BatchState::Completed
+    );
+    assert_eq!(
+        state(
+            suprnova_ai::ops::batch::status(&provider, "batch_1", none())
+                .await
+                .unwrap()
+        ),
+        BatchState::Failed
+    );
+    assert_eq!(
+        state(
+            suprnova_ai::ops::batch::status(&provider, "batch_1", none())
+                .await
+                .unwrap()
+        ),
+        BatchState::Pending
+    );
+    assert_eq!(
+        url(&transport, 0),
+        "https://api.openai.com/v1/batches/batch_1"
+    );
+    suprnova_ai::ops::batch::cancel(&provider, "batch_1", none())
+        .await
+        .unwrap();
+    assert_eq!(
+        url(&transport, 3),
+        "https://api.openai.com/v1/batches/batch_1/cancel"
+    );
+    assert_eq!(transport.requests.lock().unwrap()[3].method, "POST");
+    let page = suprnova_ai::ops::batch::list(&provider, Some(5), Some("batch_0".into()), none())
+        .await
+        .unwrap();
+    assert_eq!(
+        url(&transport, 4),
+        "https://api.openai.com/v1/batches?after=batch_0&limit=5"
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("batch_1"));
+    assert_eq!(page.batches.len(), 1);
+    let page = suprnova_ai::ops::batch::list(&provider, None, None, none())
+        .await
+        .unwrap();
+    assert_eq!(page.next_cursor, None);
+}
+
+#[tokio::test]
+async fn oai_023_result_lines_give_each_outcome() {
+    use suprnova_ai::providers::operations::BatchOutcome;
+    let response = json!({"id": "resp_b", "model": "gpt-4.1", "status": "completed",
+        "output": [{"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "done", "annotations": []}]}],
+        "usage": {"input_tokens": 2, "output_tokens": 1}});
+    let output = [
+        json!({"custom_id": "ok", "response": {"status_code": 200, "body": response}}),
+        json!({"custom_id": "bad", "response": {"status_code": 400, "body": {"error": {"message": "nope", "type": "invalid_request_error", "code": "bad"}}}}),
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let errors = [
+        json!({"custom_id": "c", "error": {"code": "batch_cancelled", "message": "cancelled"}}),
+        json!({"custom_id": "e", "error": {"code": "batch_expired", "message": "expired"}}),
+        json!({"custom_id": "f", "error": {"code": "server_error", "message": "boom"}}),
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let transport = Recorder::new([
+        json_reply(batch_object("completed")),
+        (200, output.into_bytes()),
+        (200, errors.into_bytes()),
+    ]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let results: Vec<_> =
+        suprnova_ai::ops::batch::results(&provider, "batch_1", Default::default())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await;
+    assert_eq!(
+        url(&transport, 1),
+        "https://api.openai.com/v1/files/file-out/content"
+    );
+    assert_eq!(
+        url(&transport, 2),
+        "https://api.openai.com/v1/files/file-err/content"
+    );
+    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["ok", "bad", "c", "e", "f"]);
+    let BatchOutcome::Message(message) = &results[0].outcome else {
+        panic!("{:?}", results[0].outcome)
+    };
+    assert_eq!(message.text(), "done");
+    let BatchOutcome::Failed { error, .. } = &results[1].outcome else {
+        panic!("{:?}", results[1].outcome)
+    };
+    assert_eq!(
+        (error.message.as_str(), error.code.as_deref()),
+        ("nope", Some("bad"))
+    );
+    assert!(matches!(results[2].outcome, BatchOutcome::Cancelled { .. }));
+    assert!(matches!(results[3].outcome, BatchOutcome::Expired { .. }));
+    assert!(matches!(results[4].outcome, BatchOutcome::Failed { .. }));
+}
