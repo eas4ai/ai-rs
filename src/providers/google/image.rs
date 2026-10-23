@@ -115,11 +115,9 @@ pub(crate) fn request(
         Flavor::Gemini => google.remove("googleSearch"),
         Flavor::Vertex => None,
     };
-    if google.contains_key("responseModalities") {
-        return Err(Error::Validation(
-            "image generation sets responseModalities itself; leave it out of the options".into(),
-        ));
-    }
+    // An image call always asks for images, as `google-image-model.ts`
+    // replaces the option.
+    google.remove("responseModalities");
     let image_config = google.remove("imageConfig");
     // Check the rest against the language model options.
     let _: LanguageOptions = options::from_value(key, Value::Object(google.clone()))?;
