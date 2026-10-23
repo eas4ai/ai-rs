@@ -72,9 +72,19 @@ pub fn to_messages(
     let normalized = normalize_ui_messages(&validated);
     let responses = approvals::extract_approvals(&normalized);
     let mut messages = parse(&normalized, tools)?;
-    messages.retain(|message| !approvals::is_resolved_approval_message(message));
+    messages.retain(|message| {
+        !approvals::is_resolved_approval_message(message) || answers_provider(message)
+    });
     patch_deferred_hook_results(&mut messages, &responses);
     Ok((messages, responses))
+}
+
+/// The approval of a call the provider runs, such as OpenAI's MCP approval
+/// request. It stays in the history, because the provider takes the answer
+/// with the next request; no agent hook waits on it.
+fn answers_provider(message: &Message) -> bool {
+    matches!(message.parts.as_slice(), [Part::Hook(hook)]
+        if hook.metadata.get("providerExecuted").and_then(Value::as_bool) == Some(true))
 }
 
 fn string<'a>(part: &'a Value, key: &str) -> Result<&'a str, Error> {

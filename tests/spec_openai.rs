@@ -1672,7 +1672,11 @@ fn approval_turn(granted: bool) -> Vec<Message> {
         Message::new(
             MessageRole::Assistant,
             vec![
-                builtin_call("mcp.delete", "mcpr_1", json!({})),
+                builtin_call(
+                    "mcp.delete",
+                    "mcpr_1",
+                    json!({"raw_item": {"type": "mcp_approval_request", "id": "mcpr_1", "server_label": "crm", "name": "delete", "arguments": "{}"}}),
+                ),
                 Part::Hook(hook),
             ],
         ),
@@ -1704,6 +1708,53 @@ fn oai_008_an_answered_mcp_approval_goes_back_as_a_response() {
         [
             &json!({"type": "mcp_approval_response", "approval_request_id": "mcpr_1", "approve": false})
         ]
+    );
+}
+
+#[test]
+fn oai_008_an_mcp_request_is_referenced_only_before_its_response() {
+    let reference = json!({"type": "item_reference", "id": "mcpr_1"});
+    // OpenAI's previous response already holds the request.
+    let body = body_for(
+        "gpt-4.1",
+        approval_turn(true),
+        &openai(json!({"previousResponseId": "resp_0"})),
+    );
+    assert!(!items(&body).contains(&reference), "{body}");
+    // An unanswered request goes back as nothing.
+    let mut unanswered = approval_turn(true);
+    unanswered[1].parts.truncate(1);
+    unanswered.push(user("never mind"));
+    let body = body_for("gpt-4.1", unanswered, &StreamOptions::default());
+    assert!(!items(&body).contains(&reference), "{body}");
+}
+
+#[tokio::test]
+async fn oai_008_an_mcp_approval_answered_through_the_ui_adapter_reaches_openai() {
+    use suprnova_ai::ui::ai_sdk::{UIMessage, to_messages, to_ui_messages};
+    let request = json!({"type": "mcp_approval_request", "id": "mcpr_1", "server_label": "crm", "name": "delete", "arguments": "{}"});
+    let assistant = read(vec![added(0, request.clone()), done(0, request)], vec![]).await;
+    let mut ui =
+        serde_json::to_value(to_ui_messages(&[user("delete it"), assistant]).unwrap()).unwrap();
+    // The user approves the request in the UI.
+    let part = ui[1]["parts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|part| part["state"] == "approval-requested")
+        .expect("the UI shows the approval request");
+    part["state"] = json!("approval-responded");
+    part["approval"]["approved"] = json!(true);
+    let ui: Vec<UIMessage> = serde_json::from_value(ui).unwrap();
+    let (messages, _) = to_messages(&ui, None).unwrap();
+    let body = body_for("gpt-4.1", messages, &StreamOptions::default());
+    assert_eq!(
+        items(&body)[1..],
+        [
+            json!({"type": "item_reference", "id": "mcpr_1"}),
+            json!({"type": "mcp_approval_response", "approval_request_id": "mcpr_1", "approve": true}),
+        ],
+        "{body}"
     );
 }
 

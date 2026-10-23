@@ -374,17 +374,61 @@ fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
         _ => Ok(json!(serde_json::to_string(value)?)),
     }
 }
+/// The MCP approval requests of a history by request id: those of the
+/// requests' built-in calls and of the hooks that name one (OAI-008).
+fn mcp_requests(messages: &[Message]) -> BTreeSet<String> {
+    let mut requests = BTreeSet::new();
+    for part in messages.iter().flat_map(|m| &m.parts) {
+        let request = match part {
+            Part::BuiltinToolCall(_) => metadata(part, "openai")
+                .and_then(|md| md.get("raw_item"))
+                .filter(|raw| raw["type"] == "mcp_approval_request")
+                .and_then(|raw| {
+                    raw.get("approval_request_id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| raw["id"].as_str())
+                }),
+            Part::Hook(hook) => hook
+                .metadata
+                .get("openai")
+                .and_then(|md| md.get("approval_request_id"))
+                .and_then(Value::as_str),
+            _ => None,
+        };
+        if let Some(request) = request {
+            requests.insert(request.to_owned());
+        }
+    }
+    requests
+}
+
 /// The history without internal messages and hooks, with each unanswered
 /// tool call given an error result. `approvals` keeps the hooks of MCP
-/// approval requests, which OpenAI's Responses API answers (OAI-008).
-fn repair(messages: Vec<Message>, approvals: bool) -> Result<Vec<Message>, Error> {
+/// approval requests, which OpenAI's Responses API answers (OAI-008): those
+/// whose `openai` metadata names the request, and those named by a request
+/// id, such as the hook in an internal message that the UI adapter makes
+/// of an approval.
+fn repair(
+    messages: Vec<Message>,
+    approvals: bool,
+    requests: &BTreeSet<String>,
+) -> Result<Vec<Message>, Error> {
+    let answers = |hook: &HookPart| {
+        approvals && (hook.metadata.contains_key("openai") || requests.contains(&hook.hook_id))
+    };
     let mut cleaned = vec![];
     for mut msg in messages {
         if msg.role == MessageRole::Internal {
+            msg.parts
+                .retain(|p| matches!(p, Part::Hook(hook) if answers(hook)));
+            if !msg.parts.is_empty() {
+                cleaned.push(msg);
+            }
             continue;
         }
         msg.parts.retain(|p| match p {
-            Part::Hook(hook) => approvals && hook.metadata.contains_key("openai"),
+            Part::Hook(hook) => answers(hook),
             _ => true,
         });
         if msg.parts.is_empty() {
@@ -602,6 +646,11 @@ fn openai_assistant(
         }
         if let Part::Hook(hook) = p {
             approval_response(hook, history, parallel, out);
+            continue;
+        }
+        if let Part::BuiltinToolCall(_) = p
+            && id.is_some_and(|id| parallel.requests.contains(id))
+        {
             continue;
         }
         let raw = md
@@ -897,21 +946,27 @@ fn additional_tools(tools: &Value) -> Result<Value, Error> {
     Ok(json!({"type": "additional_tools", "role": "developer", "tools": list}))
 }
 
-/// A resolved `ToolApproval` hook of an MCP approval request, whose `openai`
-/// metadata names the request: an `mcp_approval_response`, once per request,
-/// after a reference to the stored request.
+/// A resolved `ToolApproval` hook of an MCP approval request, which its
+/// `openai` metadata or its hook id names: an `mcp_approval_response`, once
+/// per request, after a reference to the stored request. The request's own
+/// call goes back as nothing, as TypeScript gives it no item id.
 fn approval_response(
     hook: &HookPart,
     history: &History<'_>,
     parallel: &mut Parallel,
     out: &mut Vec<Value>,
 ) {
-    let Some(request) = hook
+    let named = hook
         .metadata
         .get("openai")
         .and_then(|md| md.get("approval_request_id"))
-        .and_then(Value::as_str)
-    else {
+        .and_then(Value::as_str);
+    let Some(request) = named.or_else(|| {
+        parallel
+            .requests
+            .contains(&hook.hook_id)
+            .then_some(hook.hook_id.as_str())
+    }) else {
         return;
     };
     if hook.hook_type != "ToolApproval"
@@ -951,6 +1006,8 @@ struct Parallel {
     results: BTreeMap<String, ToolResultPart>,
     emitted_calls: BTreeSet<String>,
     emitted_results: BTreeSet<String>,
+    /// The MCP approval requests of the history, and those answered.
+    requests: BTreeSet<String>,
     approvals: BTreeSet<String>,
 }
 
@@ -1144,8 +1201,10 @@ pub(super) fn convert(
         Wire::Responses(_) => "reasoning",
     };
     let dialect = dialect_of(wire);
-    let messages = repair(messages, openai_responses)?;
+    let requests = mcp_requests(&messages);
+    let messages = repair(messages, openai_responses, &requests)?;
     let mut parallel = Parallel::collect(&messages, &history);
+    parallel.requests = requests;
     let last = messages.len().saturating_sub(1);
     let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
     let mut out = vec![];
@@ -1376,7 +1435,14 @@ pub(super) fn convert(
                     }
                 }
             }
-            MessageRole::Internal => {}
+            // The hooks `repair` keeps: answers to MCP approval requests.
+            MessageRole::Internal => {
+                for p in &msg.parts {
+                    if let Part::Hook(hook) = p {
+                        approval_response(hook, &history, &mut parallel, &mut out);
+                    }
+                }
+            }
         }
     }
     if openai_responses {

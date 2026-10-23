@@ -381,6 +381,9 @@ fn assistant_bubble(messages: &[Message]) -> Result<(UIMessage, usize), Error> {
             MessageRole::Assistant => {
                 parts.extend(to_ui_parts(&current.parts)?);
                 parts = dedupe_tool_parts(parts);
+                // A provider's approval request, such as OpenAI's MCP one,
+                // is a hook in the assistant message that raised it.
+                merge_approval_signals(&mut parts, &current.parts);
             }
             MessageRole::Tool => merge_tool_results(&mut parts, &current.parts)?,
             MessageRole::Internal => merge_approval_signals(&mut parts, &current.parts),

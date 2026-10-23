@@ -49,7 +49,11 @@
 //! sockets of streaming audio and realtime sessions. The tools OpenAI leaves
 //! to the application (`local_shell`, `shell` with a local environment,
 //! `apply_patch`, `computer` and `custom`) arrive as tool calls; give an
-//! agent one with `AgentTool::with_provider_declaration`.
+//! agent one with `AgentTool::with_provider_declaration`. An MCP approval
+//! request arrives as a pending `ToolApproval` hook whose `hook_id` is the
+//! request id; a resolved hook of that id in a later message, such as the
+//! one the UI adapter makes of an answered approval, goes to OpenAI as the
+//! request's `mcp_approval_response`.
 mod batch;
 mod capabilities;
 mod chat;
