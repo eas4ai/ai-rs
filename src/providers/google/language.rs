@@ -59,9 +59,9 @@ impl Call {
         }
     }
 
-    /// Download the file URLs the API does not fetch, after checking the
-    /// request with each one standing in as empty bytes, so a call that
-    /// fails validation downloads nothing.
+    /// Download the user and tool result file URLs the API does not fetch,
+    /// after checking the request with each one standing in as empty bytes,
+    /// so a call that fails validation downloads nothing.
     pub(crate) async fn prepare(
         &self,
         messages: Vec<Message>,
@@ -70,13 +70,17 @@ impl Call {
     ) -> Result<(Prepared, Vec<Message>), Error> {
         let target = self.target();
         let downloads = self.downloads.as_deref();
-        if messages::has_downloads(&messages, target) {
-            request::build(
-                target,
-                &messages::without_downloads(&messages, target),
-                options,
-                streaming,
-            )?;
+        let user_files = messages::has_downloads(&messages, target)
+            .then(|| messages::without_downloads(&messages, target));
+        let stand_ins = match self.tool_result_limit {
+            Some(_) => {
+                let history = user_files.as_deref().unwrap_or(&messages);
+                tool_results::without_downloads(history, target).or(user_files)
+            }
+            None => user_files,
+        };
+        if let Some(stand_ins) = stand_ins {
+            request::build(target, &stand_ins, options, streaming)?;
         }
         let messages = messages::download_files(messages, target, downloads).await?;
         let messages = match self.tool_result_limit {

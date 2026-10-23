@@ -2053,3 +2053,28 @@ async fn vtx_015_only_image_urls_go_out_as_urls_and_usage_adds_reasoning() {
         (10, Some(4), 9, Some(3))
     );
 }
+
+#[tokio::test]
+async fn vtx_005_a_call_that_fails_validation_downloads_no_tool_result_file() {
+    let downloads =
+        Recorder::new([Reply::bytes(vec![1, 2, 3]).header("content-type", "image/png")]);
+    let transport = Recorder::new([text_reply("ok")]);
+    let model = with_downloads("gemini-2.5-flash", transport.clone(), downloads.clone());
+    let (_, events) = call(
+        &model,
+        tool_result_history("https://example.com/shot.png", "image/png"),
+        options_under("googleVertex", json!({"serviceTier": "flex"})),
+    )
+    .await;
+    assert!(
+        matches!(error(&events), Error::Validation(_)),
+        "{:?}",
+        error(&events)
+    );
+    assert_eq!(
+        downloads.count(),
+        0,
+        "a call that fails validation downloaded a file"
+    );
+    assert_eq!(transport.count(), 0);
+}
