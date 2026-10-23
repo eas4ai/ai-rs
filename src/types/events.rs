@@ -609,6 +609,27 @@ impl MessageHydrator {
     }
 
     pub fn feed(&mut self, mut event: Event) -> Result<Event, HydrationError> {
+        // A hook that a model stream raises, such as a provider's approval
+        // request, comes without a message: it belongs to the message the
+        // stream builds.
+        if let Event::Hook(value) = &mut event
+            && value.message.id == dummy_message().id
+        {
+            self.ensure_current_message();
+            let hook = value.hook.clone();
+            let existing = self
+                .message
+                .parts
+                .iter_mut()
+                .find(|part| matches!(part, Part::Hook(h) if h.hook_id == hook.hook_id));
+            match existing {
+                Some(part) => *part = Part::Hook(hook),
+                None => self.message.parts.push(Part::Hook(hook)),
+            }
+            self.sync_current_message();
+            value.message = self.message.clone();
+            return Ok(event);
+        }
         match &event {
             Event::ToolCallResult(value) => {
                 self.select_complete_message(value.message.clone());
