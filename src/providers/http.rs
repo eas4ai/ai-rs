@@ -34,6 +34,9 @@ pub(crate) struct ApiProfile {
     /// An error body `{"code": <text>, "error": <text>}` has the message
     /// `<code>: <error>`, as xAI's does.
     pub code_prefixes_error: bool,
+    /// Headers taken from the configuration's `env` values, as
+    /// `(env name, header name)`, sent when the value is set.
+    pub config_headers: &'static [(&'static str, &'static str)],
 }
 
 /// Where a request carries the API key.
@@ -47,7 +50,8 @@ pub(crate) enum Auth {
 
 /// Build a request to `path` under the configured base URL. Headers apply in
 /// this order, later ones replacing earlier ones: the defaults, the API key,
-/// the configured headers, then `extra_headers`. A query value that is an
+/// the headers the profile takes from the configuration's `env` values, the
+/// configured headers, then `extra_headers`. A query value that is an
 /// array becomes one pair per item.
 pub(crate) fn request(
     api: &ApiProfile,
@@ -121,6 +125,11 @@ pub(crate) fn request_to(
             Auth::Bearer => headers.insert("authorization".into(), format!("Bearer {key}")),
             Auth::Header(name) => headers.insert(name.into(), key.into()),
         };
+    }
+    for (env, name) in api.config_headers {
+        if let Some(value) = config.env.get(*env).filter(|value| !value.is_empty()) {
+            headers.insert(name.to_ascii_lowercase(), value.clone());
+        }
     }
     for (name, value) in config.headers.iter().chain(&extra_headers) {
         headers.insert(name.to_ascii_lowercase(), value.clone());

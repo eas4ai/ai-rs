@@ -11,6 +11,12 @@ pub(crate) const API: http::ApiProfile = http::ApiProfile {
     keep_error_object: true,
     top_level_first: false,
     code_prefixes_error: false,
+    // OpenAI's own SDKs read these names; the crate reads them from the
+    // configuration, never from the process environment.
+    config_headers: &[
+        ("OPENAI_ORG_ID", "OpenAI-Organization"),
+        ("OPENAI_PROJECT_ID", "OpenAI-Project"),
+    ],
 };
 
 /// Map a transport failure to a provider error that keeps it as the source.

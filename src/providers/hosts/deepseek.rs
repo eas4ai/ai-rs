@@ -31,6 +31,7 @@ static PROFILE: ChatProfile = ChatProfile {
         keep_error_object: false,
         top_level_first: false,
         code_prefixes_error: false,
+        config_headers: &[],
     },
     include_usage: true,
     max_tokens_field: "max_tokens",
