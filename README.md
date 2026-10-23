@@ -129,8 +129,11 @@ location from the `env` values `GOOGLE_VERTEX_PROJECT` and
 feature, google-cloud-auth `Credentials` or a service account in
 `GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY` and `GOOGLE_PRIVATE_KEY_ID`. A
 service account needs a process rustls crypto provider, such as
-`rustls::crypto::ring::default_provider().install_default()`; without one, a
-call fails with `Error::Configuration`. The Vertex auth headers go only to the
+`rustls::crypto::ring::default_provider().install_default()`. Without one, a
+call with the `env` service account fails with `Error::Configuration`, and
+google-cloud-auth panics when it signs with service-account `Credentials` the
+application built, unless another crate in the build turns on its
+`default-rustls-provider` feature. The Vertex auth headers go only to the
 base URL's host and `googleapis.com` hosts. `google_vertex::anthropic`,
 `google_vertex::maas` and `google_vertex::xai` add Claude, the open models and
 xAI on Vertex AI. `google::interactions::protocol()` and `agent_protocol()` run
