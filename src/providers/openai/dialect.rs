@@ -82,9 +82,32 @@ pub(super) fn responses_request(
     model: &str,
     body: &mut Map<String, Value>,
 ) {
-    if profile.dialect != ResponsesDialect::Xai {
-        return;
+    match profile.dialect {
+        ResponsesDialect::Xai => xai_request(model, body),
+        // An unstored response of a reasoning model needs its reasoning back
+        // as encrypted content (OAI-002).
+        ResponsesDialect::OpenAI => {
+            if body.get("store") == Some(&Value::Bool(false))
+                && super::profile::reasoning_model(model)
+            {
+                include(body, "reasoning.encrypted_content");
+            }
+        }
+        ResponsesDialect::HuggingFace => {}
     }
+}
+
+/// Add a value to the body's `include` list once.
+fn include(body: &mut Map<String, Value>, value: &str) {
+    let include = body.entry("include").or_insert_with(|| json!([]));
+    if let Some(include) = include.as_array_mut()
+        && !include.iter().any(|v| v == value)
+    {
+        include.push(json!(value));
+    }
+}
+
+fn xai_request(model: &str, body: &mut Map<String, Value>) {
     if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut)
         && let Some(effort) = reasoning.get("effort").and_then(Value::as_str)
     {
@@ -103,14 +126,7 @@ pub(super) fn responses_request(
         Some(Value::Bool(true)) => {
             body.remove("store");
         }
-        Some(Value::Bool(false)) => {
-            let include = body.entry("include").or_insert_with(|| json!([]));
-            if let Some(include) = include.as_array_mut()
-                && !include.iter().any(|v| v == "reasoning.encrypted_content")
-            {
-                include.push(json!("reasoning.encrypted_content"));
-            }
-        }
+        Some(Value::Bool(false)) => include(body, "reasoning.encrypted_content"),
         _ => {}
     }
 }

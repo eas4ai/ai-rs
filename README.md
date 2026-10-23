@@ -96,6 +96,14 @@ key and URL variables), so a changed snapshot cannot send the key to another hos
 and an endpoint change applies to snapshots saved before it. A snapshot of another
 provider class is refused.
 
+OpenAI's Responses API stores each response unless the `openai` provider
+parameter sets `{"store": false}`, and the history of a later call then refers to
+stored reasoning and text by their item ids. OpenAI deletes stored items after a
+while (30 days by default, by community reports), so a chat that resumes after
+that needs `store` false: the crate then asks a reasoning model for its reasoning
+as encrypted content and sends history in full. Tool calls always go back in
+full, so each tool result pairs with its call.
+
 `providers::hosts` has Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral,
 Moonshot AI, Together AI and Z.ai on Chat Completions, xAI and Hugging Face on
 the Responses API, and MiniMax on the Anthropic Messages protocol. Register one with its module's `register`, for

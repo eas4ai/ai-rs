@@ -214,7 +214,12 @@ async fn responses_params_and_structured_output() {
         b["context_management"],
         json!([{"type":"compaction","compact_threshold":120000}])
     );
-    assert_eq!(b["include"], json!(["file_search_call.results"]));
+    // An unstored call to a reasoning model asks for its reasoning back as
+    // encrypted content (OAI-002).
+    assert_eq!(
+        b["include"],
+        json!(["file_search_call.results", "reasoning.encrypted_content"])
+    );
     assert_eq!(b["store"], false);
     assert_eq!(b["future_option"], true);
     assert_eq!(b["text"]["verbosity"], "low");
@@ -516,7 +521,7 @@ async fn finish_reason_normalization() {
 }
 
 #[tokio::test]
-async fn history_repair_store_false_replay_and_calls_in_full() {
+async fn history_repair_store_false_shapes_and_calls_in_full() {
     for chat in [false, true] {
         let fake = Scripted::sse(vec![]);
         let messages = vec![
@@ -585,7 +590,9 @@ async fn history_repair_store_false_replay_and_calls_in_full() {
         );
     }
     // Reasoning and text with an item id go out as references when responses
-    // are stored, and as their raw items when they are not.
+    // are stored. When they are not, the reasoning goes out as its raw item,
+    // which holds its encrypted content, and the text without its id
+    // (OAI-002).
     let reasoning_raw = json!({"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"enc"});
     let text_raw = json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]});
     for store in [false, true] {
@@ -632,7 +639,10 @@ async fn history_repair_store_false_replay_and_calls_in_full() {
             assert_eq!(input[2], json!({"type":"item_reference","id":"msg_1"}));
         } else {
             assert_eq!(input[1], reasoning_raw);
-            assert_eq!(input[2], text_raw);
+            assert_eq!(
+                input[2],
+                json!({"role":"assistant","content":[{"type":"output_text","text":"hello"}]})
+            );
         }
     }
 }

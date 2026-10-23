@@ -195,6 +195,12 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   `function_call_output` pairs with it by `call_id`. Python sends a reference
   when `store` is not false and the raw item when it is; TypeScript sends the
   full item.
+- On OpenAI's Responses API, stored text goes out as a reference only when the
+  model is not a reasoning model or a reasoning item precedes the text in its
+  turn, and each stored item is referenced once. With `store` false, a
+  reasoning model is asked for encrypted reasoning, text goes out without its
+  item id and reasoning only with its encrypted content. Python references
+  every stored part and replays raw items; TypeScript sends these shapes.
 - `OpenAICompatibleProvider::from_modelsdev_provider` selects Responses when the
   metadata names `@ai-sdk/openai`, not when the id is `openai`, and gives
   metadata for a Chat Completions host of `providers::hosts`, by package or id,
@@ -292,7 +298,7 @@ rules follow the source.
 | `docs/spec/google.md` (no Python source) | `tests/spec_google.rs` | GGL-001 to GGL-032: the Gemini API's language model, options, tools, history, responses, errors, embeddings, images, speech, transcription, live transcription and translation, Veo, files, batches, realtime, Interactions, evaluation and size limits |
 | `docs/spec/vertex.md` (no Python source) | `tests/spec_vertex.rs` | VTX-001 to VTX-015: Vertex AI endpoints, Express Mode, auth, the Gemini differences, streamed arguments, tool result downloads, embeddings, images, video, Chirp, Cloud Speech-to-Text, Gemini transcription, Interactions and the Anthropic, MaaS and xAI partner models |
 | `docs/spec/operations.md` (no Python source) | `tests/spec_operations.rs` | OPS-001 to OPS-011: front-end pass-through and retries, embedding runs, image and video batches, video jobs, uploads, batches, streaming transcription and translation, realtime connections, the WebSocket transport and the evaluation adapter |
-| `docs/spec/openai.md` (no Python source) | `tests/spec_openai.rs` | OAI-001: tool calls in Responses history, under every `store` setting, with namespaces and parallel calls |
+| `docs/spec/openai.md` (no Python source) | `tests/spec_openai.rs` | OAI-001 and OAI-002: tool calls, text and reasoning in Responses history under every `store` setting, namespaces, parallel calls, reasoning models and encrypted reasoning |
 | `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-025: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort, the DeepSeek, Moonshot AI and Mistral dialects, tool calls without an index, stream error kinds, the xAI and Hugging Face Responses rules, Responses errors and terminal events |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
