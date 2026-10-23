@@ -2735,6 +2735,31 @@ async fn ggl_022_pending_results_and_long_lines_fail() {
     }
 }
 
+#[tokio::test]
+async fn ggl_022_a_long_result_line_in_small_chunks_reads_in_linear_time() {
+    let mut done = operation("BATCH_STATE_SUCCEEDED");
+    done["metadata"]["output"] = json!({"responsesFile": "files/long"});
+    let image = "A".repeat(8 * 1024 * 1024);
+    let line = json!({"key": "i", "response": {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": image}}]}, "finishReason": "STOP"}]}});
+    let file = format!("{line}\n").into_bytes();
+    let transport = Recorder::with_chunks([Reply::json(done), Reply::bytes(file)], 1024);
+    let provider = google_provider(transport);
+    let started = std::time::Instant::now();
+    let results: Vec<BatchResult> =
+        ops::batch::results(provider.as_ref(), "batches/b1", Default::default())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await;
+    let elapsed = started.elapsed();
+    assert_eq!(results.len(), 1);
+    // A search from the start of the buffer after each 1 KiB chunk scans
+    // about 32 billion bytes for this line; a linear reader takes well under
+    // a second.
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
 // GGL-023
 
 #[tokio::test]
