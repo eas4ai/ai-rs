@@ -235,6 +235,11 @@ pub fn register_factories(
     registry.register_protocol_factory("openai_chat_completions", |_| {
         Ok(Arc::new(super::OpenAIChatCompletionsProtocol))
     })?;
+    for class in ["openai_embedding", "openai_compatible_embedding"] {
+        registry.register_protocol_factory(class, |value| {
+            Ok(Arc::new(super::embedding::restore(&value)))
+        })?;
+    }
     for class in ["openai_completions", "openai_compatible_completions"] {
         registry.register_protocol_factory(class, |value| {
             Ok(Arc::new(super::completions::restore(&value)))

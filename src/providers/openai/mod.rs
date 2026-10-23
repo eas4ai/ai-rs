@@ -31,6 +31,7 @@ mod capabilities;
 mod chat;
 mod completions;
 mod dialect;
+mod embedding;
 pub mod errors;
 mod messages;
 mod options;
@@ -42,6 +43,7 @@ mod responses;
 mod streaming;
 pub mod tools;
 pub use completions::OpenAICompletionsProtocol;
+pub use embedding::OpenAIEmbeddingProtocol;
 pub use params::OpenAIParams;
 // Kept for callers of the old name-based choice; it is deprecated.
 #[allow(deprecated)]
