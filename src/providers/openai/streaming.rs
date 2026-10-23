@@ -240,6 +240,20 @@ pub(super) fn parse(
                         let kinds = p.chat.is_none_or(|c| c.stream_error_kinds);
                         return Err(dialect::stream_error(kinds, p.api, &p.provider, &data));
                     }
+                    // A server that answers the Responses API with Chat
+                    // Completions chunks serves the other API (OAI-012).
+                    if !p.started
+                        && p.openai_responses()
+                        && data["choices"].is_array()
+                        && !data["type"].is_string()
+                    {
+                        return Err(crate::errors::ProviderError::new(
+                            crate::errors::ProviderErrorKind::Response,
+                            "received a Chat Completions stream from the OpenAI Responses API: the base URL serves Chat Completions; build the provider with_protocol(OpenAIChatCompletionsProtocol) for it",
+                        )
+                        .with_provider(&p.provider)
+                        .into());
+                    }
                     p.start();
                     if p.responses {
                         p.response(&data)?;

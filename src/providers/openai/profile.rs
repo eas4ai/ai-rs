@@ -168,6 +168,8 @@ pub(crate) static OPENAI_RESPONSES: ResponsesProfile = ResponsesProfile {
 /// OpenAI's own Chat Completions.
 pub(crate) static OPENAI: ChatProfile = ChatProfile {
     openai_own: true,
+    // HST-018's rules, as a Responses stream has them (OAI-012).
+    stream_error_kinds: true,
     ..COMPATIBLE_RULES
 };
 
