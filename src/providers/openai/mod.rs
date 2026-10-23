@@ -27,6 +27,7 @@
 //! these protocols implement `Provider::shared_transport` for owned streams.
 //! `params::OpenAIParams::apply` stores options under the stable `openai` key.
 //! Built-in tool arguments use snake_case JSON objects, as in the Python wire format.
+mod batch;
 mod capabilities;
 mod chat;
 mod completions;
