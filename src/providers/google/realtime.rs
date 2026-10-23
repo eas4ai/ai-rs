@@ -740,10 +740,10 @@ mod tests {
 
     #[test]
     fn times_round_trip_through_iso_text() {
-        let time = UNIX_EPOCH + Duration::from_millis(1_792_740_600_123);
+        let time = UNIX_EPOCH + Duration::from_millis(1_792_733_400_123);
         let text = iso_time(time);
         assert_eq!(text, "2026-10-23T05:30:00.123Z");
-        assert_eq!(parse_iso_seconds(&text), Some(1_792_740_600));
+        assert_eq!(parse_iso_seconds(&text), Some(1_792_733_400));
         assert_eq!(iso_time(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
         assert_eq!(
             parse_iso_seconds("2024-02-29T12:00:00Z"),
