@@ -3651,6 +3651,44 @@ async fn ggl_026_a_configured_revision_is_kept() {
     assert_revision(&transport.request(), "2026-01-01");
 }
 
+#[tokio::test(start_paused = true)]
+async fn ggl_026_call_headers_and_query_go_on_every_request() {
+    let transport = Recorder::new([in_progress(), done_reply()]);
+    let params = InferenceRequestParams {
+        extra_headers: Some(
+            [
+                ("X-Trace".to_owned(), ExtraHeaderValue::Value("t1".into())),
+                (
+                    "API-REVISION".to_owned(),
+                    ExtraHeaderValue::Value("2026-02-02".into()),
+                ),
+            ]
+            .into(),
+        ),
+        extra_query: Some([("trace".to_owned(), json!("q1"))].into()),
+        ..Default::default()
+    };
+    let options = StreamOptions {
+        params: Some(params),
+        ..Default::default()
+    };
+    suprnova_ai::generate(&on_agent(AGENT, transport.clone()), hi(), options)
+        .await
+        .unwrap();
+    let requests = transport.all();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(
+            header(request, "x-trace").as_deref(),
+            Some("t1"),
+            "{}",
+            request.url
+        );
+        assert_revision(request, "2026-02-02");
+        assert!(request.url.contains("trace=q1"), "{}", request.url);
+    }
+}
+
 // GGL-027
 
 fn google_meta_of(fields: Value) -> Option<suprnova_ai::types::messages::Metadata> {

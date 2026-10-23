@@ -56,7 +56,10 @@ use super::{
 use crate::{
     Error, Model, Provider, ProviderProtocol, StreamOptions,
     errors::{ProviderError, ProviderErrorKind},
-    models::call::require_timer,
+    models::{
+        call::require_timer,
+        params::{ExtraHeaderValue, InferenceRequestParams},
+    },
     providers::{
         EventStream,
         http::{self, SseJson},
@@ -101,16 +104,21 @@ pub(crate) fn restore(value: &Value) -> Arc<dyn ProviderProtocol> {
     })
 }
 
-/// What an Interactions call needs: the endpoint at the Interactions base
-/// and the headers every request adds.
+/// What an Interactions call needs: the endpoint at the Interactions base,
+/// and the headers and query every request of the call adds, the call's
+/// own included, as TypeScript sends its call headers on each request.
 #[derive(Clone)]
 struct Ctx {
     endpoint: Endpoint,
     headers: BTreeMap<String, String>,
+    query: BTreeMap<String, Value>,
 }
 
 impl Ctx {
-    fn new(provider: &dyn Provider) -> Result<Self, Error> {
+    fn new(
+        provider: &dyn Provider,
+        params: Option<&InferenceRequestParams>,
+    ) -> Result<Self, Error> {
         let flavor = if provider.provider_class_id() == "google-vertex" {
             Flavor::Vertex
         } else {
@@ -135,7 +143,19 @@ impl Ctx {
         if !has_header(&endpoint.config.headers, "api-revision") {
             headers.insert("Api-Revision".to_owned(), API_REVISION.to_owned());
         }
-        Ok(Self { endpoint, headers })
+        let params = params.cloned().unwrap_or_default();
+        for (name, value) in params.extra_headers.into_iter().flatten() {
+            if let ExtraHeaderValue::Value(value) = value {
+                headers.retain(|existing, _| !existing.eq_ignore_ascii_case(&name));
+                headers.insert(name, value);
+            }
+        }
+        let query = params.extra_query.unwrap_or_default();
+        Ok(Self {
+            endpoint,
+            headers,
+            query,
+        })
     }
 
     fn request(
@@ -148,9 +168,12 @@ impl Ctx {
     ) -> Result<HttpRequest, Error> {
         let mut headers = self.headers.clone();
         if let Some(accept) = accept {
+            headers.retain(|existing, _| !existing.eq_ignore_ascii_case("accept"));
             headers.insert("accept".into(), accept.into());
         }
-        self.endpoint.request(method, &path, body, headers, query)
+        let mut all = self.query.clone();
+        all.extend(query);
+        self.endpoint.request(method, &path, body, headers, all)
     }
 
     fn interaction_path(id: &str) -> Vec<String> {
@@ -290,7 +313,7 @@ impl InteractionsProtocol {
         options: &StreamOptions,
         provider: &dyn Provider,
     ) -> Result<Message, Error> {
-        let ctx = Ctx::new(provider)?;
+        let ctx = Ctx::new(provider, options.params.as_ref())?;
         let built = request::build(
             ctx.endpoint.flavor,
             &model.id,
@@ -497,7 +520,7 @@ impl ProviderProtocol for InteractionsProtocol {
         options: StreamOptions,
         provider: &dyn Provider,
     ) -> EventStream {
-        let ctx = match Ctx::new(provider) {
+        let ctx = match Ctx::new(provider, options.params.as_ref()) {
             Ok(ctx) => ctx,
             Err(error) => return futures_stream::once(async { Err(error) }).boxed(),
         };
