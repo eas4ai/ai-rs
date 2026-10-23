@@ -32,13 +32,26 @@ use suprnova_ai::{
 struct Recorder {
     requests: Mutex<Vec<HttpRequest>>,
     replies: Mutex<VecDeque<(u16, Vec<u8>)>>,
+    /// Response headers of the reply to the request of each index.
+    headers: Mutex<std::collections::BTreeMap<usize, Vec<(String, String)>>>,
 }
 impl Recorder {
     fn new(replies: impl IntoIterator<Item = (u16, Vec<u8>)>) -> Arc<Self> {
         Arc::new(Self {
             requests: Mutex::default(),
             replies: Mutex::new(replies.into_iter().collect()),
+            headers: Mutex::default(),
         })
+    }
+    /// Answer the request of this index with these headers.
+    fn reply_headers(&self, index: usize, headers: &[(&str, &str)]) {
+        self.headers.lock().unwrap().insert(
+            index,
+            headers
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        );
     }
     fn body(&self, index: usize) -> Value {
         serde_json::from_slice(&self.requests.lock().unwrap()[index].body).unwrap()
@@ -46,7 +59,17 @@ impl Recorder {
 }
 impl HttpTransport for Recorder {
     fn send(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
-        self.requests.lock().unwrap().push(request);
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            requests.len() - 1
+        };
+        let headers = self
+            .headers
+            .lock()
+            .unwrap()
+            .remove(&index)
+            .unwrap_or_default();
         let reply = self.replies.lock().unwrap().pop_front();
         Box::pin(async move {
             let (status, bytes) =
@@ -57,7 +80,7 @@ impl HttpTransport for Recorder {
                 .collect();
             Ok(HttpResponse {
                 status,
-                headers: vec![],
+                headers,
                 body: stream::iter(chunks).boxed(),
             })
         })
@@ -3791,4 +3814,124 @@ async fn oai_020_settings_the_sockets_do_not_take_fail_before_connecting() {
         );
     }
     assert!(socket.requests.lock().unwrap().is_empty());
+}
+
+// OAI-021
+
+fn file_object() -> Value {
+    json!({"id": "file-1", "object": "file", "bytes": 4, "created_at": 1_800_000_000u64, "expires_at": 1_800_003_600u64,
+           "filename": "r.pdf", "purpose": "assistants", "status": "processed"})
+}
+fn json_reply(value: Value) -> (u16, Vec<u8>) {
+    (200, value.to_string().into_bytes())
+}
+fn openai_reference() -> std::collections::BTreeMap<String, String> {
+    [("openai".to_owned(), "file-1".to_owned())].into()
+}
+
+#[tokio::test]
+async fn oai_021_files_are_uploaded_read_downloaded_and_deleted() {
+    use suprnova_ai::providers::operations::{UploadFile, UploadParams};
+    let transport = Recorder::new([
+        json_reply(file_object()),
+        json_reply(file_object()),
+        (200, b"%PDF".to_vec()),
+        json_reply(json!({"id": "file-1", "object": "file", "deleted": true})),
+    ]);
+    transport.reply_headers(2, &[("content-type", "application/pdf; charset=binary")]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let file = UploadFile {
+        data: Bytes::from_static(b"%PDF"),
+        media_type: "application/pdf".into(),
+        filename: Some("r.pdf".into()),
+    };
+    let params = UploadParams {
+        provider_options: [("openai".to_owned(), json!({"expiresAfter": 3600}))].into(),
+    };
+    let uploaded = suprnova_ai::ops::upload_file(&provider, file, params, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/files");
+    let sent = form(&transport, 0);
+    assert!(sent.contains(&field("purpose", "assistants")), "{sent}");
+    assert!(
+        sent.contains(&field("expires_after[anchor]", "created_at")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains(&field("expires_after[seconds]", "3600")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains(
+            "name=\"file\"; filename=\"r.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF"
+        ),
+        "{sent}"
+    );
+    let value = &uploaded.value;
+    assert_eq!(value.provider_reference, openai_reference());
+    assert_eq!(value.media_type, None);
+    assert_eq!(value.filename.as_deref(), Some("r.pdf"));
+    assert_eq!(value.size_bytes, Some(4));
+    assert_eq!(
+        value.created_at.as_deref(),
+        Some("2027-01-15T08:00:00.000Z")
+    );
+    assert_eq!(
+        value.expires_at.as_deref(),
+        Some("2027-01-15T09:00:00.000Z")
+    );
+    let md = &uploaded.provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(
+        (md["purpose"].clone(), md["status"].clone()),
+        (json!("assistants"), json!("processed"))
+    );
+    let info = suprnova_ai::ops::file_info(&provider, &openai_reference(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(url(&transport, 1), "https://api.openai.com/v1/files/file-1");
+    assert_eq!(info.value.filename.as_deref(), Some("r.pdf"));
+    let downloaded =
+        suprnova_ai::ops::download_file(&provider, &openai_reference(), Default::default())
+            .await
+            .unwrap();
+    assert_eq!(
+        url(&transport, 2),
+        "https://api.openai.com/v1/files/file-1/content"
+    );
+    assert_eq!(downloaded.value.data, Bytes::from_static(b"%PDF"));
+    assert_eq!(
+        downloaded.value.media_type.as_deref(),
+        Some("application/pdf")
+    );
+    let deleted = suprnova_ai::ops::delete_file(&provider, &openai_reference(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(transport.requests.lock().unwrap()[3].method, "DELETE");
+    assert!(deleted.value);
+}
+
+#[tokio::test]
+async fn oai_021_a_reference_without_an_openai_id_fails_before_a_request() {
+    let transport = Recorder::new([]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let reference: std::collections::BTreeMap<String, String> =
+        [("google".to_owned(), "files/x".to_owned())].into();
+    for error in [
+        suprnova_ai::ops::file_info(&provider, &reference, Default::default())
+            .await
+            .err(),
+        suprnova_ai::ops::download_file(&provider, &reference, Default::default())
+            .await
+            .err(),
+        suprnova_ai::ops::delete_file(&provider, &reference, Default::default())
+            .await
+            .err(),
+    ] {
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::Validation(_))),
+            "{error:?}"
+        );
+    }
+    assert!(transport.requests.lock().unwrap().is_empty());
 }

@@ -613,6 +613,44 @@ impl Provider for Host {
         }))
     }
 
+    async fn file_info(
+        &self,
+        reference: &BTreeMap<String, String>,
+    ) -> Result<Item<UploadedFile>, Error> {
+        self.script.begin("file_info", json!(reference))?;
+        Ok(Item::new(UploadedFile {
+            provider_reference: reference.clone(),
+            filename: Some("r.pdf".into()),
+            ..Default::default()
+        }))
+    }
+
+    async fn download_file(
+        &self,
+        reference: &BTreeMap<String, String>,
+        max_bytes: usize,
+    ) -> Result<Item<DownloadedFile>, Error> {
+        self.script.begin(
+            "download_file",
+            json!({"reference": reference, "max_bytes": max_bytes}),
+        )?;
+        // A reference to `large` holds one byte over the limit.
+        let size = if reference.values().any(|id| id == "large") {
+            max_bytes + 1
+        } else {
+            4
+        };
+        Ok(Item::new(DownloadedFile {
+            data: bytes::Bytes::from(vec![0; size]),
+            media_type: Some("application/pdf".into()),
+        }))
+    }
+
+    async fn delete_file(&self, reference: &BTreeMap<String, String>) -> Result<Item<bool>, Error> {
+        self.script.begin("delete_file", json!(reference))?;
+        Ok(Item::new(true))
+    }
+
     async fn batch_start(
         &self,
         requests: Vec<BatchRequest>,
@@ -2173,4 +2211,112 @@ async fn ops_011_answers_out_of_bounds_fail_as_a_response_error() {
             other => panic!("{answer} {finish}: expected a response error, got {other:?}"),
         }
     }
+}
+
+// OPS-012
+
+/// A provider with no files operation, which records any request.
+struct Bare(ProviderConfig, Arc<Recorder>);
+
+#[async_trait]
+impl Provider for Bare {
+    fn name(&self) -> &str {
+        "bare"
+    }
+    fn config(&self) -> &ProviderConfig {
+        &self.0
+    }
+    fn transport(&self) -> Option<&dyn suprnova_ai::transport::HttpTransport> {
+        Some(self.1.as_ref())
+    }
+}
+
+#[tokio::test]
+async fn ops_012_files_are_read_downloaded_and_deleted_by_reference() {
+    let script = Script::new(unlimited());
+    let host = host_with(script.clone(), script.clone(), None);
+    let reference: BTreeMap<String, String> =
+        [("scripted".to_owned(), "files/f1".to_owned())].into();
+    let info = ops::file_info(host.as_ref(), &reference, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        script.calls("file_info"),
+        vec![json!({"scripted": "files/f1"})]
+    );
+    assert_eq!(info.value.filename.as_deref(), Some("r.pdf"));
+    assert_eq!(info.value.provider_reference, reference);
+    let downloaded = ops::download_file(host.as_ref(), &reference, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        script.calls("download_file"),
+        vec![json!({"reference": {"scripted": "files/f1"}, "max_bytes": MAX_DOWNLOAD_BYTES})]
+    );
+    assert_eq!(MAX_DOWNLOAD_BYTES, 256 * 1024 * 1024);
+    assert_eq!(downloaded.value.data.len(), 4);
+    assert_eq!(
+        downloaded.value.media_type.as_deref(),
+        Some("application/pdf")
+    );
+    let deleted = ops::delete_file(host.as_ref(), &reference, Default::default())
+        .await
+        .unwrap();
+    assert!(deleted.value);
+    assert_eq!(
+        script.calls("delete_file"),
+        vec![json!({"scripted": "files/f1"})]
+    );
+}
+
+#[tokio::test]
+async fn ops_012_a_download_over_256_mib_is_refused() {
+    let script = Script::new(unlimited());
+    let host = host_with(script.clone(), script.clone(), None);
+    let reference: BTreeMap<String, String> = [("scripted".to_owned(), "large".to_owned())].into();
+    let error = ops::download_file(host.as_ref(), &reference, Default::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn ops_012_file_operations_retry_and_need_the_provider_operation() {
+    let script = Script::new(unlimited());
+    script.fail_with(&[503]);
+    let host = host_with(script.clone(), script.clone(), None);
+    let reference: BTreeMap<String, String> =
+        [("scripted".to_owned(), "files/f1".to_owned())].into();
+    ops::delete_file(host.as_ref(), &reference, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(script.calls("delete_file").len(), 2);
+    let recorder = Recorder::new([]);
+    let bare = Bare(ProviderConfig::default(), recorder.clone());
+    for (operation, error) in [
+        (
+            "file_info",
+            ops::file_info(&bare, &reference, Default::default())
+                .await
+                .err(),
+        ),
+        (
+            "download_file",
+            ops::download_file(&bare, &reference, Default::default())
+                .await
+                .err(),
+        ),
+        (
+            "delete_file",
+            ops::delete_file(&bare, &reference, Default::default())
+                .await
+                .err(),
+        ),
+    ] {
+        assert!(
+            matches!(&error, Some(Error::UnsupportedOperation(name)) if name == operation),
+            "{error:?}"
+        );
+    }
+    assert!(recorder.requests.lock().unwrap().is_empty());
 }

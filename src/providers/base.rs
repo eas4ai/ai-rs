@@ -556,6 +556,32 @@ pub trait Provider: Send + Sync + AsProvider {
         Err(unsupported("upload_file"))
     }
 
+    /// A file's metadata, by the provider reference its upload returned.
+    async fn file_info(
+        &self,
+        _reference: &BTreeMap<String, String>,
+    ) -> Result<Item<UploadedFile>, Error> {
+        Err(unsupported("file_info"))
+    }
+
+    /// A file's bytes, by its provider reference, reading at most
+    /// `max_bytes`.
+    async fn download_file(
+        &self,
+        _reference: &BTreeMap<String, String>,
+        _max_bytes: usize,
+    ) -> Result<Item<DownloadedFile>, Error> {
+        Err(unsupported("download_file"))
+    }
+
+    /// Delete a file by its provider reference; whether the provider deleted it.
+    async fn delete_file(
+        &self,
+        _reference: &BTreeMap<String, String>,
+    ) -> Result<Item<bool>, Error> {
+        Err(unsupported("delete_file"))
+    }
+
     async fn batch_start(
         &self,
         _requests: Vec<BatchRequest>,

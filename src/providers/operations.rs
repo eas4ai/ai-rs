@@ -372,6 +372,17 @@ pub struct UploadedFile {
     pub expires_at: Option<String>,
 }
 
+/// A file's bytes, as a provider's files operation downloads them, and the
+/// media type it reports (OPS-012).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DownloadedFile {
+    pub data: bytes::Bytes,
+    pub media_type: Option<String>,
+}
+
+/// The most bytes `ops::download_file` reads: 256 MiB.
+pub const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
+
 /// One request of a batch.
 #[derive(Clone, Debug)]
 pub struct BatchRequest {
