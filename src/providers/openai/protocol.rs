@@ -579,14 +579,14 @@ pub(crate) fn wire_request(
                     json!({"type":"json_schema","name":name,"schema":schema,"strict":false});
             }
             Wire::Responses(_) => {
-                let schema = strict_output_schema(schema)?;
+                let schema = strict_output_schema(schema, call.is_some().then_some(model))?;
                 let strict = call.as_ref().is_none_or(responses::Call::strict);
                 let text = body.entry("text").or_insert_with(|| json!({}));
                 text["format"] =
                     json!({"type":"json_schema","name":name,"schema":schema,"strict":strict});
             }
             Wire::Chat(profile) if profile.sends_json_schema(model) => {
-                let schema = strict_output_schema(schema)?;
+                let schema = strict_output_schema(schema, chat_call.is_some().then_some(model))?;
                 let strict = chat_call.as_ref().is_none_or(chat::ChatCall::strict);
                 body.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":name,"schema":schema,"strict":strict}}));
             }
@@ -696,8 +696,13 @@ pub(super) fn http_request(
         .unwrap_or_default();
     http::request(api, config, method, path, body, headers, query)
 }
-fn strict_output_schema(schema: &schemars::Schema) -> Result<Value, Error> {
+/// The output schema in the crate's strict form; for OpenAI's own APIs,
+/// normalized first for `model` (OAI-027).
+fn strict_output_schema(schema: &schemars::Schema, openai: Option<&str>) -> Result<Value, Error> {
     let mut schema = serde_json::to_value(schema)?;
+    if let Some(model) = openai {
+        schema = super::schema::normalize(&schema, model)?;
+    }
     strict_schema(&mut schema, 0)?;
     Ok(schema)
 }

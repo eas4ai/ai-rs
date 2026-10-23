@@ -272,7 +272,7 @@ fn responses_function(tool: &Tool, options: &FunctionOptions, model: &str) -> Re
         "type": "function",
         "name": tool.name,
         "description": spec.description.as_deref().unwrap_or(""),
-        "parameters": serde_json::to_value(&spec.params)?,
+        "parameters": super::schema::normalize(&serde_json::to_value(&spec.params)?, model)?,
         "strict": tool.is_strict(),
     });
     if let Some(flag) = async_flag(options.is_async, &tool.name, model) {
@@ -285,7 +285,7 @@ fn responses_function(tool: &Tool, options: &FunctionOptions, model: &str) -> Re
         item["allowed_callers"] = json!(callers);
     }
     if let Some(schema) = &options.output_schema {
-        item["output_schema"] = Value::Object(schema.clone());
+        item["output_schema"] = super::schema::normalize(&Value::Object(schema.clone()), model)?;
     }
     Ok(item)
 }
@@ -345,8 +345,11 @@ pub(super) fn convert(tools: &[Tool], wire: Wire, model: &str) -> Result<Vec<Val
                     "parameters": serde_json::to_value(&spec.params)?,
                 })),
                 Wire::Chat(profile) => {
-                    let parameters =
-                        dialect::tool_parameters(profile, serde_json::to_value(&spec.params)?)?;
+                    let mut parameters = serde_json::to_value(&spec.params)?;
+                    if profile.openai_own {
+                        parameters = super::schema::normalize(&parameters, model)?;
+                    }
+                    let parameters = dialect::tool_parameters(profile, parameters)?;
                     let mut function = json!({"name":tool.name,"description":spec.description.as_deref().unwrap_or(""),"parameters":parameters});
                     if profile.openai_own && tool.is_strict() {
                         function["strict"] = json!(true);
