@@ -45,6 +45,7 @@ pub mod protocol;
 mod provider;
 mod realtime;
 mod responses;
+mod schema;
 mod skills;
 mod socket;
 mod speech;
