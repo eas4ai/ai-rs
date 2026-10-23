@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: openai-call-pairing
+Current: openai-history-replay
 
 ## rename-to-suprnova-ai
 
@@ -172,6 +172,28 @@ signs in to nothing, and a `.gitleaks.toml` that allowlists that file. The
 tests of OAI-001 in `tests/spec_openai.rs` are named after it, and
 `scripts/check-openai.sh` reports its result through the shared
 `scripts/spec-tests.sh`.
+
+Done when the openai, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## openai-history-replay
+
+Requirements: OAI-002, PKG-002, PKG-006
+
+Send the text and reasoning of an assistant turn to OpenAI's Responses API
+in the shapes TypeScript sends (`src/providers/openai/messages.rs`): stored
+text goes out as a reference only when a reasoning model's reasoning comes
+before it in the same turn, and as its text otherwise; an unstored call
+sends text without its stored id, sends only reasoning that has encrypted
+content, and asks a reasoning model for that content
+(`src/providers/openai/dialect.rs`). Name OpenAI's reasoning models by the
+rule `openai-language-model-capabilities.ts` uses. Update the test in
+`tests/providers_openai.rs` that expects the raw text item with `store`
+false, say in `README.md` that a chat which resumes after OpenAI deletes its
+stored items needs `store` false, and list the change under the departures
+of `docs/PORT.md`. The tests of OAI-002 in `tests/spec_openai.rs` are named
+after it, and `scripts/check-openai.sh` reports its result.
 
 Done when the openai, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
