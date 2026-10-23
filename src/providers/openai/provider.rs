@@ -10,6 +10,7 @@ use crate::{
         base::provider_config,
         hosts, http,
         operations::{
+            BatchPage, BatchParams, BatchRequest, BatchResults, BatchStarted, BatchStatus,
             DownloadedFile, Item, SkillFile, SkillParams, UploadFile, UploadParams, UploadedFile,
             UploadedSkill,
         },
@@ -255,6 +256,33 @@ impl Provider for OpenAICompatibleProvider {
         self.files("upload_skill")?
             .upload_skill(files, params)
             .await
+    }
+    async fn batch_start(
+        &self,
+        requests: Vec<BatchRequest>,
+        params: BatchParams,
+    ) -> Result<BatchStarted, Error> {
+        self.files("batch_start")?
+            .batch_start(requests, params)
+            .await
+    }
+    async fn batch_status(&self, batch_id: &str) -> Result<BatchStatus, Error> {
+        self.files("batch_status")?.batch_status(batch_id).await
+    }
+    async fn batch_cancel(&self, batch_id: &str) -> Result<(), Error> {
+        self.files("batch_cancel")?.batch_cancel(batch_id).await
+    }
+    async fn batch_list(
+        &self,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> Result<BatchPage, Error> {
+        self.files("batch_list")?
+            .batch_list(page_size, cursor)
+            .await
+    }
+    async fn batch_results(&self, batch_id: &str) -> Result<BatchResults, Error> {
+        self.files("batch_results")?.batch_results(batch_id).await
     }
     async fn probe(&self, model: &Model) -> Result<(), Error> {
         if !self.is_configured() {
