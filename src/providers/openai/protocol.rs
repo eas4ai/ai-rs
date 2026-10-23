@@ -10,25 +10,29 @@ use crate::{
         EventStream, http,
         operations::{
             AudioChunks, AudioFormat, AudioParams, AudioPrompt, CallLimits, EmbedParams,
-            ImageParams, ImagePrompt, Item, RealtimeCodec, RealtimeSessionConfig, RealtimeStartup,
-            RealtimeToken, RealtimeTokenParams, StreamTranscribeParams, StreamTranslateParams,
-            TranscribeInput, TranscribeParams, Transcription, TranscriptionStream,
-            TranslationStream, WebRtcSession,
+            EvaluationInput, EvaluationParams, ImageParams, ImagePrompt, Item, Question,
+            RealtimeCodec, RealtimeSessionConfig, RealtimeStartup, RealtimeToken,
+            RealtimeTokenParams, StreamTranscribeParams, StreamTranslateParams, TranscribeInput,
+            TranscribeParams, Transcription, TranscriptionStream, TranslationStream, WebRtcSession,
         },
     },
     transport::{HttpRequest, WebSocketRequest},
-    types::{Message, ToolChoice, messages::FilePart},
+    types::{
+        Message, ToolChoice,
+        messages::{FilePart, Metadata},
+    },
 };
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// The `ProviderProtocol` of one of OpenAI's language model protocols: its
 /// class id, its stream on `wire` with the downloads `|this|` gives, and the
 /// operations they share: embeddings (OAI-016), images (OAI-017), speech
-/// (OAI-018), transcription (OAI-019), streaming audio (OAI-020) and
-/// realtime and Live sessions (OAI-024).
+/// (OAI-018), transcription (OAI-019), streaming audio (OAI-020),
+/// realtime and Live sessions (OAI-024) and evaluation on the language model
+/// (OAI-025).
 macro_rules! openai_protocol {
     ($ty:ty, $class:expr, $wire:expr, |$this:ident| $downloads:expr) => {
         #[async_trait]
@@ -45,6 +49,32 @@ macro_rules! openai_protocol {
             ) -> EventStream {
                 let $this = self;
                 start(model, messages, options, provider, $wire, $downloads)
+            }
+            async fn evaluate(
+                &self,
+                model: &Model,
+                state: EvaluationInput,
+                questions: BTreeMap<String, Question>,
+                params: EvaluationParams,
+                provider: &dyn Provider,
+            ) -> Result<Item<Metadata>, Error> {
+                let $this = self;
+                let downloads = $downloads;
+                let name = provider.name().to_owned();
+                crate::ops::experimental::evaluate_with_language_model(
+                    provider.name(),
+                    state,
+                    questions,
+                    params,
+                    |messages, options| async move {
+                        let events: Vec<_> =
+                            start(model, messages, options, provider, $wire, downloads)
+                                .try_collect()
+                                .await?;
+                        crate::providers::google::language::hydrate(&name, events)
+                    },
+                )
+                .await
             }
             async fn embed(
                 &self,
