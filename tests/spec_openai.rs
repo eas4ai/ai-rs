@@ -1481,8 +1481,11 @@ async fn oai_007_chat_completions_files_go_as_typescript_sends_them() {
         send(with_detail(bytes(&[1, 2, 3], "image/png"), "high")),
         json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AQID", "detail": "high"}})
     );
+    // TypeScript takes no text file on Chat Completions; Shawn's ruling
+    // keeps text files inline on Responses only.
     for part in [
         bytes(&[1, 2, 3], "audio/flac"),
+        bytes(b"a,b", "text/csv"),
         text_data("https://audio.test/a.mp3", "audio/mpeg"),
         text_data("https://docs.test/a.pdf", "application/pdf"),
     ] {

@@ -1352,7 +1352,9 @@ async fn common_params_and_allowed_tool_choices() {
 async fn image_pdf_and_text_inputs_use_endpoint_shapes() {
     for chat in [false, true] {
         let fake = Scripted::sse(vec![]);
-        let parts = vec![
+        // OpenAI's Chat Completions API takes no text file (OAI-007), so the
+        // text file goes to Responses only.
+        let mut parts = vec![
             Part::Text(TextPart::new("Read")),
             Part::File(FilePart::from_bytes(vec![1], Some("image/*"), None).unwrap()),
             Part::File(FilePart::from_bytes(b"hello".to_vec(), Some("text/plain"), None).unwrap()),
@@ -1361,6 +1363,9 @@ async fn image_pdf_and_text_inputs_use_endpoint_shapes() {
                     .unwrap(),
             ),
         ];
+        if chat {
+            parts.remove(2);
+        }
         collect(
             fake.clone(),
             chat,
@@ -1378,9 +1383,11 @@ async fn image_pdf_and_text_inputs_use_endpoint_shapes() {
                 json!({"type":"input_image","image_url":"data:image/jpeg;base64,AQ=="})
             }
         );
-        assert_eq!(parts[2]["text"], "hello");
+        if !chat {
+            assert_eq!(parts[2]["text"], "hello");
+        }
         assert_eq!(
-            parts[3],
+            parts[if chat { 2 } else { 3 }],
             if chat {
                 json!({"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,Ag=="}})
             } else {

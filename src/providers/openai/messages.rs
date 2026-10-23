@@ -101,9 +101,9 @@ fn chat_url_error(kind: &str) -> Error {
 }
 /// A user file as OpenAI's own Responses (`responses`) or Chat Completions
 /// API takes it (OAI-007). Text data that starts with `file-` names a file
-/// uploaded to OpenAI. A `text/*` file goes as text unless
+/// uploaded to OpenAI. On Responses a `text/*` file goes as text unless
 /// `passThroughUnsupportedFiles` sends it as a file, as Shawn ruled for
-/// OAI-007 on 2026-10-23.
+/// OAI-007 on 2026-10-23; Chat Completions takes no text file.
 fn openai_file(
     part: &FilePart,
     mt: &str,
@@ -189,9 +189,8 @@ fn openai_file(
             }),
         });
     }
-    if mt.starts_with("text/") {
-        let text = text_file(part)?;
-        return Ok(json!({"type": if responses { "input_text" } else { "text" }, "text": text}));
+    if responses && mt.starts_with("text/") {
+        return Ok(json!({"type": "input_text", "text": text_file(part)?}));
     }
     Err(invalid(format!(
         "OpenAI does not take {mt} files{}",
