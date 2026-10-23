@@ -207,7 +207,16 @@ impl ProviderProtocol for Script {
         self.hold(Duration::from_millis(30 - 10 * index as u64))
             .await;
         let images = (0..params.n).map(|_| file(&[index as u8])).collect();
-        Ok(item(images, 1, &format!("call {index}")))
+        let mut result = item(images, 1, &format!("call {index}"));
+        // One metadata entry per image, as image protocols report them.
+        result.provider_metadata = Some(
+            [(
+                "scripted".to_owned(),
+                json!({"call": index, "images": vec![json!({"call": index}); params.n as usize]}),
+            )]
+            .into(),
+        );
+        Ok(result)
     }
 
     async fn generate_audio(
@@ -297,7 +306,15 @@ impl ProviderProtocol for Script {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| {
-                VideoStatus::Completed(item(vec![url_video("https://v.example/1.mp4")], 5, "seed"))
+                let mut done = item(vec![url_video("https://v.example/1.mp4")], 5, "seed");
+                done.provider_metadata = Some(
+                    [(
+                        "scripted".to_owned(),
+                        json!({"videos": [{"job": operation["n"]}]}),
+                    )]
+                    .into(),
+                );
+                VideoStatus::Completed(done)
             }))
     }
 
@@ -1146,6 +1163,12 @@ async fn ops_003_images_above_the_maximum_take_one_call_per_batch() {
     );
     assert_eq!(images.usage.as_ref().unwrap().input_tokens, 3);
     assert_eq!(images.warnings.len(), 3);
+    // Each call's image entries are kept, in call order; other fields come
+    // from the last call.
+    assert_eq!(
+        images.provider_metadata.as_ref().unwrap()["scripted"],
+        json!({"call": 2, "images": [{"call": 0}, {"call": 1}, {"call": 2}]})
+    );
     assert_eq!(script.most_in_flight.load(Ordering::SeqCst), 3);
 }
 
@@ -1171,6 +1194,10 @@ async fn ops_003_videos_above_the_maximum_start_one_job_per_batch() {
         .collect();
     assert_eq!(counts, vec![json!(4), json!(1)]);
     assert_eq!(videos.value.len(), 2);
+    assert_eq!(
+        videos.provider_metadata.as_ref().unwrap()["scripted"]["videos"],
+        json!([{"job": 4}, {"job": 1}])
+    );
     assert_eq!(videos.warnings.len(), 4);
 }
 

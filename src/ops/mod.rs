@@ -599,14 +599,27 @@ fn merge<T>(items: Vec<Item<Vec<T>>>) -> Item<Vec<T>> {
 }
 
 /// Merge metadata maps, the later entry's fields over the earlier one's for
-/// each provider key.
+/// each provider key, except that the per-image and per-video lists
+/// (`images` and `videos`) are joined in call order, as the TypeScript
+/// core joins them.
 fn merge_metadata(left: Option<Metadata>, right: Option<Metadata>) -> Option<Metadata> {
     match (left, right) {
         (Some(mut left), Some(right)) => {
             for (key, value) in right {
                 match (left.get_mut(&key), value) {
                     (Some(Value::Object(existing)), Value::Object(fields)) => {
-                        existing.extend(fields);
+                        for (field, value) in fields {
+                            match (existing.get_mut(&field), value) {
+                                (Some(Value::Array(earlier)), Value::Array(later))
+                                    if field == "images" || field == "videos" =>
+                                {
+                                    earlier.extend(later);
+                                }
+                                (_, value) => {
+                                    existing.insert(field, value);
+                                }
+                            }
+                        }
                     }
                     (_, value) => {
                         left.insert(key, value);

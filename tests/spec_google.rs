@@ -1453,6 +1453,30 @@ async fn ggl_014_image_generation_makes_one_generate_content_call() {
 }
 
 #[tokio::test]
+async fn ggl_014_several_images_keep_one_metadata_entry_each() {
+    let transport = Recorder::new([image_response(), image_response()]);
+    let m = model("gemini-2.5-flash-image", transport.clone());
+    let prompt = ImagePrompt {
+        text: Some("a cat".into()),
+        images: vec![],
+        mask: None,
+    };
+    let params = ImageParams {
+        n: 2,
+        ..Default::default()
+    };
+    let item = ops::generate_image(&m, prompt, params, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(transport.count(), 2);
+    assert_eq!(item.value.len(), 2);
+    assert_eq!(
+        item.provider_metadata.as_ref().unwrap()["google"]["images"],
+        json!([{}, {}])
+    );
+}
+
+#[tokio::test]
 async fn ggl_014_other_models_and_masks_fail_before_a_request() {
     for (id, mask) in [
         ("imagen-4.0-generate-001", None),
