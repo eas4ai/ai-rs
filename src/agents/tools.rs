@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     Error,
     types::{
-        Message, MessageRole, Tool, ToolApproval, ToolDefinition,
+        Message, MessageRole, Tool, ToolApproval, ToolDefinition, ToolKind,
         events::{Event, PartialToolCallResult, RuntimeError, ToolCallResult},
         messages::{HookPart, Metadata, ToolCallPart, ToolResultPart, ToolResultValue},
     },
@@ -307,6 +307,34 @@ impl AgentTool {
     pub fn require_approval(mut self, required: bool) -> Self {
         self.declaration.require_approval = required;
         self
+    }
+    /// Declare this tool to the model as a provider tool of the same name,
+    /// such as `providers::openai::tools::local_shell()`, whose calls the
+    /// application runs: the agent sends the provider tool and runs its
+    /// calls with this tool's executor.
+    pub fn with_provider_declaration(mut self, declaration: Tool) -> Result<Self, Error> {
+        if declaration.kind != ToolKind::Provider {
+            return Err(Error::Configuration(format!(
+                "the declaration of tool {:?} must be a provider tool",
+                self.name()
+            )));
+        }
+        if declaration.name != self.name() {
+            return Err(Error::Configuration(format!(
+                "the provider declaration {:?} must have the tool's name {:?}",
+                declaration.name,
+                self.name()
+            )));
+        }
+        declaration
+            .validate_shape()
+            .map_err(|error| Error::Configuration(error.to_string()))?;
+        let require_approval = self.declaration.require_approval;
+        self.declaration = Tool {
+            require_approval,
+            ..declaration
+        };
+        Ok(self)
     }
     pub fn aggregator(&self) -> Option<&Aggregate> {
         self.aggregator.as_ref()
