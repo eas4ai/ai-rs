@@ -4,6 +4,7 @@ use crate::{
     Error,
     types::tools::{Tool, ToolConfig, ToolKind},
 };
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 fn make(name: &str, args: Value) -> Result<Tool, Error> {
@@ -44,6 +45,81 @@ pub fn local_shell() -> Tool {
             args: Map::new(),
         }),
         require_approval: false,
+    }
+}
+/// The computer use tool: the application runs its `computer_call`s and
+/// answers each with a screenshot.
+pub fn computer() -> Tool {
+    Tool {
+        name: "computer".into(),
+        tool_config: Some(ToolConfig {
+            id: Some("openai.computer".into()),
+            args: Map::new(),
+        }),
+        ..local_shell()
+    }
+}
+/// Programmatic tool calling: OpenAI runs code that calls the call's
+/// function tools marked with `allowed_callers` `["programmatic"]`.
+pub fn programmatic_tool_calling() -> Tool {
+    Tool {
+        name: "programmatic_tool_calling".into(),
+        tool_config: Some(ToolConfig {
+            id: Some("openai.programmatic_tool_calling".into()),
+            args: Map::new(),
+        }),
+        ..local_shell()
+    }
+}
+/// A custom tool named `name`, whose calls carry free text that the
+/// application runs. `args` may hold a `description`, `async` and a
+/// `format`: `{"type": "grammar", "syntax": "regex" | "lark",
+/// "definition"}` or `{"type": "text"}` (`tool/custom.ts`).
+pub fn custom(name: impl Into<String>, args: Value) -> Result<Tool, Error> {
+    let args = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| invalid("OpenAI tool arguments must be an object"))?;
+    CustomArgs::parse(&args)?;
+    Tool::provider(
+        name,
+        ToolConfig {
+            id: Some("openai.custom".into()),
+            args,
+        },
+    )
+    .map_err(|e| invalid(e.to_string()))
+}
+/// The arguments of a custom tool (`customArgsSchema`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct CustomArgs {
+    description: Option<String>,
+    #[serde(rename = "async")]
+    is_async: Option<bool>,
+    format: Option<CustomFormat>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+#[allow(dead_code)]
+enum CustomFormat {
+    Grammar {
+        syntax: GrammarSyntax,
+        definition: String,
+    },
+    Text,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum GrammarSyntax {
+    Regex,
+    Lark,
+}
+impl CustomArgs {
+    fn parse(args: &Map<String, Value>) -> Result<Self, Error> {
+        serde_json::from_value(Value::Object(args.clone()))
+            .map_err(|e| invalid(format!("invalid OpenAI custom tool arguments: {e}")))
     }
 }
 pub fn apply_patch() -> Tool {
