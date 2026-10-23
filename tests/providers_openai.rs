@@ -572,13 +572,12 @@ async fn history_repair_and_store_false_replay() {
             },
         )
         .await;
+        // A call the application runs goes out in full, never by its item
+        // id, so its output pairs with it by `call_id` (OAI-001).
         assert_eq!(
             fake.body()["input"][0],
-            if store {
-                json!({"type":"item_reference","id":"fc_1"})
-            } else {
-                raw.clone()
-            }
+            json!({"type":"function_call","call_id":"call_1","name":"weather","arguments":r#"{"city":"SF"}"#}),
+            "store {store}"
         );
         assert_eq!(
             fake.body()["input"][1],
