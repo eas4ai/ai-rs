@@ -813,6 +813,47 @@ fn host_result(kind: &str, call_id: &str, value: &ToolResultValue) -> Result<Val
     })
 }
 
+/// A prompt cache breakpoint, `{"mode": "explicit", "ttl"}`, from a part's
+/// `openai` metadata `promptCacheBreakpoint` (OAI-026).
+fn breakpoint(part: &Part) -> Result<Option<Value>, Error> {
+    check_breakpoint(metadata(part, "openai").and_then(|md| md.get("promptCacheBreakpoint")))
+}
+
+/// A system message's breakpoint: its own metadata's, or its first text part's.
+fn system_breakpoint(msg: &Message) -> Result<Option<Value>, Error> {
+    let own = msg
+        .provider_metadata
+        .as_ref()
+        .and_then(|md| md.get("openai"))
+        .and_then(|md| md.get("promptCacheBreakpoint"));
+    match own {
+        Some(_) => check_breakpoint(own),
+        None => match msg.parts.iter().find(|p| matches!(p, Part::Text(_))) {
+            Some(part) => breakpoint(part),
+            None => Ok(None),
+        },
+    }
+}
+
+fn check_breakpoint(value: Option<&Value>) -> Result<Option<Value>, Error> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let valid = value["mode"] == "explicit"
+        && value
+            .get("ttl")
+            .is_none_or(|ttl| ttl == "30m" || ttl == "12h")
+        && value
+            .as_object()
+            .is_some_and(|o| o.keys().all(|k| k == "mode" || k == "ttl"));
+    if !valid {
+        return Err(invalid(
+            "openai promptCacheBreakpoint must be {\"mode\": \"explicit\"} with an optional ttl of 30m or 12h",
+        ));
+    }
+    Ok(Some(value.clone()))
+}
+
 /// The `additional_tools` item a tool result's `additionalTools` metadata
 /// asks for: function definitions OpenAI loads after the result
 /// (`openaiResponsesToolResultOptionsSchema`).
@@ -1082,6 +1123,8 @@ pub(super) fn convert(
 ) -> Result<Vec<Value>, Error> {
     let model = history.model;
     let openai_responses = wire.responses_dialect() == Some(ResponsesDialect::OpenAI);
+    // OpenAI's own APIs, which take prompt cache breakpoints (OAI-026).
+    let openai_own = openai_responses || matches!(wire, Wire::Chat(profile) if profile.openai_own);
     let responses = matches!(wire, Wire::Responses(_));
     let reasoning_field = match wire {
         Wire::Chat(profile) => profile.reasoning_field,
@@ -1104,23 +1147,51 @@ pub(super) fn convert(
                 if let Some(role) = history.system_role
                     && (!responses || !text.is_empty())
                 {
-                    out.push(json!({"role":role,"content":text}));
+                    let breakpoint = if openai_own {
+                        system_breakpoint(&msg)?
+                    } else {
+                        None
+                    };
+                    let content = match breakpoint {
+                        Some(breakpoint) => json!([{
+                            "type": if responses { "input_text" } else { "text" },
+                            "text": text,
+                            "prompt_cache_breakpoint": breakpoint,
+                        }]),
+                        None => json!(text),
+                    };
+                    out.push(json!({"role":role,"content":content}));
                 }
             }
             MessageRole::User => {
-                if !responses && !msg.parts.iter().any(|p| matches!(p, Part::File(_))) {
+                let breakpoints = if openai_own {
+                    msg.parts
+                        .iter()
+                        .map(breakpoint)
+                        .collect::<Result<Vec<_>, Error>>()?
+                } else {
+                    vec![None; msg.parts.len()]
+                };
+                if !responses
+                    && !msg.parts.iter().any(|p| matches!(p, Part::File(_)))
+                    && breakpoints.iter().all(Option::is_none)
+                {
                     out.push(json!({"role":"user","content":msg.text()}));
                     continue;
                 }
                 let mut content = vec![];
-                for (index, p) in msg.parts.into_iter().enumerate() {
-                    match p {
-                        Part::Text(t) => content.push(
-                            json!({"type":if responses {"input_text"}else {"text"},"text":t.text}),
-                        ),
-                        Part::File(f) => content.push(file(&f, index, wire, &history)?),
-                        _ => {}
+                for ((index, p), breakpoint) in msg.parts.into_iter().enumerate().zip(breakpoints) {
+                    let mut item = match p {
+                        Part::Text(t) => {
+                            json!({"type":if responses {"input_text"}else {"text"},"text":t.text})
+                        }
+                        Part::File(f) => file(&f, index, wire, &history)?,
+                        _ => continue,
+                    };
+                    if let Some(breakpoint) = breakpoint {
+                        item["prompt_cache_breakpoint"] = breakpoint;
                     }
+                    content.push(item);
                 }
                 out.push(json!({"role":"user","content":content}));
             }
@@ -1213,7 +1284,7 @@ pub(super) fn convert(
                         continue;
                     }
                     if let Part::ToolResult(r) = p {
-                        let value = match r.get_model_input() {
+                        let mut value = match r.get_model_input() {
                             ToolResultValue::Json(Value::String(text))
                                 if history.quoted_results.contains(&r.tool_name) =>
                             {
@@ -1221,6 +1292,16 @@ pub(super) fn convert(
                             }
                             input => tool_result(input, wire)?,
                         };
+                        if openai_own
+                            && let Some(breakpoint) = breakpoint(p)?
+                            && let Value::String(text) = &value
+                        {
+                            value = json!([{
+                                "type": if responses { "input_text" } else { "text" },
+                                "text": text,
+                                "prompt_cache_breakpoint": breakpoint,
+                            }]);
+                        }
                         let mut entry = if responses {
                             json!({"type":"function_call_output","call_id":r.tool_call_id,"output":value})
                         } else {

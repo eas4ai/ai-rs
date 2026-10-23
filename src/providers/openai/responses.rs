@@ -39,6 +39,14 @@ impl Call {
                 }
             }
         }
+        if p.cache
+            .as_ref()
+            .is_some_and(|c| matches!(c.mode, ProviderValue::Value(_)))
+        {
+            return Err(invalid(
+                "OpenAI takes no cache mode; use the openai option promptCacheOptions",
+            ));
+        }
         let caps = Capabilities::of(model);
         let reasoning = options.force_reasoning.unwrap_or(caps.reasoning);
         Ok(Self {
