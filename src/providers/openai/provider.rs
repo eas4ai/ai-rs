@@ -9,7 +9,10 @@ use crate::{
         ModelsDevProvider,
         base::provider_config,
         hosts, http,
-        operations::{DownloadedFile, Item, UploadFile, UploadParams, UploadedFile},
+        operations::{
+            DownloadedFile, Item, SkillFile, SkillParams, UploadFile, UploadParams, UploadedFile,
+            UploadedSkill,
+        },
     },
     transport::{HttpTransport, WebSocketTransport},
 };
@@ -243,6 +246,15 @@ impl Provider for OpenAICompatibleProvider {
     }
     async fn delete_file(&self, reference: &BTreeMap<String, String>) -> Result<Item<bool>, Error> {
         self.files("delete_file")?.delete(reference).await
+    }
+    async fn upload_skill(
+        &self,
+        files: Vec<SkillFile>,
+        params: SkillParams,
+    ) -> Result<Item<UploadedSkill>, Error> {
+        self.files("upload_skill")?
+            .upload_skill(files, params)
+            .await
     }
     async fn probe(&self, model: &Model) -> Result<(), Error> {
         if !self.is_configured() {
