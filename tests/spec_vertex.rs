@@ -1247,6 +1247,18 @@ async fn vtx_009_chirp_voices_go_to_cloud_text_to_speech() {
             "fr-FR-Chirp3-HD-Aoede",
             "fr-FR",
         ),
+        (
+            Some("fr-FR-Chirp3-HD-Aoede"),
+            Some("fr-CA"),
+            "fr-FR-Chirp3-HD-Aoede",
+            "fr-FR",
+        ),
+        (
+            Some("Chirp3-HD-Kore"),
+            Some("de-DE"),
+            "Chirp3-HD-Kore",
+            "de-DE",
+        ),
     ] {
         let transport = Recorder::new([Reply::json(json!({"audioContent": "UklGRg=="}))]);
         let prompt = AudioPrompt {

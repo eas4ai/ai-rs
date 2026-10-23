@@ -390,9 +390,10 @@ const CLOUD_TTS_BASE_URL: &str = "https://texttospeech.googleapis.com/v1";
 const CHIRP3_HD: &str = "Chirp3-HD";
 
 /// The voice name and language code of a Chirp 3: HD voice: a full name is
-/// used as it is, with its locale as the language unless one is set; a
-/// plain voice name is composed with the language (`Kore` and `en-US` by
-/// default).
+/// used as it is, with its own locale as the language (or the language
+/// setting, or `en-US`), as VTX-009 orders them, where TypeScript prefers
+/// the setting. A plain voice name is composed with the language (`Kore` and
+/// `en-US` by default).
 fn chirp_voice(voice: Option<&str>, language: Option<&str>) -> (String, String) {
     let voice = voice.unwrap_or("Kore");
     if voice.contains(CHIRP3_HD) {
@@ -401,8 +402,9 @@ fn chirp_voice(voice: Option<&str>, language: Option<&str>) -> (String, String) 
             .next()
             .unwrap_or_default()
             .trim_end_matches('-');
-        let language = language
-            .or((!prefix.is_empty()).then_some(prefix))
+        let language = (!prefix.is_empty())
+            .then_some(prefix)
+            .or(language)
             .unwrap_or("en-US");
         (voice.to_owned(), language.to_owned())
     } else {
@@ -482,7 +484,7 @@ mod chirp_tests {
     use super::chirp_voice;
 
     #[test]
-    fn voices_are_composed_as_typescript_composes_them() {
+    fn voices_are_composed_in_the_vtx_009_order() {
         let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
         assert_eq!(
             chirp_voice(None, None),
@@ -502,7 +504,11 @@ mod chirp_tests {
         );
         assert_eq!(
             chirp_voice(Some("fr-FR-Chirp3-HD-Aoede"), Some("fr-CA")),
-            pair("fr-FR-Chirp3-HD-Aoede", "fr-CA")
+            pair("fr-FR-Chirp3-HD-Aoede", "fr-FR")
+        );
+        assert_eq!(
+            chirp_voice(Some("Chirp3-HD-Kore"), Some("de-DE")),
+            pair("Chirp3-HD-Kore", "de-DE")
         );
     }
 }
