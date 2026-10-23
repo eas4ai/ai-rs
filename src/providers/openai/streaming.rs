@@ -154,8 +154,10 @@ struct Parser {
     /// A terminal response event arrived.
     terminal: bool,
     /// The logprobs of the text deltas, which OpenAI sends when the call
-    /// asks for them (OAI-013).
+    /// asks for them (OAI-013, OAI-014).
     logprobs: Vec<Value>,
+    /// The prediction token counts of OpenAI's own Chat Completions.
+    chat_metadata: serde_json::Map<String, Value>,
 }
 /// `hold_reasoning` keeps each reasoning block open until its item ends, so
 /// that every block carries the item's final encrypted content; an unstored
@@ -223,6 +225,7 @@ pub(super) fn parse(
         file_results: false,
         terminal: false,
         logprobs: Vec::new(),
+        chat_metadata: serde_json::Map::new(),
     };
     stream::try_unfold(state, |mut p| async move {
         loop {
@@ -367,12 +370,46 @@ impl Parser {
                     _ => {}
                 }
             }
+            if self.openai_chat() {
+                let details = &value["completion_tokens_details"];
+                for (src, dst) in [
+                    ("accepted_prediction_tokens", "acceptedPredictionTokens"),
+                    ("rejected_prediction_tokens", "rejectedPredictionTokens"),
+                ] {
+                    if details[src].is_number() {
+                        self.chat_metadata.insert(dst.into(), details[src].clone());
+                    }
+                }
+            }
             self.usage = Some(u);
         }
         let Some(choice) = first else {
             return Ok(());
         };
         let delta = &choice["delta"];
+        if self.openai_chat() {
+            if let Some(logprobs) = choice["logprobs"]["content"].as_array() {
+                self.logprobs.extend(logprobs.iter().cloned());
+            }
+            for annotation in delta["annotations"].as_array().into_iter().flatten() {
+                let citation = &annotation["url_citation"];
+                if string(annotation, "type") == "url_citation"
+                    && !string(citation, "url").is_empty()
+                {
+                    self.add_source(Some(url_source(
+                        string(citation, "url"),
+                        citation.get("title"),
+                    )));
+                }
+            }
+            // A message with audio gives its transcript as text.
+            if delta["content"].is_null()
+                && let Some(transcript) = delta["audio"]["transcript"].as_str()
+                && !transcript.is_empty()
+            {
+                self.text_chunk(transcript);
+            }
+        }
         let reasoning = delta
             .get("reasoning")
             .and_then(Value::as_str)
@@ -1117,6 +1154,9 @@ impl Parser {
             _ => {}
         }
     }
+    fn openai_chat(&self) -> bool {
+        self.chat.is_some_and(|c| c.openai_own)
+    }
     fn openai_responses(&self) -> bool {
         self.responses_profile
             .is_some_and(|p| p.dialect == ResponsesDialect::OpenAI)
@@ -1263,18 +1303,24 @@ impl Parser {
                 self.add_source(annotation_source(&citation));
             }
         }
+        let mut entries = std::mem::take(&mut self.chat_metadata);
         for (key, values) in [
             ("sources", std::mem::take(&mut self.sources)),
             ("logprobs", std::mem::take(&mut self.logprobs)),
         ] {
-            if values.is_empty() {
-                continue;
+            if !values.is_empty() {
+                entries.insert(key.into(), json!(values));
             }
-            let md = self.metadata.get_or_insert_with(Default::default);
-            let openai = md
-                .entry(self.metadata_key.to_owned())
-                .or_insert_with(|| json!({}));
-            openai[key] = json!(values);
+        }
+        if entries.is_empty() {
+            return;
+        }
+        let md = self.metadata.get_or_insert_with(Default::default);
+        let openai = md
+            .entry(self.metadata_key.to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(openai) = openai.as_object_mut() {
+            openai.extend(entries);
         }
     }
     /// Whether the application runs this item's call (OAI-010).

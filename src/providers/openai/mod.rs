@@ -28,6 +28,7 @@
 //! `params::OpenAIParams::apply` stores options under the stable `openai` key.
 //! Built-in tool arguments use snake_case JSON objects, as in the Python wire format.
 mod capabilities;
+mod chat;
 mod dialect;
 pub mod errors;
 mod messages;

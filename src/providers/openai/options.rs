@@ -253,3 +253,123 @@ impl ResponsesOptions {
         }
     }
 }
+
+/// The Chat Completions language model options (`openaiLanguageModelChatOptions`).
+/// Every field is `optional`, so none takes `null`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ChatOptions {
+    #[serde(default, deserialize_with = "not_null")]
+    pub logit_bias: Option<serde_json::Map<String, Value>>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub logprobs: Option<Logprobs>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub user: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub max_completion_tokens: Option<Number>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub store: Option<bool>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub metadata: Option<serde_json::Map<String, Value>>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub prediction: Option<serde_json::Map<String, Value>>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub service_tier: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub strict_json_schema: Option<bool>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub text_verbosity: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub prompt_cache_retention: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub safety_identifier: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub system_message_mode: Option<String>,
+    #[serde(default, deserialize_with = "not_null")]
+    pub force_reasoning: Option<bool>,
+}
+
+impl ChatOptions {
+    /// The `openai` entry of the call's provider parameters; none gives the
+    /// defaults.
+    pub(crate) fn parse(p: &InferenceRequestParams) -> Result<Self, Error> {
+        let Some(value) = p.provider_params.as_ref().and_then(|p| p.get("openai")) else {
+            return Ok(Self::default());
+        };
+        if value.get("reasoningSummary").is_some() {
+            return Err(invalid(
+                "openai option reasoningSummary is only supported by the Responses API, not Chat Completions",
+            ));
+        }
+        let options: Self = serde_json::from_value(value.clone())
+            .map_err(|e| invalid(format!("invalid openai provider options: {e}")))?;
+        options.validate()?;
+        Ok(options)
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        for (token, bias) in self.logit_bias.iter().flatten() {
+            if token.trim().parse::<f64>().is_err() || !bias.is_number() {
+                return Err(invalid(format!(
+                    "openai option logitBias maps token ids to numbers, not {token:?} to {bias}"
+                )));
+            }
+        }
+        for (key, value) in self.metadata.iter().flatten() {
+            let fits = key.chars().count() <= 64
+                && value.as_str().is_some_and(|v| v.chars().count() <= 512);
+            if !fits {
+                return Err(invalid(
+                    "openai option metadata maps keys of at most 64 characters to strings of at most 512",
+                ));
+            }
+        }
+        one_of(
+            "reasoningEffort",
+            self.reasoning_effort.as_deref(),
+            &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        )?;
+        one_of(
+            "serviceTier",
+            self.service_tier.as_deref(),
+            &["auto", "flex", "priority", "fast", "ultrafast", "default"],
+        )?;
+        one_of(
+            "textVerbosity",
+            self.text_verbosity.as_deref(),
+            &["low", "medium", "high"],
+        )?;
+        if let Some(cache) = &self.prompt_cache_options {
+            one_of(
+                "promptCacheOptions.mode",
+                cache.mode.as_deref(),
+                &["implicit", "explicit"],
+            )?;
+            one_of("promptCacheOptions.ttl", cache.ttl.as_deref(), &["30m"])?;
+            if cache.prewarm.is_some() {
+                return Err(invalid(
+                    "openai option promptCacheOptions.prewarm is only supported by the Responses API",
+                ));
+            }
+        }
+        one_of(
+            "promptCacheRetention",
+            self.prompt_cache_retention.as_deref(),
+            &["in_memory", "24h"],
+        )?;
+        one_of(
+            "systemMessageMode",
+            self.system_message_mode.as_deref(),
+            &["system", "developer", "remove"],
+        )?;
+        Ok(())
+    }
+}
