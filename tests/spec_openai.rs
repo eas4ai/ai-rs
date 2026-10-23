@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for OAI-001 in docs/spec/openai.md. Each test name starts with the
+//! Tests for OAI-001 and OAI-002 in docs/spec/openai.md. Each test name starts with the
 //! requirement it checks; scripts/check-openai.sh selects them by it. The
 //! tests build or record each request the crate sends and answer it with a
 //! reply written in the test, so no request leaves the machine. They show the
@@ -29,12 +29,12 @@ use futures::{StreamExt, future::BoxFuture, stream};
 use serde_json::{Value, json};
 use suprnova_ai::{
     Model, ProviderConfig, StreamOptions,
-    models::params::InferenceRequestParams,
+    models::params::{InferenceRequestParams, OutputParams},
     providers::openai::{OpenAICompatibleProvider, protocol::build_request},
     transport::{HttpRequest, HttpResponse, HttpTransport, TransportError},
     types::{
         Message, MessageRole, Part,
-        messages::{TextPart, ToolCallPart, ToolResultPart},
+        messages::{ReasoningPart, TextPart, ToolCallPart, ToolResultPart},
         tools::{Tool, ToolSpec},
     },
 };
@@ -295,4 +295,175 @@ async fn oai_001_parallel_calls_from_a_stream_are_sent_back_in_full() {
     );
     assert_eq!(input[1]["arguments"], r#"{"city":"SF"}"#);
     assert_eq!(input[2]["arguments"], r#"{"city":"NYC"}"#);
+}
+
+/// Assistant text `T` with the OpenAI item id `msg_1` and its raw item.
+fn stored_text() -> Part {
+    let mut text = TextPart::new("T");
+    text.provider_metadata = Some(
+        [(
+            "openai".to_owned(),
+            json!({"item_id": "msg_1", "raw_item": {"id": "msg_1", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "T", "annotations": []}]}}),
+        )]
+        .into(),
+    );
+    Part::Text(text)
+}
+/// A reasoning part of the OpenAI item `id`, with its encrypted content
+/// when given.
+fn stored_reasoning(id: &str, summary: &str, encrypted: Option<&str>) -> Part {
+    let mut raw = json!({"id": id, "type": "reasoning", "summary": [{"type": "summary_text", "text": summary}]});
+    let mut metadata = json!({"item_id": id});
+    if let Some(encrypted) = encrypted {
+        raw["encrypted_content"] = json!(encrypted);
+        metadata["reasoning_encrypted_content"] = json!(encrypted);
+    }
+    metadata["raw_item"] = raw;
+    let mut reasoning = ReasoningPart::new(summary);
+    reasoning.provider_metadata = Some([("openai".to_owned(), metadata)].into());
+    Part::Reasoning(reasoning)
+}
+/// A user turn, an assistant turn of these parts, and a second user turn.
+fn turn(parts: Vec<Part>) -> Vec<Message> {
+    vec![
+        user("hello"),
+        Message::new(MessageRole::Assistant, parts),
+        user("again"),
+    ]
+}
+/// The body `build_request` makes for this model.
+fn body_for(model: &str, messages: Vec<Message>, options: &StreamOptions) -> Value {
+    let request = build_request(model, &config(), messages, options, true).unwrap();
+    serde_json::from_slice(&request.body).unwrap()
+}
+fn references<'a>(body: &'a Value, id: &str) -> usize {
+    items(body)
+        .iter()
+        .filter(|item| item["type"] == "item_reference" && item["id"] == id)
+        .count()
+}
+/// Whether the body sends the text `T` as an assistant message without an id.
+fn sends_text(body: &Value) -> bool {
+    items(body).iter().any(|item| {
+        item["role"] == "assistant"
+            && item.get("id").is_none()
+            && (item["content"] == "T"
+                || item["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|p| p["text"] == "T")))
+    })
+}
+
+#[test]
+fn oai_002_stored_text_is_a_reference_only_after_its_reasoning() {
+    for value in [None, Some(true)] {
+        let options = store(value);
+        // A reasoning model's text without its reasoning goes out in full.
+        let body = body_for("gpt-5.4", turn(vec![stored_text()]), &options);
+        assert_eq!(references(&body, "msg_1"), 0, "store {value:?}: {body}");
+        assert!(sends_text(&body), "store {value:?}: {body}");
+        // After its reasoning, both go out as one reference each, though the
+        // reasoning has two summary parts.
+        let parts = vec![
+            stored_reasoning("rs_1", "first", None),
+            stored_reasoning("rs_1", "second", None),
+            stored_text(),
+        ];
+        let body = body_for("gpt-5.4", turn(parts), &options);
+        assert_eq!(references(&body, "rs_1"), 1, "store {value:?}: {body}");
+        assert_eq!(references(&body, "msg_1"), 1, "store {value:?}: {body}");
+        assert!(!sends_text(&body), "store {value:?}: {body}");
+        // Other models keep the reference.
+        let body = body_for("gpt-4.1", turn(vec![stored_text()]), &options);
+        assert_eq!(references(&body, "msg_1"), 1, "store {value:?}: {body}");
+    }
+}
+
+#[test]
+fn oai_002_reasoning_models_are_named_as_typescript_names_them() {
+    let reasoning = [
+        "o1",
+        "o3",
+        "o3-mini",
+        "o4-mini-2025-04-16",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5.1",
+        "gpt-5.1-chat-latest",
+        "gpt-5.4",
+        "gpt-6-sol",
+    ];
+    let other = [
+        "gpt-4.1",
+        "gpt-4o",
+        "gpt-5-chat-latest",
+        "o",
+        "omni",
+        "gpt-4.1-mini",
+        "ft:gpt-5:x",
+    ];
+    for (models, expected) in [(&reasoning[..], 0), (&other[..], 1)] {
+        for model in models {
+            let body = body_for(model, turn(vec![stored_text()]), &store(None));
+            assert_eq!(references(&body, "msg_1"), expected, "{model}: {body}");
+        }
+    }
+}
+
+#[test]
+fn oai_002_an_unstored_call_asks_for_and_sends_encrypted_reasoning() {
+    let with_include = StreamOptions {
+        params: Some(
+            InferenceRequestParams {
+                output: Some(OutputParams {
+                    include: Some(["reasoning.encrypted_content".to_owned()].into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .with_provider_param("openai", json!({"store": false})),
+        ),
+        ..Default::default()
+    };
+    for options in [store(Some(false)), with_include] {
+        let parts = vec![
+            stored_reasoning("rs_1", "kept", Some("enc")),
+            stored_reasoning("rs_2", "dropped", None),
+            stored_text(),
+        ];
+        let body = body_for("gpt-5.4", turn(parts), &options);
+        let include: Vec<_> = body["include"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no include: {body}"))
+            .iter()
+            .filter(|value| *value == "reasoning.encrypted_content")
+            .collect();
+        assert_eq!(include.len(), 1, "{body}");
+        let input = items(&body);
+        assert!(
+            !input
+                .iter()
+                .any(|item| item["type"] == "item_reference" || item["id"] == "msg_1"),
+            "{body}"
+        );
+        assert!(sends_text(&body), "{body}");
+        assert!(
+            input
+                .iter()
+                .any(|item| item["type"] == "reasoning" && item["encrypted_content"] == "enc"),
+            "{body}"
+        );
+        assert!(
+            !input.iter().any(|item| item["type"] == "reasoning"
+                && item.get("encrypted_content").is_none_or(Value::is_null)),
+            "a reasoning part without encrypted content was sent: {body}"
+        );
+    }
+    let body = body_for("gpt-4.1", turn(vec![stored_text()]), &store(Some(false)));
+    assert!(
+        !body["include"]
+            .as_array()
+            .is_some_and(|include| include.iter().any(|v| v == "reasoning.encrypted_content")),
+        "{body}"
+    );
 }
