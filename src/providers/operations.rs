@@ -314,3 +314,348 @@ pub struct EvaluationParams {
     #[serde(default)]
     pub provider_options: Metadata,
 }
+
+/// How many values or results one protocol call takes for a model, and
+/// whether the front end may run several calls at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallLimits {
+    /// The most values (embeddings) or results (images, videos) per call;
+    /// `None` puts everything in one call.
+    pub max_per_call: Option<usize>,
+    /// Whether calls for one front-end call may be in flight together.
+    pub parallel: bool,
+}
+
+impl Default for CallLimits {
+    fn default() -> Self {
+        Self {
+            max_per_call: None,
+            parallel: true,
+        }
+    }
+}
+
+/// A started video generation: the provider and model that run it and the
+/// protocol's operation value. It serializes to JSON and back, so an
+/// application can check a job's status from another process.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VideoJob {
+    pub provider: String,
+    pub model_id: String,
+    pub operation: Value,
+}
+
+/// The status of a video job.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VideoStatus {
+    Pending,
+    /// The videos as file parts: bytes, or a URL that the protocol's
+    /// `download_video` fetches.
+    Completed(Item<Vec<FilePart>>),
+    Failed {
+        message: String,
+    },
+}
+
+/// A file to upload through a provider's files operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UploadFile {
+    pub data: bytes::Bytes,
+    pub media_type: String,
+    pub filename: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct UploadParams {
+    #[serde(default)]
+    pub provider_options: Metadata,
+}
+
+/// An uploaded file. `provider_reference` maps the provider name to the id
+/// or URI a later request names the file by; each other field is absent when
+/// the provider does not report it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct UploadedFile {
+    pub provider_reference: BTreeMap<String, String>,
+    pub media_type: Option<String>,
+    pub filename: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub created_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// One request of a batch.
+#[derive(Clone, Debug)]
+pub struct BatchRequest {
+    pub id: String,
+    pub model_id: String,
+    pub kind: BatchRequestKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum BatchRequestKind {
+    /// A language model request: its messages and call options.
+    Text {
+        messages: Vec<crate::types::messages::Message>,
+        options: crate::models::StreamOptions,
+    },
+    Image {
+        prompt: ImagePrompt,
+        params: ImageParams,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct BatchParams {
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub provider_options: Metadata,
+}
+
+/// Where a batch is: `pending` until it ends, then `completed` or `failed`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchState {
+    Pending,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchRequestCounts {
+    pub total: u64,
+    pub pending: u64,
+    pub completed: u64,
+    pub failed: u64,
+}
+
+impl BatchRequestCounts {
+    /// The counts when they add up to the total, as
+    /// `normalizeBatchRequestCounts` requires; `None` otherwise.
+    #[must_use]
+    pub fn checked(total: u64, pending: u64, completed: u64, failed: u64) -> Option<Self> {
+        (pending.checked_add(completed)?.checked_add(failed)? == total).then_some(Self {
+            total,
+            pending,
+            completed,
+            failed,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct BatchError {
+    pub message: String,
+    pub error_type: Option<String>,
+    pub code: Option<String>,
+}
+
+/// A batch's status.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BatchStatus {
+    pub batch_id: String,
+    pub state: BatchState,
+    /// The provider's own state name.
+    pub raw_status: Option<String>,
+    pub request_counts: Option<BatchRequestCounts>,
+    pub error: Option<BatchError>,
+    pub created_at: Option<String>,
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub provider_metadata: Option<Metadata>,
+}
+
+/// A warning about one request of a batch, or about the batch when
+/// `request_id` is `None`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BatchWarning {
+    pub request_id: Option<String>,
+    pub warning: Warning,
+}
+
+/// A started batch: its status and the warnings about its requests.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BatchStarted {
+    pub status: BatchStatus,
+    pub warnings: Vec<BatchWarning>,
+}
+
+/// One page of batches and the cursor of the next page.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BatchPage {
+    pub batches: Vec<BatchStatus>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchResultKind {
+    Text,
+    Image,
+}
+
+/// What one batch request produced.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchOutcome {
+    /// A text request's message.
+    Message(crate::types::messages::Message),
+    /// An image request's images.
+    Images(Item<Vec<FilePart>>),
+    Failed {
+        error: BatchError,
+        provider_metadata: Option<Metadata>,
+    },
+    Cancelled {
+        error: Option<BatchError>,
+    },
+    Expired {
+        error: Option<BatchError>,
+    },
+}
+
+/// The result of one batch request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchResult {
+    pub id: String,
+    pub kind: BatchResultKind,
+    pub outcome: BatchOutcome,
+}
+
+/// A stream of batch results, in the provider's order.
+pub type BatchResults =
+    futures::stream::BoxStream<'static, Result<BatchResult, crate::errors::Error>>;
+
+/// The format of raw audio: a media type such as `audio/pcm` and, for
+/// formats that need one, a sample rate in Hz.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioFormat {
+    pub media_type: String,
+    pub sample_rate: Option<u32>,
+}
+
+impl AudioFormat {
+    /// Raw 16-bit little-endian PCM at this rate.
+    #[must_use]
+    pub fn pcm(sample_rate: u32) -> Self {
+        Self {
+            media_type: "audio/pcm".into(),
+            sample_rate: Some(sample_rate),
+        }
+    }
+}
+
+/// Raw audio chunks for a streaming operation. The operation reads it as it
+/// sends, and stops reading when its own stream is dropped.
+pub type AudioChunks = futures::stream::BoxStream<'static, Vec<u8>>;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StreamTranscribeParams {
+    /// Include each provider message as a `Raw` part.
+    #[serde(default)]
+    pub include_raw: bool,
+    #[serde(default)]
+    pub provider_options: Metadata,
+}
+
+/// One part of a streaming transcription.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TranscriptionPart {
+    Start {
+        warnings: Vec<Warning>,
+    },
+    /// Text appended to the segment `id`.
+    Delta {
+        id: Option<String>,
+        delta: String,
+    },
+    /// The segment's text so far; a later part may revise it.
+    Partial {
+        id: Option<String>,
+        text: String,
+    },
+    /// The segment's final text.
+    Final {
+        id: Option<String>,
+        text: String,
+    },
+    Finish {
+        text: String,
+        segments: Vec<TranscriptionSegment>,
+        language: Option<String>,
+        duration_seconds: Option<f64>,
+        usage: Option<Value>,
+        provider_metadata: Option<Metadata>,
+    },
+    Raw(Value),
+}
+
+/// A stream of transcription parts.
+pub type TranscriptionStream =
+    futures::stream::BoxStream<'static, Result<TranscriptionPart, crate::errors::Error>>;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StreamTranslateParams {
+    pub target_language: String,
+    pub source_language: Option<String>,
+    pub output_format: Option<AudioFormat>,
+    /// Include each provider message as a `Raw` part.
+    #[serde(default)]
+    pub include_raw: bool,
+    #[serde(default)]
+    pub provider_options: Metadata,
+}
+
+/// Audio and token counts of a speech translation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct TranslationUsage {
+    pub input_audio_seconds: Option<f64>,
+    pub input_audio_tokens: Option<u64>,
+    pub output_audio_tokens: Option<u64>,
+    pub input_text_tokens: Option<u64>,
+    pub output_text_tokens: Option<u64>,
+}
+
+/// One part of a streaming speech translation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TranslationPart {
+    Start {
+        warnings: Vec<Warning>,
+    },
+    /// Translated audio.
+    Audio {
+        id: Option<String>,
+        audio: Vec<u8>,
+    },
+    OutputTextDelta {
+        id: Option<String>,
+        delta: String,
+    },
+    OutputTextFinal {
+        id: Option<String>,
+        text: String,
+    },
+    SourceTranscriptDelta {
+        id: Option<String>,
+        delta: String,
+    },
+    SourceTranscriptPartial {
+        id: Option<String>,
+        text: String,
+    },
+    SourceTranscriptFinal {
+        id: Option<String>,
+        text: String,
+    },
+    Finish {
+        source_text: String,
+        output_text: String,
+        duration_seconds: Option<f64>,
+        usage: Option<TranslationUsage>,
+        provider_metadata: Option<Metadata>,
+    },
+    Raw(Value),
+}
+
+/// A stream of translation parts.
+pub type TranslationStream =
+    futures::stream::BoxStream<'static, Result<TranslationPart, crate::errors::Error>>;
