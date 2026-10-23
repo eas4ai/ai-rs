@@ -2215,3 +2215,255 @@ fn oai_010_calls_and_results_go_back_as_their_own_items() {
         "{body}"
     );
 }
+
+// OAI-011
+
+/// Stream these Responses events, ended by `response.completed`, and give
+/// the assistant message.
+async fn read(events: Vec<Value>, tools: Vec<Tool>) -> Message {
+    let mut events = events;
+    events.push(json!({"type": "response.completed", "response": {"id": "resp_r", "model": "gpt-5.4", "status": "completed", "output": [], "usage": {"input_tokens": 1, "output_tokens": 1}}}));
+    let transport = Recorder::new([responses_sse(&events)]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    );
+    let mut handle = suprnova_ai::stream(&model, vec![user("hi")], with_tools(tools));
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    handle.message().clone()
+}
+fn added(index: usize, item: Value) -> Value {
+    json!({"type": "response.output_item.added", "output_index": index, "item": item})
+}
+fn done(index: usize, item: Value) -> Value {
+    json!({"type": "response.output_item.done", "output_index": index, "item": item})
+}
+/// A message item `msg_1` with text `T`, its phase, and these annotations
+/// streamed as `annotation.added` events.
+fn annotated_message(index: usize, phase: Option<&str>, annotations: &[Value]) -> Vec<Value> {
+    let mut item = json!({"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "T", "annotations": annotations}]});
+    if let Some(phase) = phase {
+        item["phase"] = json!(phase);
+    }
+    let mut events = vec![
+        added(
+            index,
+            json!({"type": "message", "id": "msg_1", "role": "assistant", "content": []}),
+        ),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": index, "delta": "T"}),
+    ];
+    for (n, annotation) in annotations.iter().enumerate() {
+        events.push(json!({"type": "response.output_text.annotation.added", "item_id": "msg_1", "output_index": index, "content_index": 0, "annotation_index": n, "annotation": annotation}));
+    }
+    events.push(done(index, item));
+    events
+}
+fn text_metadata(message: &Message) -> Value {
+    message
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            Part::Text(t) => t.provider_metadata.as_ref().map(|m| m["openai"].clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+fn sources(message: &Message) -> Vec<Value> {
+    message
+        .provider_metadata
+        .as_ref()
+        .and_then(|m| m["openai"]["sources"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn oai_011_annotations_and_sources_are_delivered_once() {
+    let citation = json!({"type": "url_citation", "url": "https://a.test", "title": "A", "start_index": 0, "end_index": 1});
+    let message = read(
+        annotated_message(0, Some("commentary"), &[citation.clone(), citation.clone()]),
+        vec![],
+    )
+    .await;
+    let md = text_metadata(&message);
+    assert_eq!(md["annotations"], json!([citation, citation]), "{md}");
+    assert_eq!(md["phase"], "commentary", "{md}");
+    let found = sources(&message);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["sourceType"], "url");
+    assert_eq!(found[0]["url"], "https://a.test");
+    assert_eq!(found[0]["title"], "A");
+    // A web search that lists its sources takes the place of the citations.
+    let search = json!({"type": "web_search_call", "id": "ws_1", "status": "completed",
+        "action": {"type": "search", "query": "q", "sources": [{"type": "url", "url": "https://b.test"}]}});
+    let mut events = vec![added(0, search.clone()), done(0, search)];
+    events.extend(annotated_message(1, None, &[citation]));
+    let found = sources(&read(events, vec![]).await);
+    let urls: Vec<_> = found.iter().map(|s| s["url"].clone()).collect();
+    assert_eq!(urls, [json!("https://b.test")], "{found:?}");
+}
+
+#[tokio::test]
+async fn oai_011_program_and_compaction_items_are_built_in_calls() {
+    let program = json!({"type": "program", "id": "pg_1", "call_id": "call_pg", "code": "print(1)", "fingerprint": "fp"});
+    let output = json!({"type": "program_output", "id": "po_1", "call_id": "call_pg", "result": "1", "status": "completed"});
+    let compaction = json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"});
+    let message = read(
+        vec![
+            added(0, program.clone()),
+            done(0, program),
+            added(1, output.clone()),
+            done(1, output),
+            added(2, compaction.clone()),
+            done(2, compaction),
+        ],
+        vec![],
+    )
+    .await;
+    let calls: Vec<_> = message
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::BuiltinToolCall(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls[0].tool_name, "programmatic_tool_calling");
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[0].tool_args).unwrap(),
+        json!({"code": "print(1)", "fingerprint": "fp"})
+    );
+    let results: Vec<_> = message
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::BuiltinToolReturn(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "{message:?}");
+    assert_eq!(results[0].tool_call_id, "call_pg");
+    assert_eq!(
+        results[0].result,
+        json!({"result": "1", "status": "completed"})
+    );
+    assert_eq!(calls[1].tool_name, "compaction");
+    let md = &calls[1].provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(md["item_id"], "cmp_1");
+    assert_eq!(md["encrypted_content"], "enc");
+}
+
+#[tokio::test]
+async fn oai_011_an_mcp_approval_request_is_a_pending_tool_approval_hook() {
+    let request = json!({"type": "mcp_approval_request", "id": "mcpr_1", "server_label": "crm", "name": "delete", "arguments": "{}"});
+    let message = read(vec![added(0, request.clone()), done(0, request)], vec![]).await;
+    assert!(
+        message
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::BuiltinToolCall(c) if c.tool_name == "mcp.delete")),
+        "{message:?}"
+    );
+    let hook = message
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            Part::Hook(h) => Some(h.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no hook: {message:?}"));
+    assert_eq!(hook.hook_id, "mcpr_1");
+    assert_eq!(hook.hook_type, "ToolApproval");
+    assert_eq!(hook.status, HookStatus::Pending);
+    assert!(
+        !message
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::BuiltinToolReturn(_))),
+        "{message:?}"
+    );
+}
+
+#[tokio::test]
+async fn oai_011_a_failed_web_search_is_an_error_result() {
+    let search = json!({"type": "web_search_call", "id": "ws_1", "status": "failed"});
+    let message = read(vec![added(0, search.clone()), done(0, search)], vec![]).await;
+    let result = message
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            Part::BuiltinToolReturn(r) => Some(r.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(result.is_error, "{result:?}");
+    assert_eq!(result.result, json!({"status": "failed"}));
+}
+
+#[tokio::test]
+async fn oai_011_an_undeclared_parallel_call_is_one_call_per_tool_use() {
+    let arguments = json!({"tool_uses": [
+        {"recipient_name": "functions.weather", "parameters": {"city": "SF"}},
+        {"recipient_name": "functions.weather", "parameters": {"city": "NYC"}},
+    ]})
+    .to_string();
+    let call = json!({"type": "function_call", "id": "fc_p", "call_id": "c", "name": "parallel", "arguments": arguments});
+    let mut started = call.clone();
+    started["arguments"] = json!("");
+    let message = read(
+        vec![
+            added(0, started),
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc_p", "output_index": 0, "delta": arguments}),
+            done(0, call),
+        ],
+        vec![function_tool("weather")],
+    )
+    .await;
+    let calls: Vec<_> = message
+        .tool_calls()
+        .into_iter()
+        .map(|c| {
+            (
+                c.tool_call_id.clone(),
+                c.tool_name.clone(),
+                c.tool_args.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("c_0".into(), "weather".into(), r#"{"city":"SF"}"#.into()),
+            ("c_1".into(), "weather".into(), r#"{"city":"NYC"}"#.into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn oai_011_a_stream_cut_after_text_fails_as_incomplete() {
+    let events = vec![
+        json!({"type": "response.created", "response": {"id": "resp_c", "model": "gpt-5.4", "status": "in_progress"}}),
+        added(
+            0,
+            json!({"type": "message", "id": "msg_1", "role": "assistant", "content": []}),
+        ),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "par"}),
+    ];
+    let transport = Recorder::new([responses_sse(&events)]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    );
+    let options = StreamOptions {
+        retry: suprnova_ai::RetryPolicy::none(),
+        ..Default::default()
+    };
+    let Err(suprnova_ai::Error::Provider(error)) = run(&model, options).await else {
+        panic!("a cut stream did not fail")
+    };
+    assert_eq!(
+        error.kind,
+        suprnova_ai::errors::ProviderErrorKind::IncompleteResponse
+    );
+}
