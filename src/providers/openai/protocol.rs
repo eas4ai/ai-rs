@@ -1,14 +1,16 @@
 use super::{
     chat, dialect, embedding, images, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
-    responses, streaming,
+    responses, speech, streaming,
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
     models::params::{ExtraHeaderValue, InferenceRequestParams},
     providers::{
         EventStream, http,
-        operations::{CallLimits, EmbedParams, ImageParams, ImagePrompt, Item},
+        operations::{
+            AudioParams, AudioPrompt, CallLimits, EmbedParams, ImageParams, ImagePrompt, Item,
+        },
     },
     transport::HttpRequest,
     types::{Message, ToolChoice, messages::FilePart},
@@ -20,7 +22,8 @@ use std::sync::Arc;
 
 /// The `ProviderProtocol` of one of OpenAI's language model protocols: its
 /// class id, its stream on `wire` with the downloads `|this|` gives, and the
-/// operations they share: embeddings (OAI-016) and images (OAI-017).
+/// operations they share: embeddings (OAI-016), images (OAI-017) and
+/// speech (OAI-018).
 macro_rules! openai_protocol {
     ($ty:ty, $class:expr, $wire:expr, |$this:ident| $downloads:expr) => {
         #[async_trait]
@@ -68,6 +71,15 @@ macro_rules! openai_protocol {
             }
             fn image_limits(&self, model: &Model) -> CallLimits {
                 images::limits(model)
+            }
+            async fn generate_audio(
+                &self,
+                model: &Model,
+                prompt: AudioPrompt,
+                params: AudioParams,
+                provider: &dyn Provider,
+            ) -> Result<Item<Vec<FilePart>>, Error> {
+                speech::generate(model, prompt, params, provider).await
             }
         }
     };
