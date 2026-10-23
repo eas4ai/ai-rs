@@ -87,7 +87,7 @@ use self::{
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry, StreamOptions,
     models::files::DownloadTransport,
-    providers::{EventStream, operations::*},
+    providers::{EventStream, google_vertex, operations::*},
     transport::{HttpTransport, WebSocketTransport},
     types::Message,
 };
@@ -122,6 +122,14 @@ impl GeminiProtocol {
     }
 
     pub(crate) fn call(&self, model: &Model, provider: &dyn Provider) -> Result<Call, Error> {
+        if self.flavor.is_vertex() {
+            // A missing project or an invalid location fails here, before
+            // the provider's empty base URL could.
+            google_vertex::base_url(provider.config())?;
+            if model.id.starts_with("endpoints/") && google_vertex::express(provider.config()) {
+                return Err(google_vertex::express_error("tuned models"));
+            }
+        }
         let mut endpoint = Endpoint::of(self.flavor, provider)?;
         if self.flavor.is_vertex() && model.id.starts_with("endpoints/") {
             // A tuned model's endpoint is under the location, not the publisher.
@@ -189,9 +197,13 @@ impl ProviderProtocol for GeminiProtocol {
         .await
     }
 
-    fn embed_limits(&self, _model: &Model) -> CallLimits {
+    fn embed_limits(&self, model: &Model) -> CallLimits {
+        let max = match self.flavor {
+            Flavor::Gemini => embed::MAX_VALUES,
+            Flavor::Vertex => embed::vertex_max_values(&model.id),
+        };
         CallLimits {
-            max_per_call: Some(embed::MAX_VALUES),
+            max_per_call: Some(max),
             parallel: true,
         }
     }
@@ -203,7 +215,11 @@ impl ProviderProtocol for GeminiProtocol {
         values: usize,
         range: std::ops::Range<usize>,
     ) -> Result<EmbedParams, Error> {
-        embed::params_for(params, values, range)
+        match self.flavor {
+            Flavor::Gemini => embed::params_for(params, values, range),
+            // Vertex AI options apply to every value alike.
+            Flavor::Vertex => Ok(params.clone()),
+        }
     }
 
     async fn embed(
@@ -214,7 +230,10 @@ impl ProviderProtocol for GeminiProtocol {
         provider: &dyn Provider,
     ) -> Result<Item<Vec<Vec<f64>>>, Error> {
         let call = self.call(model, provider)?;
-        embed::embed(&call.endpoint, &model.id, values, &params).await
+        match self.flavor {
+            Flavor::Gemini => embed::embed(&call.endpoint, &model.id, values, &params).await,
+            Flavor::Vertex => embed::embed_vertex(&call.endpoint, &model.id, values, &params).await,
+        }
     }
 
     fn image_limits(&self, _model: &Model) -> CallLimits {
@@ -243,6 +262,12 @@ impl ProviderProtocol for GeminiProtocol {
         provider: &dyn Provider,
     ) -> Result<Item<Vec<crate::types::messages::FilePart>>, Error> {
         let call = self.call(model, provider)?;
+        if self.flavor.is_vertex() && model.id.starts_with("chirp") {
+            if google_vertex::express(provider.config()) {
+                return Err(google_vertex::express_error("Chirp speech models"));
+            }
+            return speech::chirp(&call.endpoint, &model.id, &prompt, &params).await;
+        }
         speech::generate(&call.endpoint, &model.id, &prompt, &params).await
     }
 
@@ -254,7 +279,21 @@ impl ProviderProtocol for GeminiProtocol {
         provider: &dyn Provider,
     ) -> Result<Item<Transcription>, Error> {
         let call = self.call(model, provider)?;
-        transcription::transcribe(&call.endpoint, &model.id, &audio, &params).await
+        match self.flavor {
+            Flavor::Gemini => {
+                transcription::transcribe(&call.endpoint, &model.id, &audio, &params).await
+            }
+            Flavor::Vertex if google_vertex::express(provider.config()) => {
+                Err(google_vertex::express_error("transcription models"))
+            }
+            Flavor::Vertex if model.id.starts_with("gemini") => {
+                transcription::transcribe_vertex_gemini(&call.endpoint, &model.id, &audio, &params)
+                    .await
+            }
+            Flavor::Vertex => {
+                transcription::transcribe_cloud(&call.endpoint, &model.id, &audio, &params).await
+            }
+        }
     }
 
     async fn stream_transcription(
@@ -266,6 +305,9 @@ impl ProviderProtocol for GeminiProtocol {
         provider: &dyn Provider,
     ) -> Result<TranscriptionStream, Error> {
         let call = self.call(model, provider)?;
+        if self.flavor.is_vertex() && google_vertex::express(provider.config()) {
+            return Err(google_vertex::express_error("transcription models"));
+        }
         let socket = websocket_of(provider)?;
         transcription::stream(&call.endpoint, &model.id, socket, audio, &format, &params)
     }

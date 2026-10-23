@@ -14,7 +14,7 @@
 
 use super::{
     dialect,
-    profile::{ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
+    profile::{ChatProfile, Dialect, ReasoningTokens, ResponsesDialect, ResponsesProfile},
     protocol::Wire,
 };
 use crate::{
@@ -287,7 +287,7 @@ impl Parser {
             && let Some(mut u) = usage(value, false)
         {
             let cached = match dialect {
-                Dialect::OpenAI => None,
+                Dialect::OpenAI | Dialect::VertexMaas | Dialect::VertexXai => None,
                 Dialect::DeepSeek => value["prompt_cache_hit_tokens"].as_u64(),
                 Dialect::Moonshot => value["cached_tokens"].as_u64(),
                 Dialect::Mistral => value["num_cached_tokens"]
@@ -297,12 +297,18 @@ impl Parser {
             if cached.is_some() {
                 u.cache_read_tokens = cached;
             }
-            // DeepInfra can count reasoning tokens apart from completion tokens.
-            if self.chat.is_some_and(|c| c.reasoning_outside_completion)
-                && let Some(reasoning) = u.reasoning_tokens
-                && reasoning > u.output_tokens
-            {
-                u.output_tokens = u.output_tokens.saturating_add(reasoning);
+            // DeepInfra can count reasoning tokens apart from completion
+            // tokens; xAI on Vertex AI always does.
+            if let Some(reasoning) = u.reasoning_tokens {
+                match self.chat.map(|c| c.reasoning_tokens) {
+                    Some(ReasoningTokens::OutsideWhenLarger) if reasoning > u.output_tokens => {
+                        u.output_tokens = u.output_tokens.saturating_add(reasoning);
+                    }
+                    Some(ReasoningTokens::Outside) => {
+                        u.output_tokens = u.output_tokens.saturating_add(reasoning);
+                    }
+                    _ => {}
+                }
             }
             self.usage = Some(u);
         }

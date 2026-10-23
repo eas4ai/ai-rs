@@ -50,7 +50,7 @@ pub(super) fn check(
 ) -> Result<(), Error> {
     check_settings(profile.api.label, profile.unsupported, p, options)?;
     match profile.dialect {
-        Dialect::OpenAI => Ok(()),
+        Dialect::OpenAI | Dialect::VertexMaas | Dialect::VertexXai => Ok(()),
         Dialect::DeepSeek => check_deepseek(model, p),
         Dialect::Moonshot => check_moonshot(model, p, options),
         Dialect::Mistral => check_mistral(model, p),
@@ -148,6 +148,13 @@ fn check_settings(
     Ok(())
 }
 
+/// The open models on Vertex AI that get an output limit of 8192 tokens
+/// when the call sets none.
+const VERTEX_MAAS_LIMITS: [&str; 2] = [
+    "meta/llama-4-maverick-17b-128e-instruct-maas",
+    "meta/llama-4-scout-17b-16e-instruct-maas",
+];
+
 /// Change the request body built from the parameters to the host's fields.
 pub(super) fn request(
     profile: &ChatProfile,
@@ -157,6 +164,18 @@ pub(super) fn request(
 ) {
     match profile.dialect {
         Dialect::OpenAI => {}
+        Dialect::VertexMaas => {
+            // Llama 4 on Vertex AI needs an output limit
+            // (`google-vertex-maas-provider.ts`).
+            if VERTEX_MAAS_LIMITS.contains(&model) && !body.contains_key(profile.max_tokens_field) {
+                body.insert(profile.max_tokens_field.into(), json!(8192));
+            }
+        }
+        // xAI on Vertex AI takes no reasoning effort
+        // (`google-vertex-xai-provider.ts`).
+        Dialect::VertexXai => {
+            body.remove("reasoning_effort");
+        }
         Dialect::DeepSeek => match effort(p) {
             Some(Effort::Disabled) => {
                 body.remove("reasoning_effort");
@@ -223,7 +242,7 @@ pub(super) fn response_format(
         Dialect::Mistral => Some(
             json!({"type":"json_schema","json_schema":{"name":name,"strict":false,"schema":schema}}),
         ),
-        Dialect::OpenAI | Dialect::DeepSeek => None,
+        Dialect::OpenAI | Dialect::DeepSeek | Dialect::VertexMaas | Dialect::VertexXai => None,
     })
 }
 

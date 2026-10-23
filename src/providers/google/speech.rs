@@ -384,3 +384,125 @@ pub(crate) async fn generate(
     );
     Ok(item)
 }
+
+/// Cloud Text-to-Speech, which serves the Chirp 3: HD voices.
+const CLOUD_TTS_BASE_URL: &str = "https://texttospeech.googleapis.com/v1";
+const CHIRP3_HD: &str = "Chirp3-HD";
+
+/// The voice name and language code of a Chirp 3: HD voice: a full name is
+/// used as it is, with its locale as the language unless one is set; a
+/// plain voice name is composed with the language (`Kore` and `en-US` by
+/// default).
+fn chirp_voice(voice: Option<&str>, language: Option<&str>) -> (String, String) {
+    let voice = voice.unwrap_or("Kore");
+    if voice.contains(CHIRP3_HD) {
+        let prefix = voice
+            .split(CHIRP3_HD)
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('-');
+        let language = language
+            .or((!prefix.is_empty()).then_some(prefix))
+            .unwrap_or("en-US");
+        (voice.to_owned(), language.to_owned())
+    } else {
+        let language = language.unwrap_or("en-US");
+        (
+            format!("{language}-{CHIRP3_HD}-{voice}"),
+            language.to_owned(),
+        )
+    }
+}
+
+/// Speak with a Chirp 3: HD voice on Cloud Text-to-Speech, as LINEAR16 WAV
+/// audio (VTX-009, `google-vertex-cloud-tts-speech-model.ts`).
+pub(crate) async fn chirp(
+    endpoint: &Endpoint,
+    model_id: &str,
+    prompt: &AudioPrompt,
+    params: &AudioParams,
+) -> Result<Item<Vec<FilePart>>, Error> {
+    let (name, language) = chirp_voice(params.voice.as_deref(), params.language.as_deref());
+    let mut warnings = Vec::new();
+    if prompt.instructions.is_some() {
+        warnings.push(warning(
+            "instructions",
+            "Google Cloud Text-to-Speech Chirp 3: HD voices do not support the `instructions` option. It was ignored.".into(),
+        ));
+    }
+    if let Some(format) = params.output_format.as_deref().filter(|f| *f != "wav") {
+        warnings.push(warning(
+            "outputFormat",
+            format!("Unsupported output format: {format}. Using wav instead."),
+        ));
+    }
+    let mut audio_config = json!({"audioEncoding": "LINEAR16"});
+    if let Some(speed) = params.speed {
+        audio_config["speakingRate"] = json!(speed);
+    }
+    let body = json!({
+        "input": {"text": prompt.text},
+        "voice": {"languageCode": language, "name": name},
+        "audioConfig": audio_config,
+    });
+    let request = endpoint.request_at(
+        CLOUD_TTS_BASE_URL,
+        "POST",
+        &["text:synthesize".into()],
+        Some(body),
+        Default::default(),
+        Default::default(),
+    )?;
+    let (_, response) = endpoint
+        .json(request, Some(model_id), MEDIA_RESPONSE_BYTES)
+        .await?;
+    let audio = match response.get("audioContent").and_then(Value::as_str) {
+        Some(data) => STANDARD.decode(data).map_err(|_| {
+            http::response_error(
+                &endpoint.provider,
+                "Google Cloud Text-to-Speech audio is not valid base64",
+            )
+        })?,
+        None => Vec::new(),
+    };
+    let mut item = Item::new(vec![FilePart {
+        id: generate_id("part"),
+        data: FileData::Bytes(audio),
+        media_type: "audio/wav".into(),
+        filename: None,
+        provider_metadata: None,
+    }]);
+    item.warnings = warnings;
+    item.provider_metadata = Some([("google".to_owned(), json!({"mimeType": "audio/wav"}))].into());
+    Ok(item)
+}
+
+#[cfg(test)]
+mod chirp_tests {
+    use super::chirp_voice;
+
+    #[test]
+    fn voices_are_composed_as_typescript_composes_them() {
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            chirp_voice(None, None),
+            pair("en-US-Chirp3-HD-Kore", "en-US")
+        );
+        assert_eq!(
+            chirp_voice(Some("Puck"), Some("de-DE")),
+            pair("de-DE-Chirp3-HD-Puck", "de-DE")
+        );
+        assert_eq!(
+            chirp_voice(Some("fr-FR-Chirp3-HD-Aoede"), None),
+            pair("fr-FR-Chirp3-HD-Aoede", "fr-FR")
+        );
+        assert_eq!(
+            chirp_voice(Some("Chirp3-HD-Kore"), None),
+            pair("Chirp3-HD-Kore", "en-US")
+        );
+        assert_eq!(
+            chirp_voice(Some("fr-FR-Chirp3-HD-Aoede"), Some("fr-CA")),
+            pair("fr-FR-Chirp3-HD-Aoede", "fr-CA")
+        );
+    }
+}

@@ -49,23 +49,69 @@ pub(crate) static ANTHROPIC: MessagesProfile = MessagesProfile {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HostMessagesProtocol(pub(crate) &'static MessagesProfile);
 
-fn build_request(
+/// How a Messages request sends an output schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SchemaMode {
+    /// Native structured output in `output_config.format`.
+    OutputFormat,
+    /// A forced tool named `json` whose input is the answer, for servers
+    /// without native structured output (`jsonResponseTool`). The stream
+    /// gives its input as text.
+    JsonTool,
+}
+
+/// The name of the JSON tool of [`SchemaMode::JsonTool`].
+pub(crate) const JSON_TOOL: &str = "json";
+
+/// Models that reject a forced tool choice; the JSON tool goes to them with
+/// automatic tool choice (`getModelCapabilities`).
+fn rejects_forced_tool_use(model: &str) -> bool {
+    ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"]
+        .iter()
+        .any(|id| model.contains(id))
+}
+
+/// A Messages request before its URL: the body with `stream: true`, the
+/// headers and the query.
+pub(crate) struct MessagesRequest {
+    pub body: serde_json::Map<String, Value>,
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub query: std::collections::BTreeMap<String, Value>,
+}
+
+pub(crate) fn request_parts(
     profile: &MessagesProfile,
-    model: &Model,
+    model: &str,
     messages: &[Message],
     options: &StreamOptions,
-    provider: &dyn Provider,
-) -> Result<HttpRequest, Error> {
-    let mut params = params::translate(options.params.as_ref(), profile, &model.id)?;
+    schema_mode: SchemaMode,
+) -> Result<MessagesRequest, Error> {
+    let mut params = params::translate(options.params.as_ref(), profile, model)?;
     if let Some(choice) = &options.tool_choice {
         params
             .body
             .insert("tool_choice".into(), params::tool_choice(choice)?);
     }
     let (system, messages) = messages_to_anthropic(messages)?;
-    let (wire_tools, betas) = tools::to_wire(&options.tools)?;
+    let (mut wire_tools, betas) = tools::to_wire(&options.tools)?;
+    if let (SchemaMode::JsonTool, Some(schema)) = (schema_mode, &options.output_schema) {
+        wire_tools.push(json!({
+            "name": JSON_TOOL,
+            "description": "Respond with a JSON object.",
+            "input_schema": schema.as_value(),
+        }));
+        let kind = if rejects_forced_tool_use(model) {
+            "auto"
+        } else {
+            "any"
+        };
+        params.body.insert(
+            "tool_choice".into(),
+            json!({"type": kind, "disable_parallel_tool_use": true}),
+        );
+    }
     params.body.entry("max_tokens").or_insert(json!(8192));
-    params.body.insert("model".into(), json!(model.id));
+    params.body.insert("model".into(), json!(model));
     params.body.insert("messages".into(), json!(messages));
     params.body.insert("stream".into(), json!(true));
     if let Some(system) = system {
@@ -75,7 +121,7 @@ fn build_request(
         params.body.insert("tools".into(), json!(wire_tools));
     }
     params::add_betas(&mut params.headers, &betas);
-    if let Some(schema) = &options.output_schema {
+    if let (SchemaMode::OutputFormat, Some(schema)) = (schema_mode, &options.output_schema) {
         let format =
             json!({"type":"json_schema","schema":super::schema::transform(schema.as_value(),0)?});
         let output = params.body.entry("output_config").or_insert(json!({}));
@@ -83,14 +129,35 @@ fn build_request(
     }
     // The Python SDK merges extra_body after all named request parameters.
     params.body.extend(params.extra_body);
+    Ok(MessagesRequest {
+        body: params.body,
+        headers: params.headers,
+        query: params.query,
+    })
+}
+
+fn build_request(
+    profile: &MessagesProfile,
+    model: &Model,
+    messages: &[Message],
+    options: &StreamOptions,
+    provider: &dyn Provider,
+) -> Result<HttpRequest, Error> {
+    let parts = request_parts(
+        profile,
+        &model.id,
+        messages,
+        options,
+        SchemaMode::OutputFormat,
+    )?;
     http::request(
         &profile.api,
         provider.config(),
         "POST",
         &["v1", "messages"],
-        Some(Value::Object(params.body)),
-        params.headers,
-        params.query,
+        Some(Value::Object(parts.body)),
+        parts.headers,
+        parts.query,
     )
 }
 
@@ -121,7 +188,12 @@ fn start(
             Some(&model_id),
         )
         .await?;
-        Ok::<_, Error>(super::stream::parse(response.body, name, &profile.api))
+        Ok::<_, Error>(super::stream::parse(
+            response.body,
+            name,
+            &profile.api,
+            false,
+        ))
     })
     .try_flatten()
     .boxed()

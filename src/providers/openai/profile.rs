@@ -43,8 +43,8 @@ pub(crate) struct ChatProfile {
     pub rejects_penalties_and_seed: bool,
     /// Finish reasons the server adds, with their normalized names.
     pub finish_reasons: &'static [(&'static str, &'static str)],
-    /// The server may leave reasoning tokens out of `completion_tokens`.
-    pub reasoning_outside_completion: bool,
+    /// Whether `completion_tokens` counts the reasoning tokens.
+    pub reasoning_tokens: ReasoningTokens,
     /// Under an output schema, drop tool calls that follow text.
     pub json_drops_tool_calls_after_text: bool,
     /// Request settings the server's TypeScript provider never sends; a call
@@ -54,6 +54,18 @@ pub(crate) struct ChatProfile {
     pub dialect: Dialect,
     /// Give errors inside the stream a kind from their code and type.
     pub stream_error_kinds: bool,
+}
+
+/// How a server's `completion_tokens` relates to its reasoning tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReasoningTokens {
+    /// The completion tokens include the reasoning tokens, as OpenAI's do.
+    InCompletion,
+    /// The server may count reasoning apart from the completion; reasoning
+    /// above the completion count is added to it.
+    OutsideWhenLarger,
+    /// The completion tokens never include the reasoning tokens.
+    Outside,
 }
 
 /// A request setting that a host profile can mark unsupported.
@@ -86,6 +98,11 @@ pub(crate) enum Dialect {
     DeepSeek,
     Moonshot,
     Mistral,
+    /// The open models on Vertex AI: every file URL is downloaded, and Llama
+    /// 4 gets an output limit.
+    VertexMaas,
+    /// xAI on Vertex AI: no reasoning effort goes out.
+    VertexXai,
 }
 
 #[derive(Debug)]
@@ -173,7 +190,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     auto_tool_choice_only: false,
     rejects_penalties_and_seed: false,
     finish_reasons: &[],
-    reasoning_outside_completion: false,
+    reasoning_tokens: ReasoningTokens::InCompletion,
     json_drops_tool_calls_after_text: false,
     unsupported: &[],
     dialect: Dialect::OpenAI,

@@ -51,10 +51,109 @@ struct Parser {
     response_model: Option<String>,
     stop_reason: Option<String>,
     usage: Map<String, Value>,
+    /// The output schema went out as the JSON tool: its input is the text,
+    /// and other text is dropped.
+    json_tool: bool,
+    /// The JSON tool answered.
+    json_answer: bool,
 }
-pub(super) fn parse(body: Body, provider: String, api: &'static ApiProfile) -> EventStream {
+/// Read a Messages event stream. With `json_tool`, the input of the tool
+/// named `json` is the answer's text (`SchemaMode::JsonTool`).
+pub(crate) fn parse(
+    body: Body,
+    provider: String,
+    api: &'static ApiProfile,
+    json_tool: bool,
+) -> EventStream {
+    run(
+        http::sse_json(*api, provider.clone(), body),
+        provider,
+        api,
+        json_tool,
+    )
+}
+
+/// A buffered Messages response read as the stream of the same message,
+/// so that both paths give the same events.
+pub(crate) fn parse_message(
+    response: &Value,
+    provider: String,
+    api: &'static ApiProfile,
+    json_tool: bool,
+) -> EventStream {
+    let events: Vec<Result<SseJson, Error>> = message_events(response)
+        .into_iter()
+        .map(|event| Ok(SseJson::Object(event)))
+        .collect();
+    run(stream::iter(events).boxed(), provider, api, json_tool)
+}
+
+/// The stream events of a buffered message: its start, each content block's
+/// start, delta and stop, and its end.
+fn message_events(response: &Value) -> Vec<Value> {
+    let mut start = Map::new();
+    for key in ["id", "model", "usage"] {
+        if let Some(value) = response.get(key) {
+            start.insert(key.into(), value.clone());
+        }
+    }
+    start.insert("stop_reason".into(), Value::Null);
+    let mut events = vec![json!({"type": "message_start", "message": start})];
+    let blocks = response
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (index, block) in blocks.iter().enumerate() {
+        let kind = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut deltas = Vec::new();
+        let opened = match kind {
+            "text" => {
+                deltas.push(json!({"type": "text_delta", "text": block.get("text").cloned().unwrap_or(json!(""))}));
+                json!({"type": "text", "text": ""})
+            }
+            "thinking" => {
+                deltas.push(json!({"type": "thinking_delta", "thinking": block.get("thinking").cloned().unwrap_or(json!(""))}));
+                if let Some(signature) = block.get("signature").filter(|s| s.is_string()) {
+                    deltas.push(json!({"type": "signature_delta", "signature": signature}));
+                }
+                json!({"type": "thinking", "thinking": ""})
+            }
+            "tool_use" | "server_tool_use" => {
+                let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                deltas.push(json!({"type": "input_json_delta", "partial_json": input.to_string()}));
+                let mut opened = block.clone();
+                opened["input"] = json!({});
+                opened
+            }
+            _ => block.clone(),
+        };
+        events
+            .push(json!({"type": "content_block_start", "index": index, "content_block": opened}));
+        for delta in deltas {
+            events.push(json!({"type": "content_block_delta", "index": index, "delta": delta}));
+        }
+        events.push(json!({"type": "content_block_stop", "index": index}));
+    }
+    events.push(json!({
+        "type": "message_delta",
+        "delta": {"stop_reason": response.get("stop_reason").cloned().unwrap_or(Value::Null)},
+    }));
+    events.push(json!({"type": "message_stop"}));
+    events
+}
+
+fn run(
+    source: futures::stream::BoxStream<'static, Result<SseJson, Error>>,
+    provider: String,
+    api: &'static ApiProfile,
+    json_tool: bool,
+) -> EventStream {
     let state = Parser {
-        source: http::sse_json(*api, provider.clone(), body),
+        source,
         provider,
         api,
         blocks: HashMap::new(),
@@ -66,6 +165,8 @@ pub(super) fn parse(body: Body, provider: String, api: &'static ApiProfile) -> E
         response_model: None,
         stop_reason: None,
         usage: Map::new(),
+        json_tool,
+        json_answer: false,
     };
     stream::try_unfold(state, |mut parser| async move {
         loop {
@@ -223,6 +324,23 @@ impl Parser {
         };
         let block_id = idx.to_string();
         let event = match kind.as_str() {
+            // The JSON tool's input is the answer; other text is dropped.
+            "text" if self.json_tool => {
+                block.kind = "dropped_text".into();
+                None
+            }
+            "tool_use"
+                if self.json_tool
+                    && wire.get("name").and_then(Value::as_str)
+                        == Some(super::protocol::JSON_TOOL) =>
+            {
+                block.kind = "json_tool".into();
+                self.json_answer = true;
+                Some(Event::TextStart(TextStart {
+                    block_id,
+                    ..Default::default()
+                }))
+            }
             "text" => Some(Event::TextStart(TextStart {
                 block_id,
                 ..Default::default()
@@ -274,6 +392,14 @@ impl Parser {
         let kind = self.text(delta, "type")?;
         let block_id = idx.to_string();
         let event = match kind.as_str() {
+            "text_delta"
+                if self
+                    .blocks
+                    .get(&idx)
+                    .is_some_and(|block| block.kind == "dropped_text") =>
+            {
+                None
+            }
             "text_delta" => Some(Event::TextDelta(TextDelta {
                 chunk: self.text(delta, "text")?,
                 block_id,
@@ -290,6 +416,18 @@ impl Parser {
                     b.signature.get_or_insert_default().push_str(&text);
                 }
                 None
+            }
+            "input_json_delta"
+                if self
+                    .blocks
+                    .get(&idx)
+                    .is_some_and(|block| block.kind == "json_tool") =>
+            {
+                Some(Event::TextDelta(TextDelta {
+                    chunk: self.text(delta, "partial_json")?,
+                    block_id,
+                    event: Default::default(),
+                }))
             }
             "input_json_delta" => {
                 if let Some(block) = self.blocks.get(&idx).filter(|b| !b.id.is_empty()) {
@@ -325,7 +463,7 @@ impl Parser {
         };
         let block_id = idx.to_string();
         let event = match block.kind.as_str() {
-            "text" => Some(Event::TextEnd(TextEnd {
+            "text" | "json_tool" => Some(Event::TextEnd(TextEnd {
                 block_id,
                 ..Default::default()
             })),
@@ -407,6 +545,8 @@ impl Parser {
         let finish = self.stop_reason.as_deref().map(|r| match r {
             "end_turn" | "stop_sequence" => "stop",
             "max_tokens" | "model_context_window_exceeded" => "length",
+            // The JSON tool's call is the answer, not a tool call.
+            "tool_use" if self.json_answer => "stop",
             "tool_use" => "tool_call",
             "refusal" => "content_filter",
             _ => "other",

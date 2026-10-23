@@ -116,15 +116,19 @@ impl Ctx {
         } else {
             Flavor::Gemini
         };
-        let mut endpoint = Endpoint::of(flavor, provider)?;
         if flavor.is_vertex() {
-            let base = endpoint.base.trim_end_matches('/');
-            let base = base.strip_suffix("/publishers/google").unwrap_or(base);
-            if !base.contains("/projects/") {
-                return Err(Error::Configuration(
-                    "Google Vertex Interactions models do not support Express Mode API keys. Use standard Google Cloud credentials instead.".into(),
+            if crate::providers::google_vertex::express(provider.config()) {
+                return Err(crate::providers::google_vertex::express_error(
+                    "Interactions models",
                 ));
             }
+            crate::providers::google_vertex::base_url(provider.config())?;
+        }
+        let mut endpoint = Endpoint::of(flavor, provider)?;
+        if flavor.is_vertex() {
+            // Interactions are under the location, not the publisher.
+            let base = endpoint.base.trim_end_matches('/');
+            let base = base.strip_suffix("/publishers/google").unwrap_or(base);
             endpoint.base = base.to_owned();
         }
         let mut headers = BTreeMap::new();

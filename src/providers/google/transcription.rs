@@ -29,7 +29,7 @@ use super::{
 };
 use crate::{
     Error,
-    providers::operations::*,
+    providers::{google_vertex, http, operations::*},
     transport::{WebSocketRequest, WebSocketTransport},
     types::{media, messages::FileData, usage::Usage},
 };
@@ -161,9 +161,7 @@ pub(crate) async fn transcribe(
     params: &TranscribeParams,
 ) -> Result<Item<Transcription>, Error> {
     if model_id.contains("-live") {
-        return Err(Error::Validation(format!(
-            "Model '{model_id}' only supports streaming transcription. Use ops::stream_transcription, or a unary model such as 'gemini-3.5-transcribe'."
-        )));
+        return Err(live_only(model_id));
     }
     let options = parse_options(endpoint.flavor, &params.provider_options)?;
     let (bytes, media_type) = audio_input(audio)?;
@@ -244,6 +242,233 @@ pub(crate) async fn transcribe(
         item.provider_metadata = Some([("google".to_owned(), json!({"usage": usage}))].into());
     }
     Ok(item)
+}
+
+/// The error of a live model asked for a whole file.
+fn live_only(model_id: &str) -> Error {
+    Error::Validation(format!(
+        "Model '{model_id}' only supports streaming transcription. Use ops::stream_transcription, or a unary model such as 'gemini-3.5-transcribe'."
+    ))
+}
+
+/// Transcribe a whole file with Gemini on Vertex AI: `generateContent` with
+/// the audio inline (VTX-011,
+/// `gemini-transcription/google-vertex-gemini-transcription-model.ts`).
+pub(crate) async fn transcribe_vertex_gemini(
+    endpoint: &Endpoint,
+    model_id: &str,
+    audio: &TranscribeInput,
+    params: &TranscribeParams,
+) -> Result<Item<Transcription>, Error> {
+    if model_id.contains("-live") {
+        return Err(live_only(model_id));
+    }
+    let options = parse_options(Flavor::Vertex, &params.provider_options)?;
+    let (bytes, media_type) = audio_input(audio)?;
+    let mut body = json!({"contents": [{"role": "user", "parts": [
+        {"inlineData": {"mimeType": media_type, "data": STANDARD.encode(&bytes)}}
+    ]}]});
+    if let Some(config) = audio_transcription_config(&options) {
+        body["generationConfig"] = json!({"audioTranscriptionConfig": config});
+    }
+    let request = endpoint.request(
+        "POST",
+        &["models".into(), format!("{model_id}:generateContent")],
+        Some(body),
+        Default::default(),
+        Default::default(),
+    )?;
+    let (_, response) = endpoint
+        .json(request, Some(model_id), MEDIA_RESPONSE_BYTES)
+        .await?;
+    let parts = response
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let joined = |text: &dyn Fn(&Value) -> Option<&str>| -> String {
+        parts.iter().filter_map(text).collect()
+    };
+    let plain = joined(&|part| part.get("text").and_then(Value::as_str));
+    let text = if plain.is_empty() {
+        joined(&|part| {
+            part.pointer("/audioTranscription/text")
+                .and_then(Value::as_str)
+        })
+    } else {
+        plain
+    };
+    let mut language = None;
+    let mut segments = Vec::new();
+    for transcription in parts
+        .iter()
+        .filter_map(|part| part.get("audioTranscription"))
+    {
+        if language.is_none() {
+            language = transcription
+                .get("languageCode")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        for word in transcription
+            .get("words")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(text), Some(start), Some(end)) = (
+                word.get("word").and_then(Value::as_str),
+                offset_seconds(word.get("startOffset")),
+                offset_seconds(word.get("endOffset")),
+            ) {
+                segments.push(TranscriptionSegment {
+                    text: text.to_owned(),
+                    start_second: start,
+                    end_second: end,
+                });
+            }
+        }
+    }
+    let mut item = Item::new(Transcription {
+        text,
+        segments,
+        language,
+        duration_seconds: None,
+    });
+    if let Some(usage) = response.get("usageMetadata").filter(|u| u.is_object()) {
+        item.usage = Some(super::response::convert_usage(usage));
+        item.provider_metadata =
+            Some([("google".to_owned(), json!({"usageMetadata": usage}))].into());
+    }
+    Ok(item)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SpeechToTextOptions {
+    language_codes: Option<Vec<String>>,
+    enable_automatic_punctuation: Option<bool>,
+    enable_word_time_offsets: Option<bool>,
+    region: Option<String>,
+}
+
+/// The two-letter language of a BCP-47 tag, as `Intl.Locale` reads its
+/// language subtag, or `None` for a longer one.
+fn two_letter_language(tag: &str) -> Option<String> {
+    let language = tag.split(['-', '_']).next()?.to_ascii_lowercase();
+    (language.len() == 2 && language.bytes().all(|b| b.is_ascii_lowercase())).then_some(language)
+}
+
+/// Transcribe a whole file with Cloud Speech-to-Text v2 (VTX-010,
+/// `google-vertex-transcription-model.ts`).
+pub(crate) async fn transcribe_cloud(
+    endpoint: &Endpoint,
+    model_id: &str,
+    audio: &TranscribeInput,
+    params: &TranscribeParams,
+) -> Result<Item<Transcription>, Error> {
+    let options: SpeechToTextOptions =
+        options::parse(Flavor::Vertex, Some(&params.provider_options))?;
+    let project = google_vertex::project(&endpoint.config)?;
+    let region = match &options.region {
+        Some(region) if !google_vertex::is_dns_label(region) => {
+            return Err(Error::Validation(
+                "Invalid Google Cloud Speech-to-Text region. Expected a single DNS label (letters, digits, and hyphens).".into(),
+            ));
+        }
+        Some(region) => region.clone(),
+        None => google_vertex::location(&endpoint.config, None)?.to_owned(),
+    };
+    let (bytes, _) = audio_input(audio)?;
+    let body = json!({
+        "config": {
+            "model": model_id,
+            "languageCodes": options.language_codes.clone().unwrap_or_else(|| vec!["auto".into()]),
+            "autoDecodingConfig": {},
+            "features": {
+                "enableWordTimeOffsets": options.enable_word_time_offsets.unwrap_or(true),
+                "enableAutomaticPunctuation": options.enable_automatic_punctuation.unwrap_or(true),
+            },
+        },
+        "content": STANDARD.encode(&bytes),
+    });
+    let host = if region == "global" {
+        "speech.googleapis.com".to_owned()
+    } else {
+        format!("{region}-speech.googleapis.com")
+    };
+    let request = endpoint.request_at(
+        &format!("https://{host}/v2"),
+        "POST",
+        &[
+            "projects".into(),
+            project.to_owned(),
+            "locations".into(),
+            region.clone(),
+            "recognizers".into(),
+            "_:recognize".into(),
+        ],
+        Some(body),
+        Default::default(),
+        Default::default(),
+    )?;
+    let (_, response) = endpoint
+        .json(request, Some(model_id), http::MAX_RESPONSE_BYTES)
+        .await?;
+    let results = response
+        .get("results")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let first = |result: &Value| result.pointer("/alternatives/0").cloned();
+    let text = results
+        .iter()
+        .map(|result| {
+            first(result)
+                .and_then(|alternative| {
+                    alternative
+                        .get("transcript")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_owned();
+    let mut segments = Vec::new();
+    for alternative in results.iter().filter_map(first) {
+        for word in alternative
+            .get("words")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(text), Some(start), Some(end)) = (
+                word.get("word").and_then(Value::as_str),
+                offset_seconds(word.get("startOffset")),
+                offset_seconds(word.get("endOffset")),
+            ) {
+                segments.push(TranscriptionSegment {
+                    text: text.to_owned(),
+                    start_second: start,
+                    end_second: end,
+                });
+            }
+        }
+    }
+    let language = results
+        .first()
+        .and_then(|result| result.get("languageCode"))
+        .and_then(Value::as_str)
+        .and_then(two_letter_language);
+    Ok(Item::new(Transcription {
+        text,
+        segments,
+        language,
+        duration_seconds: offset_seconds(response.pointer("/metadata/totalBilledDuration")),
+    }))
 }
 
 /// Interactions usage as the crate's usage.
