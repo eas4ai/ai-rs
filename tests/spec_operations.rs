@@ -651,6 +651,29 @@ impl Provider for Host {
         Ok(Item::new(true))
     }
 
+    async fn upload_skill(
+        &self,
+        files: Vec<SkillFile>,
+        params: SkillParams,
+    ) -> Result<Item<UploadedSkill>, Error> {
+        let files: Vec<Value> = files
+            .iter()
+            .map(|f| json!({"path": f.path, "data": f.data.to_vec()}))
+            .collect();
+        self.script.begin(
+            "upload_skill",
+            json!({"files": files, "display_title": params.display_title}),
+        )?;
+        let mut item = Item::new(UploadedSkill {
+            provider_reference: [("scripted".to_owned(), "skill_1".to_owned())].into(),
+            name: Some("notes".into()),
+            latest_version: Some("2".into()),
+            ..Default::default()
+        });
+        item.provider_metadata = Some([("scripted".to_owned(), json!({"region": "eu"}))].into());
+        Ok(item)
+    }
+
     async fn batch_start(
         &self,
         requests: Vec<BatchRequest>,
@@ -2318,5 +2341,61 @@ async fn ops_012_file_operations_retry_and_need_the_provider_operation() {
             "{error:?}"
         );
     }
+    assert!(recorder.requests.lock().unwrap().is_empty());
+}
+
+// OPS-013
+
+#[tokio::test]
+async fn ops_013_a_skill_upload_sends_its_files_and_returns_what_the_provider_reports() {
+    let script = Script::new(unlimited());
+    let host = host_with(script.clone(), script.clone(), None);
+    let files = vec![
+        SkillFile {
+            path: "notes/SKILL.md".into(),
+            data: bytes::Bytes::from_static(b"# Notes"),
+        },
+        SkillFile {
+            path: "notes/run.py".into(),
+            data: bytes::Bytes::from_static(b"print(1)"),
+        },
+    ];
+    let params = SkillParams {
+        display_title: Some("Notes".into()),
+        ..Default::default()
+    };
+    let uploaded = ops::upload_skill(host.as_ref(), files, params, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        script.calls("upload_skill"),
+        vec![json!({"files": [
+            {"path": "notes/SKILL.md", "data": b"# Notes".to_vec()},
+            {"path": "notes/run.py", "data": b"print(1)".to_vec()},
+        ], "display_title": "Notes"})]
+    );
+    assert_eq!(
+        uploaded.value,
+        UploadedSkill {
+            provider_reference: [("scripted".to_owned(), "skill_1".to_owned())].into(),
+            display_title: None,
+            name: Some("notes".into()),
+            description: None,
+            latest_version: Some("2".into()),
+        }
+    );
+    assert_eq!(
+        uploaded.provider_metadata.unwrap()["scripted"],
+        json!({"region": "eu"})
+    );
+    let recorder = Recorder::new([]);
+    let bare = Bare(ProviderConfig::default(), recorder.clone());
+    let error = ops::upload_skill(&bare, vec![], SkillParams::default(), Default::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::UnsupportedOperation(name) if name == "upload_skill"),
+        "{error:?}"
+    );
     assert!(recorder.requests.lock().unwrap().is_empty());
 }

@@ -582,6 +582,15 @@ pub trait Provider: Send + Sync + AsProvider {
         Err(unsupported("delete_file"))
     }
 
+    /// Upload a skill through the provider's skills operation.
+    async fn upload_skill(
+        &self,
+        _files: Vec<SkillFile>,
+        _params: SkillParams,
+    ) -> Result<Item<UploadedSkill>, Error> {
+        Err(unsupported("upload_skill"))
+    }
+
     async fn batch_start(
         &self,
         _requests: Vec<BatchRequest>,

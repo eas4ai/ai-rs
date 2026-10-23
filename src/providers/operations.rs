@@ -383,6 +383,33 @@ pub struct DownloadedFile {
 /// The most bytes `ops::download_file` reads: 256 MiB.
 pub const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
 
+/// One file of a skill: its path within the skill and its bytes (OPS-013).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkillFile {
+    pub path: String,
+    pub data: bytes::Bytes,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SkillParams {
+    /// A human-readable title, for a provider that takes one.
+    pub display_title: Option<String>,
+    #[serde(default)]
+    pub provider_options: Metadata,
+}
+
+/// An uploaded skill. `provider_reference` maps the provider name to the
+/// id a later request names the skill by; each other field is absent when
+/// the provider does not report it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct UploadedSkill {
+    pub provider_reference: BTreeMap<String, String>,
+    pub display_title: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub latest_version: Option<String>,
+}
+
 /// One request of a batch.
 #[derive(Clone, Debug)]
 pub struct BatchRequest {
