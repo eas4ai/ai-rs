@@ -444,6 +444,18 @@ pub async fn delete_file(
     with_retries(&options.retry, || provider.delete_file(reference)).await
 }
 
+/// Upload a skill, its files each a path and its bytes, through the
+/// provider's skills operation (OPS-013).
+pub async fn upload_skill(
+    provider: &dyn Provider,
+    files: Vec<SkillFile>,
+    params: SkillParams,
+    options: OperationOptions,
+) -> Result<Item<UploadedSkill>, Error> {
+    let _ = (provider, files, params, options);
+    Err(Error::UnsupportedOperation("upload_skill is not built".into()))
+}
+
 /// Transcribe a stream of raw audio chunks as they arrive. Dropping the
 /// returned stream closes the provider connection and stops reading the
 /// audio.

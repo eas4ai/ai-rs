@@ -3935,3 +3935,68 @@ async fn oai_021_a_reference_without_an_openai_id_fails_before_a_request() {
     }
     assert!(transport.requests.lock().unwrap().is_empty());
 }
+
+// OAI-022
+
+#[tokio::test]
+async fn oai_022_a_skill_uploads_its_files_named_by_their_paths() {
+    use suprnova_ai::providers::operations::{SkillFile, SkillParams};
+    let transport = Recorder::new([json_reply(
+        json!({"id": "skill_1", "name": "notes", "description": "Takes notes",
+        "default_version": "1", "latest_version": "2", "created_at": 1_800_000_000u64, "updated_at": 1_800_000_100u64}),
+    )]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let files = vec![
+        SkillFile {
+            path: "notes/SKILL.md".into(),
+            data: Bytes::from_static(b"# Notes"),
+        },
+        SkillFile {
+            path: "notes/run.py".into(),
+            data: Bytes::from_static(b"print(1)"),
+        },
+    ];
+    let uploaded = suprnova_ai::ops::upload_skill(
+        &provider,
+        files,
+        SkillParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/skills");
+    let sent = form(&transport, 0);
+    assert_eq!(sent.matches("name=\"files[]\"").count(), 2, "{sent}");
+    assert!(
+        sent.contains("name=\"files[]\"; filename=\"notes/SKILL.md\""),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("name=\"files[]\"; filename=\"notes/run.py\""),
+        "{sent}"
+    );
+    let value = &uploaded.value;
+    assert_eq!(
+        value.provider_reference,
+        [("openai".to_owned(), "skill_1".to_owned())].into()
+    );
+    assert_eq!(value.name.as_deref(), Some("notes"));
+    assert_eq!(value.description.as_deref(), Some("Takes notes"));
+    assert_eq!(value.latest_version.as_deref(), Some("2"));
+    assert_eq!(
+        uploaded.provider_metadata.unwrap()["openai"],
+        json!({"defaultVersion": "1", "createdAt": 1_800_000_000u64, "updatedAt": 1_800_000_100u64})
+    );
+    let titled = SkillParams {
+        display_title: Some("Notes".into()),
+        ..Default::default()
+    };
+    let error = suprnova_ai::ops::upload_skill(&provider, vec![], titled, Default::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+    assert_eq!(transport.requests.lock().unwrap().len(), 1);
+}
