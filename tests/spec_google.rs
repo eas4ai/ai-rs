@@ -1477,6 +1477,36 @@ async fn ggl_014_several_images_keep_one_metadata_entry_each() {
 }
 
 #[tokio::test]
+async fn ggl_014_a_response_modalities_option_is_replaced_by_image() {
+    let transport = Recorder::new([image_response()]);
+    let prompt = ImagePrompt {
+        text: Some("a cat".into()),
+        images: vec![],
+        mask: None,
+    };
+    let params = ImageParams {
+        provider_options: [(
+            "google".to_owned(),
+            json!({"responseModalities": ["TEXT", "IMAGE"]}),
+        )]
+        .into(),
+        ..Default::default()
+    };
+    ops::generate_image(
+        &model("gemini-2.5-flash-image", transport.clone()),
+        prompt,
+        params,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.body()["generationConfig"]["responseModalities"],
+        json!(["IMAGE"])
+    );
+}
+
+#[tokio::test]
 async fn ggl_014_other_models_and_masks_fail_before_a_request() {
     for (id, mask) in [
         ("imagen-4.0-generate-001", None),
