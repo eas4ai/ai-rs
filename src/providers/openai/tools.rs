@@ -533,26 +533,37 @@ pub(super) fn allowed_tools(
     }))
 }
 
-/// The provider tools of a call that the application runs, rather than
-/// OpenAI (OAI-010): `local_shell`, `shell` without a container
-/// environment, `apply_patch`, `computer` and custom tools.
+/// What the reader and the history need to know of a call's tools: the
+/// provider tools the application runs, rather than OpenAI (OAI-010):
+/// `local_shell`, `shell` without a container environment, `apply_patch`,
+/// `computer` and custom tools; and the function tools (OAI-011).
 #[derive(Clone, Debug, Default)]
-pub(super) struct HostTools {
+pub(super) struct CallTools {
     /// Each declared host-run tool's OpenAI kind, by its tool name.
     kinds: BTreeMap<String, &'static str>,
     /// Whether OpenAI runs the declared `shell` tool in a container.
     shell_in_container: bool,
+    /// The names of the function tools.
+    functions: std::collections::BTreeSet<String>,
 }
 
 /// The host-run tools of a call that declares none.
-pub(super) static NO_HOST_TOOLS: HostTools = HostTools {
+pub(super) static NO_CALL_TOOLS: CallTools = CallTools {
     kinds: BTreeMap::new(),
     shell_in_container: false,
+    functions: std::collections::BTreeSet::new(),
 };
 
-impl HostTools {
+impl CallTools {
     pub(super) fn of(tools: &[Tool]) -> Self {
-        let mut this = Self::default();
+        let mut this = Self {
+            functions: tools
+                .iter()
+                .filter(|t| t.kind == ToolKind::Function)
+                .map(|t| t.name.clone())
+                .collect(),
+            ..Self::default()
+        };
         for tool in tools.iter().filter(|t| t.kind == ToolKind::Provider) {
             let Ok(kind) = provider_name(tool) else {
                 continue;
@@ -599,5 +610,10 @@ impl HostTools {
     /// Whether the application runs `shell` calls.
     pub(super) fn shell_on_host(&self) -> bool {
         !self.shell_in_container
+    }
+
+    /// Whether the call declares a function tool of this name.
+    pub(super) fn has_function(&self, name: &str) -> bool {
+        self.functions.contains(name)
     }
 }

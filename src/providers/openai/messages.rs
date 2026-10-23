@@ -1021,7 +1021,7 @@ pub(super) struct History<'a> {
     /// an `output_schema` (OAI-009).
     pub quoted_results: &'a [String],
     /// The provider tools the application runs (OAI-010).
-    pub host_tools: &'a super::tools::HostTools,
+    pub host_tools: &'a super::tools::CallTools,
 }
 
 impl<'a> History<'a> {
@@ -1037,7 +1037,7 @@ impl<'a> History<'a> {
             conversation: false,
             previous_response: false,
             quoted_results: &[],
-            host_tools: &super::tools::NO_HOST_TOOLS,
+            host_tools: &super::tools::NO_CALL_TOOLS,
         }
     }
 }

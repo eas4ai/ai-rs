@@ -1,4 +1,4 @@
-use super::tools::HostTools;
+use super::tools::CallTools;
 use super::{
     dialect,
     profile::{ChatProfile, Dialect, ReasoningTokens, ResponsesDialect, ResponsesProfile},
@@ -138,9 +138,21 @@ struct Parser {
     metadata: Option<Metadata>,
     image_type: String,
     /// The provider tools the application runs (OAI-010).
-    host: HostTools,
+    host: CallTools,
     /// A call the application runs arrived in this response.
     host_call: bool,
+    /// The annotations of each text item, by item id (OAI-011).
+    annotations: BTreeMap<String, Vec<Value>>,
+    /// URL and file citations, which become sources only when the response
+    /// has no web search or file search sources of their kind.
+    citations: Vec<Value>,
+    /// The response's sources, once per URL or file, for the final metadata.
+    sources: Vec<Value>,
+    source_keys: BTreeSet<String>,
+    web_sources: bool,
+    file_results: bool,
+    /// A terminal response event arrived.
+    terminal: bool,
 }
 /// `hold_reasoning` keeps each reasoning block open until its item ends, so
 /// that every block carries the item's final encrypted content; an unstored
@@ -152,7 +164,7 @@ pub(super) fn parse(
     image_type: String,
     json_output: bool,
     hold_reasoning: bool,
-    host: HostTools,
+    host: CallTools,
 ) -> EventStream {
     let api = wire.api();
     let state = Parser {
@@ -200,6 +212,13 @@ pub(super) fn parse(
         image_type,
         host,
         host_call: false,
+        annotations: BTreeMap::new(),
+        citations: Vec::new(),
+        sources: Vec::new(),
+        source_keys: BTreeSet::new(),
+        web_sources: false,
+        file_results: false,
+        terminal: false,
     };
     stream::try_unfold(state, |mut p| async move {
         loop {
@@ -210,7 +229,7 @@ pub(super) fn parse(
                 return Ok(None);
             }
             match p.input.next().await {
-                Some(Ok(SseJson::Done)) | None => p.complete(),
+                Some(Ok(SseJson::Done)) | None => p.complete()?,
                 Some(Ok(SseJson::Object(data))) => {
                     // Mistral sends an error as an object of type `error`.
                     if data.get("error").is_some_and(|e| !e.is_null())
@@ -242,11 +261,22 @@ impl Parser {
                 .push_back(Event::StreamStart(StreamStart::default()));
         }
     }
-    fn complete(&mut self) {
+    fn complete(&mut self) -> Result<(), crate::Error> {
         if self.ended {
-            return;
+            return Ok(());
+        }
+        // OpenAI ends every response with a terminal event; without one the
+        // stream was cut (OAI-011).
+        if self.openai_responses() && !self.terminal {
+            self.ended = true;
+            return Err(crate::errors::ProviderError::incomplete_response(
+                "the OpenAI Responses stream ended without a terminal event; the response is incomplete",
+                Some(self.provider.clone()),
+            )
+            .into());
         }
         self.start();
+        self.finish_sources();
         if self.responses {
             for id in std::mem::take(&mut self.texts) {
                 self.queue.push_back(block("text_end", &id, None));
@@ -270,6 +300,7 @@ impl Parser {
             response_model: self.response_model.take(),
         }));
         self.ended = true;
+        Ok(())
     }
     fn chat(&mut self, data: &Value) -> Result<(), crate::Error> {
         if !string(data, "id").is_empty() {
@@ -535,6 +566,9 @@ impl Parser {
             | "response.done"
             | "response.incomplete"
             | "response.failed" => {
+                if kind != "response.created" {
+                    self.terminal = true;
+                }
                 let r = &data["response"];
                 if !r.is_object() {
                     // A failed or incomplete response still ends as one.
@@ -596,6 +630,19 @@ impl Parser {
                 }
             }
             "response.output_item.added" => self.item_added(&data["item"], data),
+            "response.output_text.annotation.added" if data["annotation"].is_object() => {
+                let annotation = data["annotation"].clone();
+                self.annotations
+                    .entry(string(data, "item_id").to_owned())
+                    .or_default()
+                    .push(annotation.clone());
+                match string(&annotation, "type") {
+                    // Retrieval events may come after the citation, so it waits
+                    // for the end of the response.
+                    "url_citation" | "file_citation" => self.citations.push(annotation),
+                    _ => self.add_source(annotation_source(&annotation)),
+                }
+            }
             "response.output_item.done" => self.item_done(&data["item"], data),
             "response.output_text.delta" => {
                 let id = if string(data, "item_id").is_empty() {
@@ -774,6 +821,21 @@ impl Parser {
                     },
                 );
             }
+            // A `parallel` call waits for its tool uses (OAI-011).
+            "function_call" if self.undeclared_parallel(item) => {
+                if let Some(index) = index(data) {
+                    self.indices.insert(index, key.clone());
+                }
+                self.calls.insert(
+                    key,
+                    Call {
+                        id: string(item, "call_id").to_owned(),
+                        name: "parallel".into(),
+                        whole: true,
+                        ..Default::default()
+                    },
+                );
+            }
             "function_call" => {
                 let id = nonempty(string(item, "call_id"), &key, "").to_owned();
                 let name = string(item, "name").to_owned();
@@ -805,7 +867,8 @@ impl Parser {
                     },
                 );
             }
-            _ if builtin(kind) => {
+            // A program's output is a result, which opens no call.
+            _ if builtin(kind) && kind != "program_output" => {
                 let id = builtin_id(item);
                 let name = builtin_name(item);
                 self.queue
@@ -839,6 +902,21 @@ impl Parser {
         match kind {
             "message" => {
                 let id = nonempty(string(item, "id"), &key, "text");
+                let mut md = md;
+                if self.openai_responses()
+                    && let Some(openai) = md.as_mut().and_then(|m| m.get_mut(self.metadata_key))
+                {
+                    if item["phase"].is_string() {
+                        openai["phase"] = item["phase"].clone();
+                    }
+                    let annotations = self
+                        .annotations
+                        .remove(string(item, "id"))
+                        .unwrap_or_else(|| item_annotations(item));
+                    if !annotations.is_empty() {
+                        openai["annotations"] = json!(annotations);
+                    }
+                }
                 if self.texts.remove(id) {
                     self.queue.push_back(block("text_end", id, md));
                 }
@@ -870,6 +948,10 @@ impl Parser {
                 }));
                 self.host_call = true;
             }
+            "function_call" if self.undeclared_parallel(item) => {
+                remove_state(&mut self.calls, &mut self.indices, &key, data);
+                self.parallel_done(item, md);
+            }
             "function_call" => {
                 let state = remove_state(&mut self.calls, &mut self.indices, &key, data);
                 let id = state
@@ -896,6 +978,23 @@ impl Parser {
                     tool_call: ToolCallPart::new("", "", ""),
                 }));
             }
+            // A program's output is the result of its program call.
+            "program_output" => {
+                remove_state(&mut self.builtins, &mut self.builtin_indices, &key, data);
+                self.queue
+                    .push_back(Event::BuiltinToolResult(BuiltinToolResult {
+                        event: Default::default(),
+                        tool_call_id: builtin_id(item),
+                        result: BuiltinToolReturnPart {
+                            id: generate_id("part"),
+                            tool_call_id: builtin_id(item),
+                            tool_name: "programmatic_tool_calling".into(),
+                            result: json!({"result": item["result"], "status": item["status"]}),
+                            is_error: false,
+                            provider_metadata: md,
+                        },
+                    }));
+            }
             _ if builtin(kind) => {
                 let state = remove_state(&mut self.builtins, &mut self.builtin_indices, &key, data);
                 let id = state
@@ -907,6 +1006,12 @@ impl Parser {
                     .map(|s| s.name.clone())
                     .unwrap_or_else(|| builtin_name(item));
                 let args = builtin_args(item);
+                let mut md = md;
+                if kind == "compaction"
+                    && let Some(openai) = md.as_mut().and_then(|m| m.get_mut(self.metadata_key))
+                {
+                    openai["encrypted_content"] = item["encrypted_content"].clone();
+                }
                 if state.is_none() {
                     self.queue
                         .push_back(Event::BuiltinToolStart(BuiltinToolStart {
@@ -943,7 +1048,25 @@ impl Parser {
                         filename: None,
                     }));
                 }
-                if let Some(result) = builtin_result(item) {
+                if kind == "mcp_approval_request" && self.openai_responses() {
+                    self.approval_request(item, &id);
+                    return;
+                }
+                if kind == "web_search_call" {
+                    self.web_search_sources(item);
+                }
+                if kind == "file_search_call" {
+                    self.file_search_sources(item);
+                }
+                let failed = kind == "web_search_call"
+                    && matches!(string(item, "status"), "failed" | "incomplete")
+                    && self.openai_responses();
+                let result = if failed {
+                    Some(json!({"status": item["status"]}))
+                } else {
+                    builtin_result(item)
+                };
+                if let Some(result) = result {
                     self.queue
                         .push_back(Event::BuiltinToolResult(BuiltinToolResult {
                             event: Default::default(),
@@ -953,7 +1076,7 @@ impl Parser {
                                 tool_call_id: id,
                                 tool_name: name,
                                 result,
-                                is_error: false,
+                                is_error: failed,
                                 provider_metadata: md,
                             },
                         }));
@@ -961,6 +1084,162 @@ impl Parser {
             }
             _ => {}
         }
+    }
+    fn openai_responses(&self) -> bool {
+        self.responses_profile
+            .is_some_and(|p| p.dialect == ResponsesDialect::OpenAI)
+    }
+    /// A `function_call` named `parallel` that the call does not declare.
+    fn undeclared_parallel(&self, item: &Value) -> bool {
+        self.openai_responses()
+            && string(item, "name") == "parallel"
+            && !self.host.has_function("parallel")
+    }
+    /// A `parallel` call: one tool call per tool use when every use names a
+    /// declared function tool, else the call itself
+    /// (`expand-parallel-tool-call.ts`).
+    fn parallel_done(&mut self, item: &Value, md: Option<Metadata>) {
+        let call_id = string(item, "call_id").to_owned();
+        let input = arguments(item).to_owned();
+        let uses = serde_json::from_str::<Value>(&input)
+            .ok()
+            .and_then(|v| v.get("tool_uses").and_then(Value::as_array).cloned())
+            .filter(|uses| !uses.is_empty());
+        let expanded: Option<Vec<(String, String)>> = uses.as_ref().and_then(|uses| {
+            uses.iter()
+                .map(|tool_use| {
+                    let name = tool_use
+                        .get("recipient_name")?
+                        .as_str()?
+                        .strip_prefix("functions.")?;
+                    let parameters = tool_use.get("parameters").filter(|p| p.is_object())?;
+                    (!name.is_empty() && self.host.has_function(name))
+                        .then(|| (name.to_owned(), parameters.to_string()))
+                })
+                .collect()
+        });
+        let calls = match expanded {
+            Some(uses) => {
+                let count = uses.len();
+                uses.into_iter()
+                    .enumerate()
+                    .map(|(index, (name, args))| {
+                        let group = json!({"parallel_tool_call": {
+                            "item_id": item["id"], "tool_call_id": call_id, "tool_name": "parallel",
+                            "input": input, "index": index, "count": count,
+                        }});
+                        (
+                            format!("{call_id}_{index}"),
+                            name,
+                            args,
+                            metadata(self.metadata_key, group),
+                        )
+                    })
+                    .collect()
+            }
+            None => vec![(call_id.clone(), "parallel".to_owned(), input.clone(), md)],
+        };
+        for (id, name, args, md) in calls {
+            self.queue.push_back(Event::ToolStart(ToolStart {
+                event: meta(md.clone()),
+                tool_call_id: id.clone(),
+                tool_name: name,
+            }));
+            self.queue.push_back(Event::ToolDelta(ToolDelta {
+                event: Default::default(),
+                tool_call_id: id.clone(),
+                chunk: args,
+            }));
+            self.queue.push_back(Event::ToolEnd(ToolEnd {
+                event: meta(md),
+                tool_call_id: id,
+                tool_call: ToolCallPart::new("", "", ""),
+            }));
+        }
+    }
+    /// An MCP approval request: a pending `ToolApproval` hook named by the
+    /// request id, which the application resolves (OAI-011, OAI-008).
+    fn approval_request(&mut self, item: &Value, call_id: &str) {
+        let request = nonempty(
+            string(item, "approval_request_id"),
+            string(item, "id"),
+            call_id,
+        );
+        self.queue.push_back(Event::Hook(crate::types::events::HookEvent {
+            replay: false,
+            message: ModelEventMeta::default().message,
+            hook: crate::types::messages::HookPart {
+                id: generate_id("part"),
+                hook_id: request.to_owned(),
+                hook_type: "ToolApproval".into(),
+                status: crate::types::messages::HookStatus::Pending,
+                metadata: [(
+                    self.metadata_key.to_owned(),
+                    json!({"approval_request_id": request, "server_label": item["server_label"], "name": item["name"], "arguments": item["arguments"]}),
+                )]
+                .into(),
+                resolution: None,
+                tool_call_id: Some(call_id.to_owned()),
+            },
+        }));
+    }
+    fn add_source(&mut self, source: Option<(String, Value)>) {
+        if let Some((key, source)) = source
+            && self.source_keys.insert(key)
+        {
+            self.sources.push(source);
+        }
+    }
+    fn web_search_sources(&mut self, item: &Value) {
+        if !self.openai_responses() || string(&item["action"], "type") != "search" {
+            return;
+        }
+        for source in item["action"]["sources"].as_array().into_iter().flatten() {
+            if string(source, "type") == "url" && !string(source, "url").is_empty() {
+                self.web_sources = true;
+                self.add_source(Some(url_source(string(source, "url"), None)));
+            }
+        }
+    }
+    fn file_search_sources(&mut self, item: &Value) {
+        if !self.openai_responses() {
+            return;
+        }
+        for result in item["results"].as_array().into_iter().flatten() {
+            self.file_results = true;
+            let file = string(result, "file_id");
+            let filename = string(result, "filename");
+            self.add_source(Some((
+                format!("file:{file}"),
+                json!({
+                    "sourceType": "document", "id": generate_id("source"),
+                    "mediaType": "text/plain", "title": filename, "filename": filename,
+                    "providerMetadata": {"openai": {"type": "file_search", "fileId": file}},
+                }),
+            )));
+        }
+    }
+    /// The citations without retrieval sources of their kind become sources,
+    /// and the sources go into the final metadata.
+    fn finish_sources(&mut self) {
+        for citation in std::mem::take(&mut self.citations) {
+            let covered = match string(&citation, "type") {
+                "url_citation" => self.web_sources,
+                _ => self.file_results,
+            };
+            if !covered {
+                self.add_source(annotation_source(&citation));
+            }
+        }
+        if self.sources.is_empty() {
+            return;
+        }
+        let sources = json!(std::mem::take(&mut self.sources));
+        let md = self.metadata.get_or_insert_with(Default::default);
+        let openai = md
+            .entry(self.metadata_key.to_owned())
+            .or_insert_with(|| json!({}));
+        openai["sources"] = sources;
     }
     /// Whether the application runs this item's call (OAI-010).
     fn runs_on_host(&self, item: &Value) -> bool {
@@ -1188,6 +1467,56 @@ fn reasoning_id(data: &Value) -> String {
         data.get("summary_index").unwrap_or(&json!(0))
     )
 }
+/// A URL source and its key, once per URL.
+fn url_source(url: &str, title: Option<&Value>) -> (String, Value) {
+    let mut source = json!({"sourceType": "url", "id": generate_id("source"), "url": url});
+    if let Some(title) = title.filter(|t| t.is_string()) {
+        source["title"] = title.clone();
+    }
+    (format!("url:{url}"), source)
+}
+/// The source an annotation cites, as `mapOpenAIResponsesAnnotationSource`
+/// gives it, and its key.
+fn annotation_source(annotation: &Value) -> Option<(String, Value)> {
+    let kind = string(annotation, "type");
+    if kind == "url_citation" {
+        let url = string(annotation, "url");
+        return (!url.is_empty()).then(|| url_source(url, annotation.get("title")));
+    }
+    let file = string(annotation, "file_id");
+    if file.is_empty() {
+        return None;
+    }
+    let filename = if kind == "file_path" {
+        file
+    } else {
+        nonempty(string(annotation, "filename"), file, "")
+    };
+    let mut openai = json!({"type": kind, "fileId": file});
+    if kind == "container_file_citation" {
+        openai["containerId"] = annotation["container_id"].clone();
+    } else {
+        openai["index"] = annotation["index"].clone();
+    }
+    Some((
+        format!("file:{file}"),
+        json!({
+            "sourceType": "document", "id": generate_id("source"),
+            "mediaType": if kind == "file_path" { "application/octet-stream" } else { "text/plain" },
+            "title": filename, "filename": filename,
+            "providerMetadata": {"openai": openai},
+        }),
+    ))
+}
+/// The annotations of a done message item's content.
+fn item_annotations(item: &Value) -> Vec<Value> {
+    item["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|part| part["annotations"].as_array().cloned().unwrap_or_default())
+        .collect()
+}
 fn builtin(kind: &str) -> bool {
     matches!(
         kind,
@@ -1204,6 +1533,9 @@ fn builtin(kind: &str) -> bool {
             | "tool_search_call"
             | "tool_search_output"
             | "computer_call"
+            | "program"
+            | "program_output"
+            | "compaction"
     )
 }
 fn builtin_name(item: &Value) -> String {
@@ -1216,6 +1548,7 @@ fn builtin_name(item: &Value) -> String {
             }
         }
         "shell_call_output" => "shell".into(),
+        "program" | "program_output" => "programmatic_tool_calling".into(),
         "tool_search_output" => "tool_search".into(),
         "computer_call" => "computer_use".into(),
         name => name.strip_suffix("_call").unwrap_or(name).into(),
@@ -1240,6 +1573,7 @@ fn builtin_args(item: &Value) -> String {
         "tool_search_call" => {
             json!({"arguments":item["arguments"],"call_id":item["call_id"]}).to_string()
         }
+        "program" => json!({"code":item["code"],"fingerprint":item["fingerprint"]}).to_string(),
         _ => "{}".into(),
     }
 }
