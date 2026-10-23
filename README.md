@@ -1,6 +1,10 @@
 # suprnova-ai
 
-Rust port of the inference core in AI SDK for Python 0.8.0.
+A Rust library for language models, model operations and agents. It began as
+a port of the AI SDK for Python 0.8.0 and follows the AI SDK for TypeScript
+7.0.148, both by Vercel, and has changed from both in the ways `docs/PORT.md`
+lists. It is licensed under the Apache License, Version 2.0; `LICENSE` holds
+the license and `NOTICE` the credits.
 
 The crate provides messages, events, tool schemas, stream aggregation, provider
 contracts, streaming HTTP transport, the OpenAI-compatible and Anthropic provider

@@ -1,8 +1,10 @@
 # Inference core port
 
 The source is AI SDK for Python 0.8.0 at
-`https://github.com/vercel-labs/ai-python`. `LICENSE` is copied unchanged.
-`NOTICE` records the port and upstream copyright. Behavior that the Python
+`https://github.com/vercel-labs/ai-python`. `LICENSE` holds the full text of
+the Apache License, Version 2.0, and `NOTICE` the credits: the crate's author
+and the Vercel copyrights of the Python and TypeScript SDKs. Source files carry
+no license header, as in both upstream repositories. Behavior that the Python
 source lacks follows the AI SDK for TypeScript 7.0.148 where `docs/spec/` says so;
 "Departures from Python" below lists it.
 
