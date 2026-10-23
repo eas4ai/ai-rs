@@ -1,11 +1,12 @@
 # Sourced by the check scripts that run spec tests (check-core.sh,
-# check-hosts.sh). The caller sets `tests` to the test targets and `reqs` to
-# the requirements, and may define `extra_check REQ`, which fails REQ when it
-# returns nonzero. `run_spec_tests` prints one `sudus: REQ: pass|fail` line
-# for each requirement and returns nonzero when one failed. Each
-# requirement's tests are named after it (hst_001_..., agt_001_...). A
-# requirement passes only when at least one of its tests ran and all of them
-# passed. When the tests do not build, every requirement fails.
+# check-hosts.sh, check-google.sh, check-vertex.sh, check-operations.sh). The
+# caller sets `tests` to the test targets and `reqs` to the requirements, and
+# may define `extra_check REQ`, which fails REQ when it returns nonzero.
+# `run_spec_tests` prints one `sudus: REQ: pass|fail` line for each
+# requirement and returns nonzero when one failed. Each requirement's tests
+# are named after it (hst_001_..., agt_001_...). A requirement passes only
+# when at least one of its tests ran and all of them passed. When the tests do
+# not build, every requirement fails.
 
 T=/home/shawn/.rustup/toolchains/1.95-x86_64-unknown-linux-gnu/bin
 export PATH="$T:$PATH"
