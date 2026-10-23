@@ -457,12 +457,16 @@ fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
 /// recorded (`convert-to-openai-responses-input.ts`).
 fn function_call(call: &ToolCallPart, md: Option<&Value>) -> Value {
     let mut item = json!({"type":"function_call","call_id":call.tool_call_id,"name":call.tool_name,"arguments":call.tool_args});
-    let namespace = md
-        .and_then(|m| {
-            m.get("namespace")
-                .or_else(|| m.get("raw_item").and_then(|raw| raw.get("namespace")))
-        })
-        .filter(|namespace| namespace.is_string());
+    // The part's own namespace, then its raw item's: the first one that is a string.
+    let namespace = md.and_then(|m| {
+        [
+            m.get("namespace"),
+            m.get("raw_item").and_then(|raw| raw.get("namespace")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|namespace| namespace.is_string())
+    });
     if let Some(namespace) = namespace {
         item["namespace"] = namespace.clone();
     }
