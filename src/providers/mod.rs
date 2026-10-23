@@ -6,7 +6,6 @@ pub mod google;
 pub mod google_vertex;
 pub mod hosts;
 pub(crate) mod http;
-pub(crate) mod multipart;
 pub mod openai;
 pub mod operations;
 pub use base::{

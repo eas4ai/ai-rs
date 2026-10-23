@@ -3129,3 +3129,208 @@ async fn oai_016_a_compatible_server_has_its_own_limit_and_metadata() {
         json!({"region": "eu"})
     );
 }
+
+// OAI-017
+
+/// A download transport that answers every URL with these PNG bytes.
+struct Downloads(Vec<u8>);
+impl suprnova_ai::models::files::DownloadTransport for Downloads {
+    fn resolve<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+    ) -> BoxFuture<'a, Result<Vec<std::net::IpAddr>, suprnova_ai::models::files::DownloadError>>
+    {
+        Box::pin(async { Ok(vec!["93.184.216.34".parse().unwrap()]) })
+    }
+    fn send_pinned(
+        &self,
+        _request: HttpRequest,
+        _addresses: Vec<std::net::IpAddr>,
+    ) -> BoxFuture<'_, Result<HttpResponse, suprnova_ai::models::files::DownloadError>> {
+        let bytes = self.0.clone();
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "image/png".into())],
+                body: stream::iter([Ok(Bytes::from(bytes))]).boxed(),
+            })
+        })
+    }
+}
+fn images_reply(count: usize, image_tokens: u64) -> (u16, Vec<u8>) {
+    let data: Vec<Value> = (0..count)
+        .map(|n| json!({"b64_json": "AQID", "revised_prompt": format!("revised {n}")}))
+        .collect();
+    (
+        200,
+        json!({"created": 1, "size": "1024x1024", "quality": "high", "background": "opaque", "output_format": "png",
+               "data": data, "usage": {"input_tokens": 5, "output_tokens": 9, "input_tokens_details": {"image_tokens": image_tokens, "text_tokens": 4}}})
+            .to_string()
+            .into_bytes(),
+    )
+}
+fn image_model(id: &str, transport: Arc<Recorder>) -> Model {
+    Model::new(
+        id,
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    )
+}
+fn text_prompt(text: &str) -> suprnova_ai::providers::operations::ImagePrompt {
+    suprnova_ai::providers::operations::ImagePrompt {
+        text: Some(text.into()),
+        ..Default::default()
+    }
+}
+fn image_params(n: u32, options: Value) -> suprnova_ai::providers::operations::ImageParams {
+    suprnova_ai::providers::operations::ImageParams {
+        n,
+        provider_options: [("openai".to_owned(), options)].into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn oai_017_generations_send_the_options_and_b64_json_where_needed() {
+    let transport = Recorder::new([images_reply(1, 4), images_reply(1, 4)]);
+    let options = json!({"quality": "hd", "style": "vivid", "background": "opaque", "moderation": "low",
+                         "outputFormat": "webp", "outputCompression": 80, "user": "u"});
+    let item = suprnova_ai::ops::generate_image(
+        &image_model("dall-e-3", transport.clone()),
+        text_prompt("a cat"),
+        image_params(1, options),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        url(&transport, 0),
+        "https://api.openai.com/v1/images/generations"
+    );
+    assert_eq!(
+        transport.body(0),
+        json!({"model": "dall-e-3", "prompt": "a cat", "n": 1, "quality": "hd", "style": "vivid", "background": "opaque",
+               "moderation": "low", "output_format": "webp", "output_compression": 80, "user": "u", "response_format": "b64_json"})
+    );
+    assert_eq!(item.value[0].media_type, "image/png");
+    let md = &item.provider_metadata.as_ref().unwrap()["openai"]["images"][0];
+    assert_eq!(md["revisedPrompt"], "revised 0");
+    assert_eq!(md["size"], "1024x1024");
+    assert_eq!(md["outputFormat"], "png");
+    suprnova_ai::ops::generate_image(
+        &image_model("gpt-image-1", transport.clone()),
+        text_prompt("a cat"),
+        image_params(1, json!({})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transport.body(1).get("response_format"), None);
+}
+
+#[tokio::test]
+async fn oai_017_calls_follow_each_models_image_limit() {
+    let transport = Recorder::new([images_reply(1, 0), images_reply(1, 0), images_reply(1, 0)]);
+    let item = suprnova_ai::ops::generate_image(
+        &image_model("dall-e-3", transport.clone()),
+        text_prompt("a cat"),
+        image_params(3, json!({})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transport.requests.lock().unwrap().len(), 3);
+    assert_eq!(item.value.len(), 3);
+}
+
+#[tokio::test]
+async fn oai_017_an_edit_sends_its_images_as_a_form() {
+    use suprnova_ai::providers::operations::{ImagePrompt, MediaInput};
+    let transport = Recorder::new([images_reply(2, 101)]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone())
+        .with_download_transport(Arc::new(Downloads(vec![9, 9])));
+    let model = Model::new("gpt-image-1", Arc::new(provider));
+    let prompt = ImagePrompt {
+        text: Some("add a hat".into()),
+        images: vec![
+            MediaInput::Bytes(vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+            MediaInput::Url("https://img.test/b.png".into()),
+        ],
+        mask: None,
+    };
+    let item = suprnova_ai::ops::generate_image(
+        &model,
+        prompt,
+        image_params(2, json!({"inputFidelity": "high"})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/images/edits");
+    let form = String::from_utf8_lossy(&transport.requests.lock().unwrap()[0].body).into_owned();
+    assert_eq!(form.matches("name=\"image[]\"").count(), 2, "{form}");
+    assert!(
+        form.contains("name=\"input_fidelity\"\r\n\r\nhigh\r\n"),
+        "{form}"
+    );
+    assert!(
+        header(&transport, 0, "content-type")
+            .unwrap()
+            .starts_with("multipart/form-data; boundary="),
+    );
+    let images = &item.provider_metadata.as_ref().unwrap()["openai"]["images"];
+    assert_eq!(images[0]["imageTokens"], 50);
+    assert_eq!(images[1]["imageTokens"], 51);
+    assert_eq!(images[0]["textTokens"], 2);
+}
+
+#[tokio::test]
+async fn oai_017_settings_openai_does_not_take_fail_before_a_request() {
+    use suprnova_ai::providers::operations::{ImageParams, ImagePrompt, MediaInput};
+    let url_edit = || ImagePrompt {
+        text: Some("x".into()),
+        images: vec![MediaInput::Url("https://img.test/a.png".into())],
+        mask: None,
+    };
+    let cases = [
+        (
+            "gpt-image-1",
+            text_prompt("x"),
+            ImageParams {
+                aspect_ratio: Some("16:9".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "gpt-image-1",
+            text_prompt("x"),
+            ImageParams {
+                seed: Some(1),
+                ..Default::default()
+            },
+        ),
+        ("dall-e-3", url_edit(), ImageParams::default()),
+        ("gpt-image-1", url_edit(), ImageParams::default()),
+        (
+            "gpt-image-1",
+            text_prompt("x"),
+            image_params(1, json!({"qualty": "hd"})),
+        ),
+    ];
+    for (id, prompt, params) in cases {
+        let transport = Recorder::new([images_reply(1, 0)]);
+        let error = suprnova_ai::ops::generate_image(
+            &image_model(id, transport.clone()),
+            prompt,
+            params,
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{id}: {error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty(), "{id}");
+    }
+}
