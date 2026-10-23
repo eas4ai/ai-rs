@@ -1762,3 +1762,207 @@ fn oai_008_expanded_parallel_calls_go_back_as_their_wrapper() {
         .collect();
     assert_eq!(calls, [json!("c_0"), json!("c_1")], "{body}");
 }
+
+// OAI-009
+
+/// A function tool `name` whose `tool_config` arguments are `args`.
+fn tool_with(name: &str, args: Value) -> Tool {
+    let mut tool = function_tool(name);
+    tool.tool_config = Some(suprnova_ai::types::tools::ToolConfig {
+        id: None,
+        args: args.as_object().unwrap().clone(),
+    });
+    tool
+}
+fn with_tools(tools: Vec<Tool>) -> StreamOptions {
+    StreamOptions {
+        tools,
+        ..Default::default()
+    }
+}
+fn tools_sent(model: &str, tools: Vec<Tool>) -> Value {
+    body_for(model, vec![user("hi")], &with_tools(tools))["tools"].clone()
+}
+
+#[test]
+fn oai_009_function_tools_carry_strict_and_their_openai_options() {
+    let tools = tools_sent(
+        "gpt-6-astra",
+        vec![
+            function_tool("plain"),
+            function_tool("strict").with_strict(true),
+            tool_with(
+                "loaded",
+                json!({
+                    "defer_loading": true,
+                    "async": true,
+                    "allowed_callers": ["programmatic"],
+                    "output_schema": {"type": "object"},
+                }),
+            ),
+            tool_with("hidden", json!({"omit_from_request_tools": true})),
+        ],
+    );
+    let params = json!({"type": "object", "properties": {}});
+    assert_eq!(
+        tools,
+        json!([
+            {"type": "function", "name": "plain", "description": "", "parameters": params, "strict": false},
+            {"type": "function", "name": "strict", "description": "", "parameters": params, "strict": true},
+            {"type": "function", "name": "loaded", "description": "", "parameters": params, "strict": false,
+             "defer_loading": true, "async": true, "allowed_callers": ["programmatic"],
+             "output_schema": {"type": "object"}},
+        ])
+    );
+}
+
+#[test]
+fn oai_009_tools_of_one_namespace_go_in_one_group() {
+    let crm = || json!({"namespace": {"name": "crm", "description": "CRM tools"}});
+    let tools = tools_sent(
+        "gpt-4.1",
+        vec![
+            tool_with("find", crm()),
+            function_tool("other"),
+            tool_with("update", crm()),
+        ],
+    );
+    let names = |group: &Value| -> Vec<Value> {
+        group["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].clone())
+            .collect()
+    };
+    assert_eq!(tools[0]["type"], "namespace", "{tools}");
+    assert_eq!(tools[0]["name"], "crm");
+    assert_eq!(tools[0]["description"], "CRM tools");
+    assert_eq!(names(&tools[0]), [json!("find"), json!("update")]);
+    assert_eq!(tools[1]["name"], "other");
+    assert_eq!(tools.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn oai_009_invalid_tool_settings_fail_before_a_request() {
+    let conflicting = with_tools(vec![
+        tool_with(
+            "a",
+            json!({"namespace": {"name": "crm", "description": "one"}}),
+        ),
+        tool_with(
+            "b",
+            json!({"namespace": {"name": "crm", "description": "two"}}),
+        ),
+    ]);
+    let mut forced = with_tools(vec![tool_with(
+        "hidden",
+        json!({"omit_from_request_tools": true}),
+    )]);
+    forced.tool_choice = Some(suprnova_ai::types::ToolChoice::Tool(
+        suprnova_ai::types::tools::ToolRef::new("hidden"),
+    ));
+    for (case, options) in [
+        ("two namespace descriptions", conflicting),
+        ("a forced omitted tool", forced),
+    ] {
+        let transport = Recorder::new([text_reply()]);
+        let model = Model::new(
+            "gpt-4.1",
+            Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+        );
+        let error = run(&model, options).await.expect_err(case);
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{case}: {error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty(), "{case}");
+    }
+}
+
+#[test]
+fn oai_009_async_before_gpt_6_is_left_out_and_logged() {
+    let (tools, events) = logged(|| {
+        tools_sent(
+            "gpt-5.4",
+            vec![
+                tool_with("slow", json!({"async": true})),
+                suprnova_ai::providers::openai::tools::custom("notes", json!({"async": true}))
+                    .unwrap(),
+            ],
+        )
+    });
+    assert_eq!(tools[0].get("async"), None, "{tools}");
+    assert_eq!(tools[1].get("async"), None, "{tools}");
+    assert!(
+        events.contains(&("async".to_owned(), "gpt-5.4".to_owned())),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn oai_009_a_text_result_of_a_tool_with_an_output_schema_is_json_quoted() {
+    let mut options = with_tools(vec![tool_with(
+        "weather",
+        json!({"output_schema": {"type": "string"}}),
+    )]);
+    options.params = None;
+    let body = body_for("gpt-4.1", history(raw_call()), &options);
+    let output = items(&body)
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(output["output"], json!("\"sunny\""), "{body}");
+}
+
+#[test]
+fn oai_009_openai_tools_and_named_choices_go_as_typescript_sends_them() {
+    use suprnova_ai::providers::openai::tools;
+    let sql = tools::custom(
+        "sql",
+        json!({"description": "SQL", "format": {"type": "grammar", "syntax": "lark", "definition": "start: \"select\""}}),
+    )
+    .unwrap();
+    let all = || {
+        vec![
+            function_tool("lookup"),
+            tools::image_generation(json!({})).unwrap(),
+            sql.clone(),
+            tools::computer(),
+            tools::programmatic_tool_calling(),
+        ]
+    };
+    let sent = tools_sent("gpt-4.1", all());
+    assert_eq!(
+        sent[2],
+        json!({"type": "custom", "name": "sql", "description": "SQL", "format": {"type": "grammar", "syntax": "lark", "definition": "start: \"select\""}})
+    );
+    assert_eq!(sent[3], json!({"type": "computer"}));
+    assert_eq!(sent[4], json!({"type": "programmatic_tool_calling"}));
+    for (name, expected) in [
+        ("image_generation", json!({"type": "image_generation"})),
+        ("computer", json!({"type": "computer"})),
+        ("sql", json!({"type": "custom", "name": "sql"})),
+        ("lookup", json!({"type": "function", "name": "lookup"})),
+    ] {
+        let mut options = with_tools(all());
+        options.tool_choice = Some(suprnova_ai::types::ToolChoice::Tool(
+            suprnova_ai::types::tools::ToolRef::new(name),
+        ));
+        let body = body_for("gpt-4.1", vec![user("hi")], &options);
+        assert_eq!(body["tool_choice"], expected, "{name}");
+    }
+    assert!(tools::custom("bad", json!({"format": {"type": "grammar"}})).is_err());
+}
+
+#[test]
+fn oai_009_chat_completions_function_tools_are_strict_only_when_marked() {
+    let options = with_tools(vec![
+        function_tool("plain"),
+        function_tool("strict").with_strict(true),
+    ]);
+    let request = build_request("gpt-4.1", &config(), vec![user("hi")], &options, false).unwrap();
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["tools"][0]["function"].get("strict"), None, "{body}");
+    assert_eq!(body["tools"][1]["function"]["strict"], true, "{body}");
+}
