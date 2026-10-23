@@ -1,5 +1,5 @@
 use super::{
-    OpenAIChatCompletionsProtocol, OpenAIResponsesProtocol, errors, protocol,
+    OpenAIResponsesProtocol, errors, protocol,
     protocol::{HostChatProtocol, HostResponsesProtocol},
 };
 use crate::{
@@ -97,7 +97,9 @@ impl OpenAICompatibleProvider {
             } else if let Some(profile) = hosts::chat_profile_for(metadata) {
                 Arc::new(HostChatProtocol(profile, None))
             } else {
-                Arc::new(OpenAIChatCompletionsProtocol)
+                // A server that only speaks OpenAI's wire format gets the
+                // OpenAI-compatible rules, not OpenAI's own.
+                Arc::new(HostChatProtocol(&super::profile::COMPATIBLE, None))
             };
         Ok(Self {
             name: metadata.id.clone(),

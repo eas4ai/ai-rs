@@ -55,6 +55,7 @@ static PROFILE: ChatProfile = ChatProfile {
     ],
     dialect: Dialect::DeepSeek,
     stream_error_kinds: true,
+    openai_own: false,
 };
 
 pub(super) static HOST: Host = Host {

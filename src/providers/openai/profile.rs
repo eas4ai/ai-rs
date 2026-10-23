@@ -40,6 +40,9 @@ pub(crate) struct ChatProfile {
     pub dialect: Dialect,
     /// Give errors inside the stream a kind from their code and type.
     pub stream_error_kinds: bool,
+    /// OpenAI's own Chat Completions API, which takes OpenAI's file shapes
+    /// (OAI-007); other servers take the OpenAI-compatible ones.
+    pub openai_own: bool,
 }
 
 /// How a server's `completion_tokens` relates to its reasoning tokens.
@@ -162,9 +165,17 @@ pub(crate) static OPENAI_RESPONSES: ResponsesProfile = ResponsesProfile {
     dialect: ResponsesDialect::OpenAI,
 };
 
-/// OpenAI's Chat Completions, also used by OpenAI-compatible servers without
-/// a host profile.
+/// OpenAI's own Chat Completions.
 pub(crate) static OPENAI: ChatProfile = ChatProfile {
+    openai_own: true,
+    ..COMPATIBLE_RULES
+};
+
+/// The Chat Completions of an OpenAI-compatible server without a host
+/// profile.
+pub(crate) static COMPATIBLE: ChatProfile = COMPATIBLE_RULES;
+
+const COMPATIBLE_RULES: ChatProfile = ChatProfile {
     protocol_class_id: "openai_chat_completions",
     api: errors::API,
     include_usage: true,
@@ -181,6 +192,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     unsupported: &[],
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
+    openai_own: false,
 };
 
 /// Whether OpenAI treats a model as a reasoning model: `o` and digits,
