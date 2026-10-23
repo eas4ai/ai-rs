@@ -258,7 +258,7 @@ pub(crate) async fn read_body_with_limit(
 
 /// A response or stream event over its size limit, naming the limit.
 pub(crate) fn limit_error(api: &ApiProfile, provider: &str, what: &str, limit: usize) -> Error {
-    let size = if limit % (1024 * 1024) == 0 {
+    let size = if limit.is_multiple_of(1024 * 1024) {
         format!("{} MiB", limit / (1024 * 1024))
     } else {
         format!("{limit} bytes")

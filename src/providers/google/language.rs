@@ -22,7 +22,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Map, Value, json};
 
 use super::{
-    api::{self, Endpoint, Flavor, MEDIA_RESPONSE_BYTES},
+    api::{self, Endpoint, MEDIA_RESPONSE_BYTES},
     messages::{self, Target},
     request::{self, Prepared},
     response::Reader,
@@ -55,6 +55,7 @@ impl Call {
             model_id: &self.model_id,
             flavor: self.endpoint.flavor,
             base_url: &self.endpoint.base,
+            batch: false,
         }
     }
 
@@ -159,6 +160,16 @@ impl Call {
         messages: Vec<Message>,
         options: &StreamOptions,
     ) -> Result<(Message, Option<String>), Error> {
+        let generated = self.generate_full(messages, options).await?;
+        Ok((generated.message, generated.finish))
+    }
+
+    /// A buffered model call with the raw finish reason too.
+    pub(crate) async fn generate_full(
+        &self,
+        messages: Vec<Message>,
+        options: &StreamOptions,
+    ) -> Result<Generated, Error> {
         let (prepared, _) = self.prepare(messages, options, false).await?;
         let params = options.params.as_ref();
         let mut reader = Reader::new(
@@ -183,8 +194,21 @@ impl Call {
             }
         }
         reader.end();
-        hydrate(&self.endpoint.provider, reader.events.drain(..))
+        let raw_finish = reader.raw_finish();
+        let (message, finish) = hydrate(&self.endpoint.provider, reader.events.drain(..))?;
+        Ok(Generated {
+            message,
+            finish,
+            raw_finish,
+        })
     }
+}
+
+/// A buffered call's message with its normalized and raw finish reasons.
+pub(crate) struct Generated {
+    pub message: Message,
+    pub finish: Option<String>,
+    pub raw_finish: Option<String>,
 }
 
 /// The server-sent events of a generate content stream, up to 256 MiB each.
@@ -283,9 +307,4 @@ impl StreamState {
             }
         }
     }
-}
-
-/// The flavor a call runs with.
-pub(crate) fn flavor_of(call: &Call) -> Flavor {
-    call.endpoint.flavor
 }

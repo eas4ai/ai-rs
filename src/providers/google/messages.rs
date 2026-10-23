@@ -70,6 +70,9 @@ pub(crate) struct Target<'a> {
     pub flavor: Flavor,
     /// The base URL, whose `/files/` URLs Gemini fetches.
     pub base_url: &'a str,
+    /// A batch request: the request is built before its model is known to
+    /// fetch external URLs, so only the URLs every model fetches go out.
+    pub batch: bool,
 }
 
 /// A URL kept in a file part's data: `http`, `https` or `gs`.
@@ -121,6 +124,7 @@ pub(crate) fn fetches(target: Target<'_>, url: &str, media_type: &str) -> bool {
             is_files_url(url, target.base_url)
                 || is_youtube_url(url)
                 || (url.starts_with("https://")
+                    && !target.batch
                     && capabilities::fetches_external_urls(target.model_id)
                     && EXTERNAL_URL_MEDIA_TYPES.contains(&media_type))
         }

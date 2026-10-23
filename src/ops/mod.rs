@@ -124,10 +124,22 @@ pub async fn embed(
     if values.is_empty() {
         return Ok(Item::new(Vec::new()));
     }
-    let limits = protocol_of(model)?.embed_limits(model);
+    let protocol = protocol_of(model)?;
+    let limits = protocol.embed_limits(model);
+    let total = values.len();
     let runs = split(values, limits.max_per_call);
-    let call = |run: Vec<String>| {
-        let params = params.clone();
+    let mut run_params = Vec::with_capacity(runs.len());
+    let mut start = 0;
+    for run in &runs {
+        let range = start..start + run.len();
+        start = range.end;
+        run_params.push(if runs.len() == 1 {
+            params.clone()
+        } else {
+            protocol.embed_params_for(model, &params, total, range)?
+        });
+    }
+    let call = |(run, params): (Vec<String>, EmbedParams)| {
         let retry = options.retry.clone();
         async move {
             with_retries(&retry, || {
@@ -136,8 +148,9 @@ pub async fn embed(
             .await
         }
     };
+    let runs = runs.into_iter().zip(run_params);
     let items = if limits.parallel {
-        try_join_all(runs.into_iter().map(call)).await?
+        try_join_all(runs.map(call)).await?
     } else {
         let mut items = Vec::new();
         for run in runs {
@@ -558,7 +571,7 @@ fn batches(n: u32, max: Option<usize>) -> Vec<u32> {
     match max {
         Some(max) if n > max => {
             let mut counts = vec![max; (n / max) as usize];
-            if n % max != 0 {
+            if !n.is_multiple_of(max) {
                 counts.push(n % max);
             }
             counts

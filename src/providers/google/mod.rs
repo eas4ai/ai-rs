@@ -53,14 +53,27 @@
 
 pub(crate) mod accumulator;
 pub(crate) mod api;
+pub(crate) mod batch;
 pub(crate) mod capabilities;
+pub(crate) mod embed;
+pub(crate) mod files;
+pub(crate) mod image;
+pub mod interactions;
 pub(crate) mod language;
+pub(crate) mod live;
 pub(crate) mod messages;
 pub(crate) mod options;
+pub(crate) mod realtime;
 pub(crate) mod request;
 pub(crate) mod response;
+pub(crate) mod speech;
 pub(crate) mod tool_results;
 pub mod tools;
+pub(crate) mod transcription;
+pub(crate) mod translation;
+pub(crate) mod video;
+
+pub use realtime::browser_url as realtime_browser_url;
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
@@ -175,6 +188,193 @@ impl ProviderProtocol for GeminiProtocol {
         )
         .await
     }
+
+    fn embed_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits {
+            max_per_call: Some(embed::MAX_VALUES),
+            parallel: true,
+        }
+    }
+
+    fn embed_params_for(
+        &self,
+        _model: &Model,
+        params: &EmbedParams,
+        values: usize,
+        range: std::ops::Range<usize>,
+    ) -> Result<EmbedParams, Error> {
+        embed::params_for(params, values, range)
+    }
+
+    async fn embed(
+        &self,
+        model: &Model,
+        values: Vec<String>,
+        params: EmbedParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
+        let call = self.call(model, provider)?;
+        embed::embed(&call.endpoint, &model.id, values, &params).await
+    }
+
+    fn image_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits {
+            max_per_call: Some(1),
+            parallel: true,
+        }
+    }
+
+    async fn generate_image(
+        &self,
+        model: &Model,
+        prompt: ImagePrompt,
+        params: ImageParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<crate::types::messages::FilePart>>, Error> {
+        let call = self.call(model, provider)?;
+        image::generate(&call, &prompt, &params).await
+    }
+
+    async fn generate_audio(
+        &self,
+        model: &Model,
+        prompt: AudioPrompt,
+        params: AudioParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<crate::types::messages::FilePart>>, Error> {
+        let call = self.call(model, provider)?;
+        speech::generate(&call.endpoint, &model.id, &prompt, &params).await
+    }
+
+    async fn transcribe(
+        &self,
+        model: &Model,
+        audio: TranscribeInput,
+        params: TranscribeParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Transcription>, Error> {
+        let call = self.call(model, provider)?;
+        transcription::transcribe(&call.endpoint, &model.id, &audio, &params).await
+    }
+
+    async fn stream_transcription(
+        &self,
+        model: &Model,
+        audio: AudioChunks,
+        format: AudioFormat,
+        params: StreamTranscribeParams,
+        provider: &dyn Provider,
+    ) -> Result<TranscriptionStream, Error> {
+        let call = self.call(model, provider)?;
+        let socket = websocket_of(provider)?;
+        transcription::stream(&call.endpoint, &model.id, socket, audio, &format, &params)
+    }
+
+    async fn stream_translation(
+        &self,
+        model: &Model,
+        audio: AudioChunks,
+        format: AudioFormat,
+        params: StreamTranslateParams,
+        provider: &dyn Provider,
+    ) -> Result<TranslationStream, Error> {
+        if self.flavor.is_vertex() {
+            return Err(Error::UnsupportedOperation("stream_translation".into()));
+        }
+        let call = self.call(model, provider)?;
+        let socket = websocket_of(provider)?;
+        translation::stream(&call.endpoint, &model.id, socket, audio, &format, &params)
+    }
+
+    fn video_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits {
+            max_per_call: Some(video::MAX_VIDEOS),
+            parallel: true,
+        }
+    }
+
+    async fn start_video(
+        &self,
+        model: &Model,
+        prompt: VideoPrompt,
+        params: VideoParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Value>, Error> {
+        let call = self.call(model, provider)?;
+        video::start(&call.endpoint, &model.id, &prompt, &params).await
+    }
+
+    async fn video_status(
+        &self,
+        model: &Model,
+        operation: &Value,
+        provider: &dyn Provider,
+    ) -> Result<VideoStatus, Error> {
+        let call = self.call(model, provider)?;
+        video::status(&call.endpoint, &model.id, operation).await
+    }
+
+    async fn download_video(
+        &self,
+        model: &Model,
+        video_part: crate::types::messages::FilePart,
+        provider: &dyn Provider,
+    ) -> Result<crate::types::messages::FilePart, Error> {
+        let call = self.call(model, provider)?;
+        video::download(&call.endpoint, video_part).await
+    }
+
+    async fn create_realtime_token(
+        &self,
+        model: &Model,
+        params: RealtimeTokenParams,
+        provider: &dyn Provider,
+    ) -> Result<RealtimeToken, Error> {
+        if self.flavor.is_vertex() {
+            return Err(Error::UnsupportedOperation("realtime".into()));
+        }
+        let call = self.call(model, provider)?;
+        realtime::create_token(&call.endpoint, &model.id, &params).await
+    }
+
+    fn realtime_session(
+        &self,
+        model: &Model,
+        config: &RealtimeSessionConfig,
+    ) -> Result<Value, Error> {
+        if self.flavor.is_vertex() {
+            return Err(Error::UnsupportedOperation("realtime".into()));
+        }
+        realtime::session_setup(config, &model.id)
+    }
+
+    fn realtime_codec(&self, model: &Model) -> Result<Box<dyn RealtimeCodec>, Error> {
+        if self.flavor.is_vertex() {
+            return Err(Error::UnsupportedOperation("realtime".into()));
+        }
+        Ok(Box::new(realtime::Codec::new(&model.id)))
+    }
+
+    fn realtime_connection(
+        &self,
+        _model: &Model,
+        token: &RealtimeToken,
+    ) -> Result<(crate::transport::WebSocketRequest, bool), Error> {
+        if self.flavor.is_vertex() {
+            return Err(Error::UnsupportedOperation("realtime".into()));
+        }
+        realtime::connection(token)
+    }
+}
+
+/// The provider's WebSocket transport, which live sessions need.
+pub(crate) fn websocket_of(provider: &dyn Provider) -> Result<Arc<dyn WebSocketTransport>, Error> {
+    provider.websocket().ok_or_else(|| {
+        Error::Configuration(format!(
+            "provider {:?} has no WebSocket transport for live sessions; build it with with_websocket_transport",
+            provider.name()
+        ))
+    })
 }
 
 /// The Gemini API provider. Build one with [`provider`].
@@ -271,6 +471,42 @@ impl Provider for GoogleProvider {
     fn is_configured(&self) -> bool {
         self.api_key().is_some_and(|key| !key.is_empty()) && self.config.is_configured()
     }
+
+    async fn upload_file(
+        &self,
+        file: UploadFile,
+        params: UploadParams,
+    ) -> Result<Item<UploadedFile>, Error> {
+        files::upload(&self.endpoint(), file, &params).await
+    }
+
+    async fn batch_start(
+        &self,
+        requests: Vec<BatchRequest>,
+        params: BatchParams,
+    ) -> Result<BatchStarted, Error> {
+        batch::start(&self.endpoint(), self.downloads.clone(), &requests, &params).await
+    }
+
+    async fn batch_status(&self, batch_id: &str) -> Result<BatchStatus, Error> {
+        batch::status(&self.endpoint(), batch_id).await
+    }
+
+    async fn batch_cancel(&self, batch_id: &str) -> Result<(), Error> {
+        batch::cancel(&self.endpoint(), batch_id).await
+    }
+
+    async fn batch_list(
+        &self,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> Result<BatchPage, Error> {
+        batch::list(&self.endpoint(), page_size, cursor).await
+    }
+
+    async fn batch_results(&self, batch_id: &str) -> Result<BatchResults, Error> {
+        batch::results(&self.endpoint(), batch_id).await
+    }
 }
 
 /// Register the Gemini API provider under `google` and `@ai-sdk/google`,
@@ -311,6 +547,20 @@ pub fn register_provider(
             tool_result_limit: None,
         }))
     })?;
+    register_interactions(&mut next)?;
     *registry = next;
     Ok(())
+}
+
+/// Register the Interactions protocol's snapshot factory once, for the
+/// Gemini API and Vertex AI providers alike.
+pub(crate) fn register_interactions(registry: &mut ProviderRegistry) -> Result<(), Error> {
+    match registry.register_protocol_factory(interactions::CLASS_ID, |value| {
+        Ok(interactions::restore(&value))
+    }) {
+        Ok(()) => Ok(()),
+        // The other Google provider registered it already.
+        Err(Error::Configuration(message)) if message.contains(interactions::CLASS_ID) => Ok(()),
+        Err(error) => Err(error),
+    }
 }

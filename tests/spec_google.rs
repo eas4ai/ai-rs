@@ -32,7 +32,7 @@ use suprnova_ai::{
     providers::{anthropic, google, hosts, openai},
     transport::HttpTransport,
     types::{
-        Event, Message, MessageRole, Part, Tool, ToolChoice, ToolRef,
+        Message, MessageRole, Part, Tool, ToolChoice, ToolRef,
         messages::{
             ContentOutput, ContentPart, FilePart, ReasoningPart, TextPart, ToolCallPart,
             ToolResultPart,
@@ -106,10 +106,6 @@ fn sampling(update: impl FnOnce(&mut SamplerParams)) -> StreamOptions {
         update(&mut sampling);
         p.sampling = ProviderValue::Value(sampling);
     })
-}
-
-fn events_of(events: &[Result<Event, Error>]) -> Vec<&Event> {
-    events.iter().map(|e| e.as_ref().unwrap()).collect()
 }
 
 fn google_meta(handle: &suprnova_ai::models::StreamHandle) -> Value {
@@ -1084,8 +1080,10 @@ async fn ggl_010_error_responses_and_stream_errors_keep_their_fields() {
         json!({"error":{"code":429,"message":"m","status":"RESOURCE_EXHAUSTED"}}),
     )]);
     let model429 = model("gemini-2.5-flash", transport);
-    let mut options = StreamOptions::default();
-    options.retry = suprnova_ai::RetryPolicy::none();
+    let options = StreamOptions {
+        retry: suprnova_ai::RetryPolicy::none(),
+        ..Default::default()
+    };
     let (_, events) = call(&model429, hi(), options.clone()).await;
     let Error::Provider(failure) = error(&events) else {
         panic!("not a provider error")
@@ -1205,7 +1203,7 @@ async fn ggl_012_a_buffered_call_sends_the_stream_body_and_gives_its_message() {
         "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2},
         "responseId":"r1"
     });
-    let streamed = Recorder::new([Reply::sse(&[response.clone()])]);
+    let streamed = Recorder::new([Reply::sse(std::slice::from_ref(&response))]);
     let (handle, events) = call(
         &model("gemini-2.5-flash", streamed.clone()),
         hi(),

@@ -241,6 +241,19 @@ pub trait ProviderProtocol: Send + Sync {
         CallLimits::default()
     }
 
+    /// The parameters of the call that embeds `range` of a split list of
+    /// `values` values. A protocol whose options hold an entry per value
+    /// slices them here.
+    fn embed_params_for(
+        &self,
+        _model: &Model,
+        params: &EmbedParams,
+        _values: usize,
+        _range: std::ops::Range<usize>,
+    ) -> Result<EmbedParams, Error> {
+        Ok(params.clone())
+    }
+
     /// The images one `generate_image` call returns for the model.
     fn image_limits(&self, _model: &Model) -> CallLimits {
         CallLimits::default()

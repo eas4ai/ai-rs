@@ -346,6 +346,8 @@ pub struct VideoJob {
 }
 
 /// The status of a video job.
+// A status is made once per check; boxing the item would only cost callers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum VideoStatus {
     Pending,
@@ -392,6 +394,8 @@ pub struct BatchRequest {
     pub kind: BatchRequestKind,
 }
 
+// A request kind is made once per batch request; boxing would only cost callers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum BatchRequestKind {
     /// A language model request: its messages and call options.

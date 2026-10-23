@@ -112,10 +112,10 @@ impl Flavor {
 
     /// The options object of the call's provider parameters, from the
     /// first key the flavor reads that is present.
-    pub(crate) fn options<'a>(
+    pub(crate) fn options(
         self,
-        params: Option<&'a BTreeMap<String, Value>>,
-    ) -> Option<(&'static str, &'a Value)> {
+        params: Option<&BTreeMap<String, Value>>,
+    ) -> Option<(&'static str, &Value)> {
         let params = params?;
         self.option_keys()
             .iter()
@@ -124,10 +124,7 @@ impl Flavor {
     }
 
     /// The flavor's metadata of a history part, first match wins.
-    pub(crate) fn part_metadata<'a>(
-        self,
-        metadata: Option<&'a Metadata>,
-    ) -> Option<&'a Map<String, Value>> {
+    pub(crate) fn part_metadata(self, metadata: Option<&Metadata>) -> Option<&Map<String, Value>> {
         let metadata = metadata?;
         self.part_keys()
             .iter()

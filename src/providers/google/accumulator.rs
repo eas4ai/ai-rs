@@ -61,7 +61,9 @@ impl Accumulator {
                 && let Some(Value::String(existing)) = get(&self.args, &segments)
             {
                 let joined = format!("{existing}{string}");
-                set(&mut self.args, &segments, Value::String(joined));
+                if !set(&mut self.args, &segments, Value::String(joined)) {
+                    continue;
+                }
                 let escaped = Value::String(string.to_owned()).to_string();
                 delta.push_str(&escaped[1..escaped.len() - 1]);
                 continue;
@@ -69,7 +71,9 @@ impl Accumulator {
             let Some((value, json)) = resolve(arg) else {
                 continue;
             };
-            set(&mut self.args, &segments, value);
+            if !set(&mut self.args, &segments, value) {
+                continue;
+            }
             let will_continue = arg.get("willContinue") == Some(&Value::Bool(true));
             delta.push_str(&self.navigate(&segments, string.is_some() && will_continue, &json));
         }
@@ -220,16 +224,43 @@ fn get<'a>(root: &'a Map<String, Value>, segments: &[Segment]) -> Option<&'a Val
     Some(current)
 }
 
-fn set(root: &mut Map<String, Value>, segments: &[Segment], value: Value) {
+/// Write `value` at the path. Returns false, writing nothing, for a path the
+/// arguments cannot take: one that does not start with a key, or an array
+/// index past the end of its array, which would leave holes. Streamed
+/// arguments fill arrays in order, so this also bounds what a response can
+/// make the accumulator allocate.
+fn set(root: &mut Map<String, Value>, segments: &[Segment], value: Value) -> bool {
     let Some((Segment::Key(first), rest)) = segments.split_first() else {
-        return;
+        return false;
     };
+    if !fits(root.get(first), rest) {
+        return false;
+    }
     if rest.is_empty() {
         root.insert(first.clone(), value);
-        return;
+        return true;
     }
     let slot = root.entry(first.clone()).or_insert(Value::Null);
     set_in(slot, rest, value);
+    true
+}
+
+/// Whether each array index of the path is at most its array's length.
+fn fits(slot: Option<&Value>, segments: &[Segment]) -> bool {
+    let Some((segment, rest)) = segments.split_first() else {
+        return true;
+    };
+    match segment {
+        Segment::Key(key) => {
+            let next = slot.and_then(Value::as_object).and_then(|map| map.get(key));
+            fits(next, rest)
+        }
+        Segment::Index(index) => {
+            let items = slot.and_then(Value::as_array);
+            let len = items.map_or(0, Vec::len);
+            *index <= len && fits(items.and_then(|items| items.get(*index)), rest)
+        }
+    }
 }
 
 fn set_in(slot: &mut Value, segments: &[Segment], value: Value) {
@@ -251,8 +282,8 @@ fn set_in(slot: &mut Value, segments: &[Segment], value: Value) {
                 *slot = Value::Array(Vec::new());
             }
             let items = slot.as_array_mut().expect("slot is an array");
-            if items.len() <= *index {
-                items.resize(index + 1, Value::Null);
+            if items.len() == *index {
+                items.push(Value::Null);
             }
             if rest.is_empty() {
                 items[*index] = value;
@@ -286,5 +317,16 @@ mod tests {
             serde_json::from_str::<Value>(&full).unwrap(),
             json!({"location": "Boston", "units": "metric", "recipe": {"ingredients": [{"name": "Noodles"}]}, "count": 2})
         );
+    }
+
+    #[test]
+    fn an_index_past_the_end_of_its_array_is_skipped() {
+        let mut accumulator = Accumulator::default();
+        let delta =
+            accumulator.feed(&[json!({"jsonPath": "$.items[999999999999]", "stringValue": "x"})]);
+        assert_eq!(delta, "");
+        accumulator.feed(&[json!({"jsonPath": "$.items[0]", "stringValue": "a"})]);
+        accumulator.feed(&[json!({"jsonPath": "$.items[1]", "stringValue": "b"})]);
+        assert_eq!(accumulator.finish().0, r#"{"items":["a","b"]}"#);
     }
 }

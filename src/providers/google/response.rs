@@ -117,6 +117,11 @@ impl Reader {
         }
     }
 
+    /// The raw finish reason of the last request, or the prompt block reason.
+    pub(crate) fn raw_finish(&self) -> Option<String> {
+        self.raw_finish.clone()
+    }
+
     /// Keep the service tier of the `x-gemini-service-tier` response header.
     pub(crate) fn headers(&mut self, headers: &[(String, String)]) {
         if self.service_tier_header.is_none() {
