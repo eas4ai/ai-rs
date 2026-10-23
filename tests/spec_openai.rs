@@ -1,4 +1,4 @@
-//! Tests for OAI-001 and OAI-002 in docs/spec/openai.md. Each test name starts with the
+//! Tests for OAI-001 to OAI-027 in docs/spec/openai.md. Each test name starts with the
 //! requirement it checks; scripts/check-openai.sh selects them by it. The
 //! tests build or record each request the crate sends and answer it with a
 //! reply written in the test, so no request leaves the machine. They show the
@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use suprnova_ai::{
     Model, ProviderConfig, StreamOptions,
     models::params::{InferenceRequestParams, OutputParams},
-    providers::openai::{OpenAICompatibleProvider, protocol::build_request},
+    providers::openai::{
+        OpenAIChatCompletionsProtocol, OpenAICompatibleProvider, protocol::build_request,
+    },
     transport::{HttpRequest, HttpResponse, HttpTransport, TransportError},
     types::{
         Message, MessageRole, Part,
@@ -597,5 +599,123 @@ fn oai_002_unstored_reasoning_parts_of_one_item_go_out_once() {
         reasoning[0]["summary"],
         json!([{"type": "summary_text", "text": "first"}]),
         "{body}"
+    );
+}
+
+// OAI-003
+
+/// A configuration whose `env` holds an organization and a project, with no
+/// base URL, so the provider uses its default.
+fn org_config() -> ProviderConfig {
+    ProviderConfig {
+        api_key_value: Some("sk-test".into()),
+        env: [
+            ("OPENAI_ORG_ID".to_owned(), "org_1".to_owned()),
+            ("OPENAI_PROJECT_ID".to_owned(), "proj_1".to_owned()),
+        ]
+        .into(),
+        ..Default::default()
+    }
+}
+/// The value of this header on recorded request `index`, by any case.
+fn header(transport: &Recorder, index: usize, name: &str) -> Option<String> {
+    transport.requests.lock().unwrap()[index]
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+fn url(transport: &Recorder, index: usize) -> String {
+    transport.requests.lock().unwrap()[index].url.clone()
+}
+/// Run one call to the end; the error it ended with, if any.
+async fn run(model: &Model, options: StreamOptions) -> Result<(), suprnova_ai::Error> {
+    let mut handle = suprnova_ai::stream(model, vec![user("hi")], options);
+    while let Some(event) = handle.next().await {
+        event?;
+    }
+    Ok(())
+}
+fn chat_reply() -> (u16, Vec<u8>) {
+    let chunks = [
+        json!({"id": "c_1", "object": "chat.completion.chunk", "model": "gpt-4.1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": null}]}),
+        json!({"id": "c_1", "object": "chat.completion.chunk", "model": "gpt-4.1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+    ];
+    let mut text: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    text.push_str("data: [DONE]\n\n");
+    (200, text.into_bytes())
+}
+
+#[tokio::test]
+async fn oai_003_requests_go_to_the_default_url_with_key_organization_and_project() {
+    let transport = Recorder::new([text_reply(), chat_reply()]);
+    let provider = OpenAICompatibleProvider::new(org_config(), transport.clone());
+    let responses = Model::new("gpt-5.4", Arc::new(provider.clone()));
+    run(&responses, StreamOptions::default()).await.unwrap();
+    let chat = Model::new(
+        "gpt-4.1",
+        Arc::new(provider.with_protocol(Arc::new(OpenAIChatCompletionsProtocol))),
+    );
+    run(&chat, StreamOptions::default()).await.unwrap();
+    for (index, path) in [(0, "/responses"), (1, "/chat/completions")] {
+        assert_eq!(
+            url(&transport, index),
+            format!("https://api.openai.com/v1{path}")
+        );
+        assert_eq!(
+            header(&transport, index, "authorization").as_deref(),
+            Some("Bearer sk-test"),
+            "{path}"
+        );
+        assert_eq!(
+            header(&transport, index, "OpenAI-Organization").as_deref(),
+            Some("org_1"),
+            "{path}"
+        );
+        assert_eq!(
+            header(&transport, index, "OpenAI-Project").as_deref(),
+            Some("proj_1"),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oai_003_no_organization_or_project_header_without_their_values() {
+    let transport = Recorder::new([text_reply()]);
+    let mut config = org_config();
+    config.env.insert("OPENAI_ORG_ID".into(), String::new());
+    config.env.remove("OPENAI_PROJECT_ID");
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config, transport.clone())),
+    );
+    run(&model, StreamOptions::default()).await.unwrap();
+    assert_eq!(header(&transport, 0, "OpenAI-Organization"), None);
+    assert_eq!(header(&transport, 0, "OpenAI-Project"), None);
+}
+
+#[tokio::test]
+async fn oai_003_an_error_body_gives_its_message_type_code_and_status_kind() {
+    let body =
+        json!({"error": {"message": "slow", "type": "requests", "code": "rate_limit_exceeded"}});
+    let transport = Recorder::new([(429, body.to_string().into_bytes())]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(org_config(), transport)),
+    );
+    let options = StreamOptions {
+        retry: suprnova_ai::RetryPolicy::none(),
+        ..Default::default()
+    };
+    let Err(suprnova_ai::Error::Provider(error)) = run(&model, options).await else {
+        panic!("a 429 gave no provider error")
+    };
+    assert_eq!(error.message, "slow");
+    assert_eq!(error.error_type.as_deref(), Some("requests"));
+    assert_eq!(error.code.as_deref(), Some("rate_limit_exceeded"));
+    assert_eq!(
+        error.kind,
+        suprnova_ai::errors::ProviderErrorKind::RateLimit
     );
 }
