@@ -230,3 +230,161 @@ pub(crate) async fn embed(
     }
     Ok(Item::new(embeddings))
 }
+
+/// Whether a Vertex AI embedding model uses `embedContent`, one value per
+/// call; the others use `predict` (`google-vertex-embedding-model.ts`).
+fn uses_embed_content(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "gemini-embedding-2" | "gemini-embedding-2-preview"
+    )
+}
+
+/// The most values one Vertex AI embedding call takes for a model (VTX-006).
+pub(crate) fn vertex_max_values(model_id: &str) -> usize {
+    if uses_embed_content(model_id) { 1 } else { 250 }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VertexEmbedOptions {
+    output_dimensionality: Option<serde_json::Number>,
+    task_type: Option<String>,
+    title: Option<String>,
+    auto_truncate: Option<bool>,
+}
+
+/// A token count, which Vertex AI can write as a whole float.
+fn token_count(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
+            .map(|n| n as u64)
+    })
+}
+
+/// Embed values on Vertex AI: one value with `embedContent`, or up to 250
+/// with `predict` (VTX-006).
+pub(crate) async fn embed_vertex(
+    endpoint: &Endpoint,
+    model_id: &str,
+    values: Vec<String>,
+    params: &EmbedParams,
+) -> Result<Item<Vec<Vec<f64>>>, Error> {
+    let max = vertex_max_values(model_id);
+    if values.len() > max {
+        return Err(Error::Validation(format!(
+            "{model_id} takes at most {max} values per call, not {}",
+            values.len()
+        )));
+    }
+    let options: VertexEmbedOptions =
+        options::parse(Flavor::Vertex, Some(&params.provider_options))?;
+    if let Some(task) = &options.task_type {
+        options::check_one_of("taskType", task, TASK_TYPES)?;
+    }
+    let invalid = |what: &str| {
+        http::response_error(
+            &endpoint.provider,
+            format!("Google Vertex AI embedding response {what}"),
+        )
+    };
+    let mut parameters = serde_json::Map::new();
+    if let Some(dimensions) = &options.output_dimensionality {
+        parameters.insert("outputDimensionality".into(), json!(dimensions));
+    }
+    if uses_embed_content(model_id) {
+        let mut config = parameters;
+        if let Some(task) = &options.task_type {
+            config.insert("taskType".into(), json!(task));
+        }
+        if let Some(title) = &options.title {
+            config.insert("title".into(), json!(title));
+        }
+        if let Some(truncate) = options.auto_truncate {
+            config.insert("autoTruncate".into(), json!(truncate));
+        }
+        let text = values.first().cloned().unwrap_or_default();
+        let body = json!({"content": {"parts": [{"text": text}]}, "embedContentConfig": config});
+        let request = endpoint.request(
+            "POST",
+            &["models".into(), format!("{model_id}:embedContent")],
+            Some(body),
+            Default::default(),
+            Default::default(),
+        )?;
+        let (_, response) = endpoint
+            .json(request, Some(model_id), http::MAX_RESPONSE_BYTES)
+            .await?;
+        let embedding = response
+            .get("embedding")
+            .ok_or_else(|| invalid("has no embedding"))?;
+        let mut item = Item::new(vec![
+            vector(embedding).map_err(|_| invalid("has no values"))?,
+        ]);
+        item.usage = response
+            .get("usageMetadata")
+            .and_then(|usage| usage.get("promptTokenCount"))
+            .and_then(Value::as_u64)
+            .map(|tokens| crate::types::usage::Usage {
+                input_tokens: tokens,
+                ..Default::default()
+            });
+        return Ok(item);
+    }
+    if let Some(truncate) = options.auto_truncate {
+        parameters.insert("autoTruncate".into(), json!(truncate));
+    }
+    let instances: Vec<Value> = values
+        .iter()
+        .map(|value| {
+            let mut instance = json!({"content": value});
+            if let Some(task) = &options.task_type {
+                instance["task_type"] = json!(task);
+            }
+            if let Some(title) = &options.title {
+                instance["title"] = json!(title);
+            }
+            instance
+        })
+        .collect();
+    let request = endpoint.request(
+        "POST",
+        &["models".into(), format!("{model_id}:predict")],
+        Some(json!({"instances": instances, "parameters": parameters})),
+        Default::default(),
+        Default::default(),
+    )?;
+    let (_, response) = endpoint
+        .json(request, Some(model_id), http::MAX_RESPONSE_BYTES)
+        .await?;
+    let predictions = response
+        .get("predictions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("has no predictions"))?;
+    let mut embeddings = Vec::with_capacity(predictions.len());
+    let mut tokens = 0u64;
+    for prediction in predictions {
+        let embedding = prediction
+            .get("embeddings")
+            .ok_or_else(|| invalid("has a prediction without embeddings"))?;
+        embeddings.push(vector(embedding).map_err(|_| invalid("has an embedding without values"))?);
+        tokens = tokens.saturating_add(
+            embedding
+                .get("statistics")
+                .and_then(|s| s.get("token_count"))
+                .and_then(token_count)
+                .ok_or_else(|| invalid("has an embedding without a token count"))?,
+        );
+    }
+    if embeddings.len() != values.len() {
+        return Err(invalid("has another number of embeddings than values"));
+    }
+    let mut item = Item::new(embeddings);
+    item.usage = Some(crate::types::usage::Usage {
+        input_tokens: tokens,
+        ..Default::default()
+    });
+    Ok(item)
+}

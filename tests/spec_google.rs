@@ -244,7 +244,18 @@ fn ggl_001_registers_with_every_other_provider() {
         register(&mut registry, key(), transport.clone()).unwrap();
     }
     google::register(&mut registry, key(), transport.clone()).unwrap();
-    // VERTEX-REGISTER
+    suprnova_ai::providers::google_vertex::register(&mut registry, key(), transport.clone())
+        .unwrap();
+    suprnova_ai::providers::google_vertex::anthropic::register(
+        &mut registry,
+        key(),
+        transport.clone(),
+    )
+    .unwrap();
+    suprnova_ai::providers::google_vertex::maas::register(&mut registry, key(), transport.clone())
+        .unwrap();
+    suprnova_ai::providers::google_vertex::xai::register(&mut registry, key(), transport.clone())
+        .unwrap();
 }
 
 // GGL-002

@@ -55,10 +55,17 @@ fn file(part: &FilePart, wire: Wire) -> Result<Value, Error> {
         _ => {}
     }
     match dialect_of(wire) {
-        Dialect::OpenAI => {}
+        Dialect::OpenAI | Dialect::VertexXai => {}
         Dialect::DeepSeek => return deepseek_file(part, mt),
         Dialect::Moonshot => return moonshot_file(part, mt),
         Dialect::Mistral => return mistral_file(part, mt),
+        // The TypeScript provider downloads every file URL for MaaS.
+        Dialect::VertexMaas if fetch_url(part).is_some() => {
+            return Err(invalid(
+                "Google Vertex AI MaaS does not fetch file URLs; supply the file bytes or build the provider with a download transport",
+            ));
+        }
+        Dialect::VertexMaas => {}
     }
     let data = media_ref(&part.data);
     if mt.starts_with("image/") {
@@ -238,7 +245,7 @@ fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
         // with an image.
         ToolResultValue::Special(SpecialToolResult::Content(content))
             if match dialect_of(wire) {
-                Dialect::OpenAI => false,
+                Dialect::OpenAI | Dialect::VertexMaas | Dialect::VertexXai => false,
                 Dialect::DeepSeek => !content.value.iter().any(
                     |p| matches!(p, ContentPart::File(f) if f.media_type.starts_with("image/")),
                 ),
@@ -635,6 +642,8 @@ fn downloads(wire: Wire, media_type: &str) -> bool {
             .iter()
             .any(|kind| media_type.starts_with(kind)),
         Dialect::DeepSeek | Dialect::Mistral => false,
+        Dialect::VertexMaas => true,
+        Dialect::VertexXai => !media_type.starts_with("image/"),
     }
 }
 /// The URL of a user file that the protocol downloads before the request.

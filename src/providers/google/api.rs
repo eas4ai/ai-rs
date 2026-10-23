@@ -240,11 +240,13 @@ pub(crate) fn transport(
     flavor: Flavor,
     provider: &dyn Provider,
 ) -> Result<Arc<dyn HttpTransport>, Error> {
-    provider.shared_transport().ok_or_else(|| {
-        Error::Configuration(format!(
+    provider.shared_transport().ok_or_else(|| match flavor {
+        // A Vertex AI provider has no transport when it cannot sign in.
+        Flavor::Vertex => crate::providers::google_vertex::unavailable(provider.config()),
+        Flavor::Gemini => Error::Configuration(format!(
             "{} protocols require Provider::shared_transport",
             flavor.api().label
-        ))
+        )),
     })
 }
 

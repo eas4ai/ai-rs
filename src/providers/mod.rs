@@ -17,6 +17,7 @@
 pub mod anthropic;
 pub mod base;
 pub mod google;
+pub mod google_vertex;
 pub mod hosts;
 pub(crate) mod http;
 pub mod openai;

@@ -20,7 +20,7 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, JsonSchemaModels},
+        openai::profile::{ChatProfile, Dialect, JsonSchemaModels, ReasoningTokens},
     },
     transport::HttpTransport,
 };
@@ -47,7 +47,7 @@ static PROFILE: ChatProfile = ChatProfile {
     auto_tool_choice_only: false,
     rejects_penalties_and_seed: false,
     finish_reasons: &[],
-    reasoning_outside_completion: false,
+    reasoning_tokens: ReasoningTokens::InCompletion,
     json_drops_tool_calls_after_text: false,
     unsupported: &[],
     dialect: Dialect::OpenAI,
