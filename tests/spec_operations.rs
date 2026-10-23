@@ -453,6 +453,41 @@ impl ProviderProtocol for Script {
         };
         Ok((request, true))
     }
+
+    /// A model named `m-start` starts its sessions once; others update them.
+    fn realtime_server_connection(
+        &self,
+        model: &Model,
+        _provider: &dyn Provider,
+    ) -> Result<(WebSocketRequest, RealtimeStartup), Error> {
+        let request = WebSocketRequest {
+            url: format!("wss://rt.example/server?model={}", model.id),
+            headers: vec![("authorization".into(), "Key server-key".into())],
+        };
+        let startup = if model.id == "m-start" {
+            RealtimeStartup::SessionStart
+        } else {
+            RealtimeStartup::SessionUpdate
+        };
+        Ok((request, startup))
+    }
+
+    async fn create_webrtc_session(
+        &self,
+        _model: &Model,
+        offer_sdp: String,
+        config: RealtimeSessionConfig,
+        _provider: &dyn Provider,
+    ) -> Result<WebRtcSession, Error> {
+        self.begin(
+            "create_webrtc_session",
+            json!({"offer": offer_sdp, "instructions": config.instructions}),
+        )?;
+        Ok(WebRtcSession {
+            session_id: "sess_1".into(),
+            answer_sdp: format!("answer to {offer_sdp}"),
+        })
+    }
 }
 
 /// A codec that sends the setup and text items and drops every other
@@ -465,6 +500,9 @@ impl RealtimeCodec for Codec {
         Ok(match event {
             RealtimeClientEvent::SessionUpdate(config) => {
                 Some(json!({"setup": config.instructions}).to_string())
+            }
+            RealtimeClientEvent::SessionStart(config) => {
+                Some(json!({"start": config.instructions}).to_string())
             }
             RealtimeClientEvent::ConversationItemCreate(RealtimeItem::Text(text)) => {
                 Some(json!({"text": text}).to_string())
@@ -2398,4 +2436,106 @@ async fn ops_013_a_skill_upload_sends_its_files_and_returns_what_the_provider_re
         "{error:?}"
     );
     assert!(recorder.requests.lock().unwrap().is_empty());
+}
+
+// OPS-014
+
+/// A protocol with no realtime support.
+struct NoRealtime;
+
+impl ProviderProtocol for NoRealtime {
+    fn protocol_class_id(&self) -> &str {
+        "no_realtime"
+    }
+}
+
+#[tokio::test]
+async fn ops_014_a_server_connection_opens_with_the_providers_key_and_starts_the_session() {
+    for (model_id, first) in [
+        ("m-start", json!({"start": "be kind"})),
+        ("m1", json!({"setup": "be kind"})),
+    ] {
+        let socket = ScriptedSocket::new(vec![(NEVER, text_message(json!({})))]);
+        let script = Script::new(unlimited());
+        let host = host_with(script.clone(), script.clone(), Some(socket.clone()));
+        let model = Model::new(model_id, host);
+        let config = RealtimeSessionConfig {
+            instructions: Some("be kind".into()),
+            ..Default::default()
+        };
+        let connection = ops::realtime::connect_server(&model, config).await.unwrap();
+        let request = socket.request();
+        assert_eq!(
+            request.url,
+            format!("wss://rt.example/server?model={model_id}")
+        );
+        assert_eq!(
+            request.headers,
+            vec![("authorization".to_owned(), "Key server-key".to_owned())]
+        );
+        assert_eq!(socket.sent_json(), vec![first]);
+        drop(connection);
+        assert!(
+            socket.closed.load(Ordering::SeqCst),
+            "the socket stayed open"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ops_014_a_webrtc_session_goes_through_the_protocol() {
+    let script = Script::new(unlimited());
+    let host = host_with(script.clone(), script.clone(), None);
+    let model = Model::new("m1", host);
+    let config = RealtimeSessionConfig {
+        instructions: Some("be kind".into()),
+        ..Default::default()
+    };
+    let session = ops::realtime::create_webrtc_session(
+        &model,
+        "v=0 offer".into(),
+        config,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        script.calls("create_webrtc_session"),
+        vec![json!({"offer": "v=0 offer", "instructions": "be kind"})]
+    );
+    assert_eq!(
+        session,
+        WebRtcSession {
+            session_id: "sess_1".into(),
+            answer_sdp: "answer to v=0 offer".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn ops_014_a_protocol_without_them_fails_before_a_request() {
+    let socket = ScriptedSocket::new(vec![]);
+    let script = Script::new(unlimited());
+    let host = host_with(script.clone(), Arc::new(NoRealtime), Some(socket.clone()));
+    let model = Model::new("m1", host);
+    let server = ops::realtime::connect_server(&model, Default::default())
+        .await
+        .err();
+    assert!(
+        matches!(server, Some(Error::UnsupportedOperation(_))),
+        "{server:?}"
+    );
+    let webrtc = ops::realtime::create_webrtc_session(
+        &model,
+        "offer".into(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .err();
+    assert!(
+        matches!(webrtc, Some(Error::UnsupportedOperation(_))),
+        "{webrtc:?}"
+    );
+    assert!(socket.requests.lock().unwrap().is_empty());
 }

@@ -102,6 +102,29 @@ pub async fn connect(
     Ok(connection)
 }
 
+/// Open a session with the provider's own credentials through its
+/// WebSocket transport, for a server that holds the key, and send the
+/// session setup as the protocol starts a session: a session start or a
+/// session update (OPS-014). Dropping the connection closes the socket.
+pub async fn connect_server(
+    model: &Model,
+    config: RealtimeSessionConfig,
+) -> Result<RealtimeConnection, Error> {
+    let _ = (model, config);
+    Err(Error::UnsupportedOperation("connect_server is not built".into()))
+}
+
+/// Create a WebRTC session from a client's SDP offer (OPS-014). Not built yet.
+pub async fn create_webrtc_session(
+    model: &Model,
+    offer_sdp: String,
+    config: RealtimeSessionConfig,
+    options: OperationOptions,
+) -> Result<WebRtcSession, Error> {
+    let _ = (model, offer_sdp, config, options);
+    Err(Error::UnsupportedOperation("create_webrtc_session is not built".into()))
+}
+
 /// An open realtime session: send client events and read server events.
 /// [`split`](Self::split) separates the two for concurrent use.
 pub struct RealtimeConnection {

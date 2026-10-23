@@ -4254,3 +4254,436 @@ async fn oai_023_result_lines_give_each_outcome() {
     assert!(matches!(results[3].outcome, BatchOutcome::Expired { .. }));
     assert!(matches!(results[4].outcome, BatchOutcome::Failed { .. }));
 }
+
+// OAI-024
+
+use suprnova_ai::providers::operations::{
+    RealtimeClientEvent, RealtimeItem, RealtimeServerEventKind, RealtimeSessionConfig,
+    RealtimeTokenParams, RealtimeTool, RealtimeTranscription,
+};
+
+fn realtime_model(id: &str, transport: Arc<Recorder>, socket: Arc<ScriptedSocket>) -> Model {
+    let provider =
+        OpenAICompatibleProvider::new(config(), transport).with_websocket_transport(socket);
+    Model::new(id, Arc::new(provider))
+}
+fn full_config() -> RealtimeSessionConfig {
+    RealtimeSessionConfig {
+        instructions: Some("be kind".into()),
+        voice: Some("cedar".into()),
+        output_modalities: vec!["audio".into()],
+        input_audio_format: Some(AudioFormat::pcm(24_000)),
+        input_audio_transcription: Some(RealtimeTranscription {
+            language: Some("en".into()),
+            ..Default::default()
+        }),
+        turn_detection: Some(
+            json!({"type": "server-vad", "threshold": 0.5, "silenceDurationMs": 300}),
+        ),
+        tools: vec![RealtimeTool {
+            name: "weather".into(),
+            description: Some("Weather".into()),
+            parameters: json!({"type": "object"}),
+        }],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn oai_024_a_token_carries_the_session_setup_and_opens_the_realtime_socket() {
+    let transport = Recorder::new([json_reply(
+        json!({"value": "ek_1", "expires_at": 1_800_000_060u64}),
+    )]);
+    let socket = ScriptedSocket::new(vec![(NEVER_SENT, text_message(json!({})))]);
+    let model = realtime_model("gpt-realtime", transport.clone(), socket.clone());
+    let token = suprnova_ai::ops::realtime::create_token(
+        &model,
+        RealtimeTokenParams {
+            expires_after_seconds: Some(60),
+            session: Some(full_config()),
+        },
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        url(&transport, 0),
+        "https://api.openai.com/v1/realtime/client_secrets"
+    );
+    assert_eq!(
+        transport.body(0),
+        json!({"session": {
+            "type": "realtime", "model": "gpt-realtime", "instructions": "be kind", "output_modalities": ["audio"],
+            "audio": {
+                "input": {"format": {"type": "audio/pcm", "rate": 24000},
+                          "turn_detection": {"type": "server_vad", "threshold": 0.5, "silence_duration_ms": 300},
+                          "transcription": {"model": "gpt-realtime-whisper", "language": "en"}},
+                "output": {"voice": "cedar"}},
+            "tools": [{"type": "function", "name": "weather", "description": "Weather", "parameters": {"type": "object"}}],
+            "tool_choice": "auto"},
+         "expires_after": {"anchor": "created_at", "seconds": 60}})
+    );
+    assert_eq!(token.token, "ek_1");
+    assert_eq!(
+        token.url,
+        "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+    );
+    assert_eq!(token.expires_at, Some(1_800_000_060));
+    let mut connection =
+        suprnova_ai::ops::realtime::connect(&model, &token, RealtimeSessionConfig::default())
+            .await
+            .unwrap();
+    let request = socket.request();
+    assert_eq!(request.url, token.url);
+    assert_eq!(
+        request.headers,
+        vec![("authorization".to_owned(), "Bearer ek_1".to_owned())]
+    );
+    connection
+        .send(RealtimeClientEvent::ConversationItemCreate(
+            RealtimeItem::Text("hi".into()),
+        ))
+        .await
+        .unwrap();
+    let sent = socket.sent_json();
+    assert_eq!(
+        sent[0],
+        json!({"type": "session.update", "session": {"type": "realtime", "model": "gpt-realtime"}})
+    );
+    assert_eq!(
+        sent[1],
+        json!({"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}})
+    );
+}
+
+/// A count of sent messages that never comes, for a message that is never delivered.
+const NEVER_SENT: usize = usize::MAX;
+
+#[test]
+fn oai_024_the_realtime_codec_maps_the_typescript_events() {
+    let model = realtime_model(
+        "gpt-realtime",
+        Recorder::new([]),
+        ScriptedSocket::new(vec![]),
+    );
+    let mut codec = suprnova_ai::ops::realtime::codec(&model).unwrap();
+    let encode = |codec: &mut Box<dyn suprnova_ai::providers::operations::RealtimeCodec>, event| {
+        codec
+            .encode(&event)
+            .unwrap()
+            .map(|m| serde_json::from_str::<Value>(&m).unwrap())
+    };
+    assert_eq!(
+        encode(
+            &mut codec,
+            RealtimeClientEvent::InputAudioAppend("AQI=".into())
+        ),
+        Some(json!({"type": "input_audio_buffer.append", "audio": "AQI="}))
+    );
+    assert_eq!(
+        encode(
+            &mut codec,
+            RealtimeClientEvent::ConversationItemCreate(RealtimeItem::FunctionCallOutput {
+                call_id: "c1".into(),
+                name: None,
+                output: "sunny".into(),
+            })
+        ),
+        Some(
+            json!({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": "c1", "output": "sunny"}})
+        )
+    );
+    assert_eq!(
+        encode(
+            &mut codec,
+            RealtimeClientEvent::ResponseCreate {
+                options: Some(json!({"modalities": ["text"], "instructions": "short"}))
+            }
+        ),
+        Some(
+            json!({"type": "response.create", "response": {"output_modalities": ["text"], "instructions": "short"}})
+        )
+    );
+    assert_eq!(
+        encode(&mut codec, RealtimeClientEvent::InputAudioMute),
+        None
+    );
+    let decode = |codec: &mut Box<dyn suprnova_ai::providers::operations::RealtimeCodec>,
+                  value: Value| {
+        codec.decode(&value.to_string()).unwrap().remove(0).kind
+    };
+    assert_eq!(
+        decode(
+            &mut codec,
+            json!({"type": "session.created", "session": {"id": "sess_1"}})
+        ),
+        RealtimeServerEventKind::SessionCreated {
+            session_id: Some("sess_1".into())
+        }
+    );
+    assert_eq!(
+        decode(
+            &mut codec,
+            json!({"type": "response.output_audio_transcript.delta", "response_id": "r1", "item_id": "i1", "delta": "he"})
+        ),
+        RealtimeServerEventKind::AudioTranscriptDelta {
+            response_id: "r1".into(),
+            item_id: "i1".into(),
+            delta: "he".into()
+        }
+    );
+    assert_eq!(
+        decode(
+            &mut codec,
+            json!({"type": "response.function_call_arguments.done", "response_id": "r1", "item_id": "i2", "call_id": "c1", "name": "weather", "arguments": "{}"})
+        ),
+        RealtimeServerEventKind::FunctionCallArgumentsDone {
+            response_id: "r1".into(),
+            item_id: "i2".into(),
+            call_id: "c1".into(),
+            name: "weather".into(),
+            arguments: "{}".into(),
+        }
+    );
+    assert_eq!(
+        decode(
+            &mut codec,
+            json!({"type": "response.done", "response": {"id": "r1"}})
+        ),
+        RealtimeServerEventKind::ResponseDone {
+            response_id: "r1".into(),
+            status: "completed".into()
+        }
+    );
+    assert_eq!(
+        decode(
+            &mut codec,
+            json!({"type": "error", "error": {"message": "bad", "code": "x"}})
+        ),
+        RealtimeServerEventKind::Error {
+            message: "bad".into(),
+            code: Some("x".into())
+        }
+    );
+    assert_eq!(
+        decode(&mut codec, json!({"type": "rate_limits.updated"})),
+        RealtimeServerEventKind::Custom {
+            raw_type: "rate_limits.updated".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn oai_024_a_live_model_opens_live_sessions_with_the_providers_key() {
+    let socket = ScriptedSocket::new(vec![(NEVER_SENT, text_message(json!({})))]);
+    let model = realtime_model("gpt-live-1", Recorder::new([]), socket.clone());
+    let session = RealtimeSessionConfig {
+        instructions: Some("be kind".into()),
+        ..Default::default()
+    };
+    let mut connection = suprnova_ai::ops::realtime::connect_server(&model, session)
+        .await
+        .unwrap();
+    let request = socket.request();
+    assert_eq!(request.url, "wss://api.openai.com/v1/live/sessions");
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer sk-test")
+    );
+    for event in [
+        RealtimeClientEvent::InputAudioAppend("AQI=".into()),
+        RealtimeClientEvent::InputAudioMute,
+        RealtimeClientEvent::InputAudioUnmute,
+        RealtimeClientEvent::ContextAppend {
+            content: "note".into(),
+            delegation_id: Some("d1".into()),
+        },
+        RealtimeClientEvent::SessionClose,
+    ] {
+        connection.send(event).await.unwrap();
+    }
+    assert_eq!(
+        socket.sent_json(),
+        vec![
+            json!({"type": "session.start", "session": {"model": "gpt-live-1", "instructions": "be kind",
+                   "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": "marin"}}}}),
+            json!({"type": "session.input_audio.append", "audio": "AQI="}),
+            json!({"type": "session.input_audio.mute"}),
+            json!({"type": "session.input_audio.unmute"}),
+            json!({"type": "session.thinking.append", "content": "note", "delegation_id": "d1"}),
+            json!({"type": "session.close"}),
+        ]
+    );
+    let socket = ScriptedSocket::new(vec![(NEVER_SENT, text_message(json!({})))]);
+    let server = Model::new(
+        "gpt-realtime",
+        Arc::new(
+            OpenAICompatibleProvider::new(config(), Recorder::new([]))
+                .with_websocket_transport(socket.clone()),
+        ),
+    );
+    let _ = suprnova_ai::ops::realtime::connect_server(&server, RealtimeSessionConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        socket.request().url,
+        "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+    );
+    assert_eq!(socket.sent_json()[0]["type"], "session.update");
+}
+
+#[test]
+fn oai_024_the_live_codec_decodes_the_typescript_events() {
+    let model = realtime_model("gpt-live-1", Recorder::new([]), ScriptedSocket::new(vec![]));
+    let mut codec = suprnova_ai::ops::realtime::codec(&model).unwrap();
+    let mut decode = |value: Value| codec.decode(&value.to_string()).unwrap().remove(0).kind;
+    assert_eq!(
+        decode(json!({"type": "session.started", "session": {"id": "s1"}})),
+        RealtimeServerEventKind::SessionStarted {
+            session_id: "s1".into(),
+            delegation_mode: "client".into()
+        }
+    );
+    assert_eq!(
+        decode(json!({"type": "session.output_audio.delta", "delta": "AQI="})),
+        RealtimeServerEventKind::AudioChunk {
+            delta: "AQI=".into()
+        }
+    );
+    assert_eq!(
+        decode(
+            json!({"type": "session.output_transcript.delta", "delta": "hi", "start_ms": 10, "end_ms": 20})
+        ),
+        RealtimeServerEventKind::TranscriptFragment {
+            speaker: "assistant".into(),
+            delta: "hi".into(),
+            start_ms: 10.0,
+            end_ms: 20.0
+        }
+    );
+    assert_eq!(
+        decode(
+            json!({"type": "session.input_transcript.delta", "delta": "x", "start_ms": 20, "end_ms": 10})
+        ),
+        RealtimeServerEventKind::Error {
+            message: "Invalid OpenAI Live event time interval.".into(),
+            code: Some("invalid_server_event".into())
+        }
+    );
+    assert_eq!(
+        decode(
+            json!({"type": "session.delegation.created", "offset_ms": 5, "delegation": {"id": "d1", "target": "responses", "response_id": "r1"}})
+        ),
+        RealtimeServerEventKind::DelegationCreated {
+            delegation_id: "d1".into(),
+            target: Some("provider".into()),
+            offset_ms: Some(5.0),
+            response_id: Some("r1".into())
+        }
+    );
+    assert_eq!(
+        decode(json!({"type": "session.input_audio.muted", "client_event_id": "e1"})),
+        RealtimeServerEventKind::CommandAcknowledged {
+            command: "session.input_audio.mute".into(),
+            client_event_id: Some("e1".into())
+        }
+    );
+    assert_eq!(
+        decode(json!({"type": "session.closed", "usage": {"seconds": 12.5}, "reason": "client"})),
+        RealtimeServerEventKind::SessionClosed {
+            session_id: None,
+            usage_seconds: 12.5,
+            reason: "client".into()
+        }
+    );
+    assert_eq!(
+        decode(
+            json!({"type": "session.usage.updated", "usage": {"seconds": 3}, "context_window": {"usage_ratio": 0.25}})
+        ),
+        RealtimeServerEventKind::SessionUsage {
+            usage_seconds: 3.0,
+            context_window_usage_ratio: Some(0.25)
+        }
+    );
+}
+
+#[tokio::test]
+async fn oai_024_a_live_webrtc_session_posts_the_offer_and_returns_the_answer() {
+    let transport = Recorder::new([json_reply(
+        json!({"session": {"id": "sess_1"}, "transport": {"type": "webrtc", "sdp": "v=0 answer"}}),
+    )]);
+    let model = realtime_model("gpt-live-1", transport.clone(), ScriptedSocket::new(vec![]));
+    let session = suprnova_ai::ops::realtime::create_webrtc_session(
+        &model,
+        "v=0 offer".into(),
+        RealtimeSessionConfig {
+            voice: Some("marin".into()),
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        url(&transport, 0),
+        "https://api.openai.com/v1/live/sessions"
+    );
+    assert_eq!(
+        transport.body(0),
+        json!({"session": {"model": "gpt-live-1", "audio": {"output": {"voice": "marin"}}},
+               "transport": {"type": "webrtc", "sdp": "v=0 offer"}})
+    );
+    assert_eq!(
+        (session.session_id.as_str(), session.answer_sdp.as_str()),
+        ("sess_1", "v=0 answer")
+    );
+}
+
+#[tokio::test]
+async fn oai_024_the_live_api_refuses_tokens_updates_and_other_settings() {
+    let transport = Recorder::new([]);
+    let socket = ScriptedSocket::new(vec![]);
+    let model = realtime_model("gpt-live-1", transport.clone(), socket.clone());
+    let token =
+        suprnova_ai::ops::realtime::create_token(&model, Default::default(), Default::default())
+            .await
+            .err();
+    assert!(
+        matches!(token, Some(suprnova_ai::Error::Validation(_))),
+        "{token:?}"
+    );
+    let mut codec = suprnova_ai::ops::realtime::codec(&model).unwrap();
+    let update = codec
+        .encode(&RealtimeClientEvent::SessionUpdate(Default::default()))
+        .err();
+    assert!(
+        matches!(update, Some(suprnova_ai::Error::Validation(_))),
+        "{update:?}"
+    );
+    for config in [
+        RealtimeSessionConfig {
+            tools: full_config().tools,
+            ..Default::default()
+        },
+        RealtimeSessionConfig {
+            turn_detection: Some(json!({"type": "server-vad"})),
+            ..Default::default()
+        },
+        RealtimeSessionConfig {
+            input_audio_format: Some(AudioFormat::pcm(44_100)),
+            ..Default::default()
+        },
+    ] {
+        let error = suprnova_ai::ops::realtime::connect_server(&model, config)
+            .await
+            .err();
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::Validation(_))),
+            "{error:?}"
+        );
+    }
+    assert!(transport.requests.lock().unwrap().is_empty());
+    assert!(socket.requests.lock().unwrap().is_empty());
+}
