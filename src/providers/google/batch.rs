@@ -577,19 +577,29 @@ pub(crate) fn json_lines(
     struct Lines {
         body: Body,
         buffer: BytesMut,
+        /// How much of the buffer holds no newline, so that each byte is
+        /// searched once.
+        searched: usize,
         done: bool,
     }
     let state = Lines {
         body,
         buffer: BytesMut::new(),
+        searched: 0,
         done: false,
     };
     stream::try_unfold(state, move |mut state| {
         let provider = provider.clone();
         async move {
             loop {
-                if let Some(end) = state.buffer.iter().position(|b| *b == b'\n') {
+                let found = state.buffer[state.searched..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|at| state.searched + at);
+                state.searched = found.unwrap_or(state.buffer.len());
+                if let Some(end) = found {
                     let line = state.buffer.split_to(end + 1);
+                    state.searched = 0;
                     let text = &line[..end];
                     let text = text.strip_suffix(b"\r").unwrap_or(text);
                     if text.iter().all(u8::is_ascii_whitespace) {
