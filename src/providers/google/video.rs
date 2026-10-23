@@ -419,42 +419,90 @@ pub(crate) async fn status(
     }
 }
 
-/// Fetch a video a job returned as an `http` or `https` URL: with the key
-/// header from the base URL's origin, without credentials from any other.
-/// Bytes, and `gs://` URIs, which only Google Cloud reads, come back as they
-/// are.
+/// Fetch a video a job returned as an `http` or `https` URL, following up
+/// to 10 redirects, as Google's Veo guide downloads with `curl -L`. Each hop
+/// to the base URL's origin gets the key header; a hop elsewhere gets no
+/// credentials, and an `https` URL never redirects to `http`. Bytes, and
+/// `gs://` URIs, which only Google Cloud reads, come back as they are.
 pub(crate) async fn download(endpoint: &Endpoint, video: FilePart) -> Result<FilePart, Error> {
-    let FileData::Text(url) = &video.data else {
+    let FileData::Text(first) = &video.data else {
         return Ok(video);
     };
-    if !media::is_downloadable_url(url) {
+    if !media::is_downloadable_url(first) {
         return Ok(video);
     }
-    let same_origin = api::origin(url).is_some() && api::origin(url) == api::origin(&endpoint.base);
-    let mut headers = Vec::new();
-    if same_origin {
-        if let Some(key) = endpoint.config.api_key().filter(|key| !key.is_empty()) {
-            headers.push(("x-goog-api-key".to_owned(), key.to_owned()));
+    let api = endpoint.flavor.api();
+    let mut url = url::Url::parse(first)
+        .map_err(|_| http::response_error(&endpoint.provider, "the video URL is invalid"))?;
+    let mut hops = 0;
+    let response = loop {
+        let same_origin = api::origin(url.as_str()).is_some()
+            && api::origin(url.as_str()) == api::origin(&endpoint.base);
+        let mut headers = Vec::new();
+        if same_origin {
+            if let Some(key) = endpoint.config.api_key().filter(|key| !key.is_empty()) {
+                headers.push(("x-goog-api-key".to_owned(), key.to_owned()));
+            }
+            for (name, value) in &endpoint.config.headers {
+                headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+                headers.push((name.to_ascii_lowercase(), value.clone()));
+            }
         }
-        for (name, value) in &endpoint.config.headers {
-            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-            headers.push((name.to_ascii_lowercase(), value.clone()));
+        let request = HttpRequest {
+            method: "GET".into(),
+            url: url.to_string(),
+            headers,
+            body: Bytes::new(),
+        };
+        let response = endpoint
+            .transport
+            .send(request.clone())
+            .await
+            .map_err(|error| http::transport_error(api, &endpoint.provider, error))?;
+        if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            if (200..300).contains(&response.status) {
+                break response;
+            }
+            let status = response.status;
+            let headers = response.headers.clone();
+            let bytes = match http::read_body(api, &endpoint.provider, response).await {
+                Ok((_, bytes)) => bytes,
+                Err(_) => Bytes::new(),
+            };
+            return Err(api::with_status_type(http::status_error(
+                api,
+                &endpoint.provider,
+                None,
+                &request,
+                status,
+                headers,
+                &bytes,
+            )));
         }
-    }
-    let request = HttpRequest {
-        method: "GET".into(),
-        url: url.clone(),
-        headers,
-        body: Bytes::new(),
+        hops += 1;
+        let location = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+            .map(|(_, value)| value.clone());
+        let next = location
+            .and_then(|location| url.join(&location).ok())
+            .filter(|next| {
+                matches!(next.scheme(), "http" | "https")
+                    && !(url.scheme() == "https" && next.scheme() == "http")
+            });
+        let Some(next) = next.filter(|_| hops <= crate::models::files::MAX_REDIRECTS) else {
+            return Err(http::response_error(
+                &endpoint.provider,
+                format!(
+                    "the video download redirected {hops} times, or to an address it does not follow"
+                ),
+            ));
+        };
+        url = next;
     };
-    let response = endpoint.send(request, None).await?;
-    let (headers, bytes) = http::read_body_with_limit(
-        endpoint.flavor.api(),
-        &endpoint.provider,
-        response,
-        MEDIA_RESPONSE_BYTES,
-    )
-    .await?;
+    let (headers, bytes) =
+        http::read_body_with_limit(api, &endpoint.provider, response, MEDIA_RESPONSE_BYTES).await?;
     let media_type = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))

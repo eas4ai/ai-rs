@@ -279,7 +279,7 @@ pub(crate) async fn json(
 }
 
 /// Google errors carry their type in `error.status`.
-fn with_status_type(error: Error) -> Error {
+pub(crate) fn with_status_type(error: Error) -> Error {
     match error {
         Error::Provider(mut error) => {
             if let Some(status) = error
