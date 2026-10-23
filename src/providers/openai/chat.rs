@@ -7,8 +7,12 @@ use serde_json::{Map, Value, json};
 use super::{
     capabilities::{Capabilities, dropped},
     options::{ChatOptions, Logprobs},
+    params::invalid,
 };
-use crate::{Error, models::params::InferenceRequestParams};
+use crate::{
+    Error,
+    models::params::{InferenceRequestParams, ProviderValue},
+};
 
 /// One Chat Completions call to OpenAI: its options and what its model takes.
 pub(super) struct ChatCall {
@@ -20,6 +24,14 @@ pub(super) struct ChatCall {
 
 impl ChatCall {
     pub(super) fn new(model: &str, p: &InferenceRequestParams) -> Result<Self, Error> {
+        if p.cache
+            .as_ref()
+            .is_some_and(|c| matches!(c.mode, ProviderValue::Value(_)))
+        {
+            return Err(invalid(
+                "OpenAI takes no cache mode; use the openai option promptCacheOptions",
+            ));
+        }
         let options = ChatOptions::parse(p)?;
         let caps = Capabilities::of(model);
         let reasoning = options.force_reasoning.unwrap_or(caps.reasoning);
