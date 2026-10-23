@@ -3548,3 +3548,247 @@ async fn oai_019_a_realtime_model_or_a_bad_option_fails_before_a_request() {
         assert!(transport.requests.lock().unwrap().is_empty(), "{id}");
     }
 }
+
+// OAI-020
+
+mod google_support;
+use google_support::{ScriptedSocket, text_message};
+use suprnova_ai::providers::operations::{
+    AudioFormat, StreamTranscribeParams, StreamTranslateParams, TranscriptionPart, TranslationPart,
+};
+
+fn socket_model(id: &str, socket: Arc<ScriptedSocket>) -> Model {
+    let provider = OpenAICompatibleProvider::new(org_config(), Recorder::new([]))
+        .with_websocket_transport(socket);
+    Model::new(id, Arc::new(provider))
+}
+fn chunks() -> suprnova_ai::providers::operations::AudioChunks {
+    stream::iter([vec![1u8, 2]]).boxed()
+}
+
+#[tokio::test]
+async fn oai_020_streaming_transcription_speaks_the_realtime_socket() {
+    let socket = ScriptedSocket::new(vec![
+        (
+            3,
+            text_message(
+                json!({"type": "conversation.item.input_audio_transcription.delta", "item_id": "it_1", "delta": "he"}),
+            ),
+        ),
+        (
+            3,
+            text_message(
+                json!({"type": "conversation.item.input_audio_transcription.completed", "item_id": "it_1", "transcript": "hello"}),
+            ),
+        ),
+    ]);
+    let params = StreamTranscribeParams {
+        provider_options: [("openai".to_owned(), json!({"language": "en", "streaming": {"delay": "low", "include": ["item.input_audio_transcription.logprobs"]}}))].into(),
+        ..Default::default()
+    };
+    let parts: Vec<TranscriptionPart> = suprnova_ai::ops::stream_transcription(
+        &socket_model("gpt-realtime-whisper", socket.clone()),
+        chunks(),
+        AudioFormat::pcm(24_000),
+        params,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+    .await;
+    let request = socket.request();
+    assert_eq!(
+        request.url,
+        "wss://api.openai.com/v1/realtime?intent=transcription"
+    );
+    let has = |name: &str, value: &str| {
+        request
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case(name) && v == value)
+    };
+    assert!(has("authorization", "Bearer sk-test"));
+    assert!(has("OpenAI-Organization", "org_1"));
+    let sent = socket.sent_json();
+    assert_eq!(
+        sent[0],
+        json!({"type": "session.update", "session": {"type": "transcription", "audio": {"input": {
+            "format": {"type": "audio/pcm", "rate": 24000},
+            "transcription": {"model": "gpt-realtime-whisper", "language": "en", "delay": "low"},
+            "turn_detection": null}}, "include": ["item.input_audio_transcription.logprobs"]}})
+    );
+    assert_eq!(
+        sent[1],
+        json!({"type": "input_audio_buffer.append", "audio": "AQI="})
+    );
+    assert_eq!(sent[2], json!({"type": "input_audio_buffer.commit"}));
+    assert!(matches!(parts[0], TranscriptionPart::Start { .. }));
+    assert_eq!(
+        parts[1],
+        TranscriptionPart::Delta {
+            id: Some("it_1".into()),
+            delta: "he".into()
+        }
+    );
+    assert_eq!(
+        parts[2],
+        TranscriptionPart::Final {
+            id: Some("it_1".into()),
+            text: "hello".into()
+        }
+    );
+    let TranscriptionPart::Finish { text, language, .. } = &parts[3] else {
+        panic!("no finish: {parts:?}")
+    };
+    assert_eq!((text.as_str(), language.as_deref()), ("hello", Some("en")));
+}
+
+#[tokio::test]
+async fn oai_020_speech_translation_speaks_the_translation_socket() {
+    let socket = ScriptedSocket::new(vec![
+        (
+            3,
+            text_message(json!({"type": "session.input_transcript.delta", "delta": "hi"})),
+        ),
+        (
+            3,
+            text_message(json!({"type": "session.output_transcript.delta", "delta": "hola"})),
+        ),
+        (
+            3,
+            text_message(json!({"type": "session.output_audio.delta", "delta": "AQI="})),
+        ),
+        (3, text_message(json!({"type": "session.closed"}))),
+    ]);
+    let params = StreamTranslateParams {
+        target_language: "es".into(),
+        ..Default::default()
+    };
+    let parts: Vec<TranslationPart> = suprnova_ai::ops::stream_translation(
+        &socket_model("gpt-realtime-translate", socket.clone()),
+        chunks(),
+        AudioFormat::pcm(24_000),
+        params,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+    .await;
+    assert_eq!(
+        socket.request().url,
+        "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate"
+    );
+    let sent = socket.sent_json();
+    assert_eq!(
+        sent[0],
+        json!({"type": "session.update", "session": {"audio": {
+            "input": {"transcription": {"model": "gpt-realtime-whisper"}, "noise_reduction": null},
+            "output": {"language": "es"}}}})
+    );
+    assert_eq!(
+        sent[1],
+        json!({"type": "session.input_audio_buffer.append", "audio": "AQI="})
+    );
+    assert_eq!(sent[2], json!({"type": "session.close"}));
+    assert_eq!(
+        parts[1..],
+        [
+            TranslationPart::SourceTranscriptDelta {
+                id: None,
+                delta: "hi".into()
+            },
+            TranslationPart::OutputTextDelta {
+                id: None,
+                delta: "hola".into()
+            },
+            TranslationPart::Audio {
+                id: None,
+                audio: vec![1, 2]
+            },
+            TranslationPart::SourceTranscriptFinal {
+                id: None,
+                text: "hi".into()
+            },
+            TranslationPart::OutputTextFinal {
+                id: None,
+                text: "hola".into()
+            },
+            TranslationPart::Finish {
+                source_text: "hi".into(),
+                output_text: "hola".into(),
+                duration_seconds: None,
+                usage: None,
+                provider_metadata: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn oai_020_settings_the_sockets_do_not_take_fail_before_connecting() {
+    let socket = ScriptedSocket::new(vec![]);
+    let transcription = |id: &str, options: Value| {
+        let socket = socket.clone();
+        let id = id.to_owned();
+        async move {
+            suprnova_ai::ops::stream_transcription(
+                &socket_model(&id, socket),
+                chunks(),
+                AudioFormat::pcm(24_000),
+                StreamTranscribeParams {
+                    provider_options: [("openai".to_owned(), options)].into(),
+                    ..Default::default()
+                },
+                Default::default(),
+            )
+            .await
+            .err()
+        }
+    };
+    for error in [
+        transcription("whisper-1", json!({})).await,
+        transcription("gpt-realtime-whisper", json!({"prompt": "p"})).await,
+        transcription("gpt-realtime-whisper", json!({"temperature": 0.1})).await,
+    ] {
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::Validation(_))),
+            "{error:?}"
+        );
+    }
+    for (format, params) in [
+        (
+            AudioFormat::pcm(16_000),
+            StreamTranslateParams {
+                target_language: "es".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            AudioFormat::pcm(24_000),
+            StreamTranslateParams {
+                target_language: "es".into(),
+                source_language: Some("en".into()),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let error = suprnova_ai::ops::stream_translation(
+            &socket_model("gpt-realtime-translate", socket.clone()),
+            chunks(),
+            format,
+            params,
+            Default::default(),
+        )
+        .await
+        .err();
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::Validation(_))),
+            "{error:?}"
+        );
+    }
+    assert!(socket.requests.lock().unwrap().is_empty());
+}
