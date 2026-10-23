@@ -255,18 +255,18 @@ async fn poll(ctx: &Ctx, id: &str, timeout: Duration) -> Result<(Headers, Value)
         if started.elapsed() > timeout {
             guard.disarm();
             ctx.cancel(id).await;
-            let mut error = ProviderError::new(
+            // A retry would start a new interaction and wait the whole
+            // timeout again, so the call must not retry this error.
+            return Err(ProviderError::new(
                 ProviderErrorKind::Timeout,
                 format!(
                     "google.interactions: timed out polling interaction {id} after {}ms.",
                     timeout.as_millis()
                 ),
             )
-            .with_provider(&ctx.endpoint.provider);
-            // A retry would start a new interaction and wait the whole
-            // timeout again, so the call must not retry this error.
-            error.is_retryable = false;
-            return Err(error.into());
+            .with_provider(&ctx.endpoint.provider)
+            .with_retryable(false)
+            .into());
         }
         tokio::time::sleep(wait).await;
         let (headers, response) = ctx.get(id).await?;
