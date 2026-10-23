@@ -36,8 +36,11 @@ pub struct SseEvent {
 /// Incomplete events at EOF are discarded, as required by SSE framing.
 /// Each line and each event's data is limited to 8 MiB.
 pub fn parse(body: Body) -> BoxStream<'static, Result<SseEvent, TransportError>> {
-    parse_with_limit(body, 8 * 1024 * 1024)
+    parse_with_limit(body, MAX_EVENT_BYTES)
 }
+
+/// The default limit of a line and of an event's data: 8 MiB.
+pub const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn parse_with_limit(
     body: Body,

@@ -19,6 +19,7 @@
 pub mod agents;
 pub mod errors;
 pub mod models;
+pub mod ops;
 pub mod providers;
 #[cfg(feature = "testing")]
 pub mod testing;

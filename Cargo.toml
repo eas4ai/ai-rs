@@ -12,6 +12,9 @@ default = []
 reqwest = ["dep:reqwest"]
 # A scripted provider for tests that run without a network (`suprnova_ai::testing`).
 testing = []
+# A WebSocket transport over tokio-tungstenite with rustls, for live and
+# realtime sessions (`suprnova_ai::transport::TungsteniteTransport`).
+websocket = ["dep:tokio-tungstenite", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 async-trait = "0.1.89"
@@ -29,6 +32,9 @@ url = "2.5.7"
 tokio = { version = "1.48.0", features = ["sync", "rt", "macros", "time", "net"] }
 reqwest = { version = "0.12.24", optional = true, default-features = false, features = ["rustls-tls", "stream", "gzip", "deflate", "brotli", "zstd"] }
 httpdate = "1.0.3"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1.0.10", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "net", "io-util", "test-util"] }

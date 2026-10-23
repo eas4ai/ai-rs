@@ -113,6 +113,31 @@ impl Tool {
         Ok(tool)
     }
 
+    /// Mark a function tool strict: a provider that validates calls against
+    /// the schema does so for it, such as Gemini's mode `VALIDATED`. The
+    /// flag is kept as `strict: true` in the tool's `tool_config` arguments.
+    #[must_use]
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        let config = self.tool_config.get_or_insert_with(ToolConfig::default);
+        if strict {
+            config.args.insert("strict".to_owned(), Value::Bool(true));
+        } else {
+            config.args.remove("strict");
+        }
+        self
+    }
+
+    /// Whether this is a function tool marked strict with [`Tool::with_strict`].
+    #[must_use]
+    pub fn is_strict(&self) -> bool {
+        self.kind == ToolKind::Function
+            && self
+                .tool_config
+                .as_ref()
+                .and_then(|config| config.args.get("strict"))
+                == Some(&Value::Bool(true))
+    }
+
     /// Checks the relationship between kind, schema, and provider config.
     pub fn validate_shape(&self) -> std::result::Result<(), ToolShapeError> {
         match self.kind {

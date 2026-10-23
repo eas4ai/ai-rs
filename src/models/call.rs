@@ -88,7 +88,12 @@ pub fn is_retryable(error: &Error) -> bool {
 }
 
 /// The wait before retry `retry`, honoring `retry-after-ms` and `retry-after`.
-fn retry_delay(policy: &RetryPolicy, retry: u32, error: &Error, now: SystemTime) -> Duration {
+pub(crate) fn retry_delay(
+    policy: &RetryPolicy,
+    retry: u32,
+    error: &Error,
+    now: SystemTime,
+) -> Duration {
     let backoff = policy.backoff(retry);
     match header_delay(error, now) {
         Some(delay) if delay < MAX_HEADER_DELAY || delay < backoff => delay,
@@ -143,7 +148,7 @@ fn total_timeout_error(model: &Model, timeout: Duration) -> Error {
 /// of letting Tokio panic. Tokio offers no check for a runtime built without
 /// its time driver; in such a runtime the first wait panics, as every Tokio
 /// timer does, so the README requires a runtime with the time driver enabled.
-fn require_timer() -> Result<()> {
+pub(crate) fn require_timer() -> Result<()> {
     tokio::runtime::Handle::try_current()
         .map(|_| ())
         .map_err(|_| {
@@ -422,6 +427,29 @@ pub(crate) fn call_generate(
             }
         }
     })
+}
+
+/// Run one operation attempt after another until it succeeds, fails with an
+/// error that is not retryable, or uses up the policy's retries. Waits follow
+/// the policy and the provider's `retry-after` headers, as model calls do.
+pub(crate) async fn with_retries<T, F, Fut>(policy: &RetryPolicy, mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut retries = 0;
+    loop {
+        let error = match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        if retries >= policy.max_retries || !is_retryable(&error) || require_timer().is_err() {
+            return Err(error);
+        }
+        let wait = retry_delay(policy, retries, &error, SystemTime::now());
+        retries += 1;
+        tokio::time::sleep(wait).await;
+    }
 }
 
 #[cfg(test)]

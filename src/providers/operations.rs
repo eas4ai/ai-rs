@@ -346,6 +346,8 @@ pub struct VideoJob {
 }
 
 /// The status of a video job.
+// A status is made once per check; boxing the item would only cost callers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum VideoStatus {
     Pending,
@@ -392,6 +394,8 @@ pub struct BatchRequest {
     pub kind: BatchRequestKind,
 }
 
+// A request kind is made once per batch request; boxing would only cost callers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum BatchRequestKind {
     /// A language model request: its messages and call options.
@@ -659,3 +663,206 @@ pub enum TranslationPart {
 /// A stream of translation parts.
 pub type TranslationStream =
     futures::stream::BoxStream<'static, Result<TranslationPart, crate::errors::Error>>;
+
+/// A realtime session's settings, in the TypeScript
+/// `RealtimeModelV4SessionConfig` shape. A protocol builds its own setup
+/// message from it and ignores what its API does not take.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RealtimeSessionConfig {
+    pub instructions: Option<String>,
+    pub voice: Option<String>,
+    /// `text`, `audio` or both.
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    pub input_audio_format: Option<AudioFormat>,
+    pub input_audio_transcription: Option<RealtimeTranscription>,
+    pub output_audio_transcription: Option<RealtimeTranscription>,
+    pub output_audio_format: Option<AudioFormat>,
+    pub turn_detection: Option<Value>,
+    #[serde(default)]
+    pub tools: Vec<RealtimeTool>,
+    #[serde(default)]
+    pub provider_options: Metadata,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RealtimeTranscription {
+    pub model: Option<String>,
+    pub language: Option<String>,
+    pub prompt: Option<String>,
+}
+
+/// A function the model may call during a realtime session.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RealtimeTool {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters: Value,
+}
+
+/// An ephemeral token for a client to open a realtime session with.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct RealtimeToken {
+    pub token: String,
+    /// The WebSocket URL the token opens.
+    pub url: String,
+    /// Seconds since the Unix epoch when the token expires.
+    pub expires_at: Option<u64>,
+}
+
+// The token is a credential: keep it out of debug output.
+impl std::fmt::Debug for RealtimeToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealtimeToken")
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RealtimeTokenParams {
+    /// How long a client has to open a session with the token, in seconds.
+    pub expires_after_seconds: Option<u64>,
+    pub session: Option<RealtimeSessionConfig>,
+}
+
+/// An item a client adds to a realtime conversation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealtimeItem {
+    Text(String),
+    /// Base64 audio.
+    Audio(String),
+    FunctionCallOutput {
+        call_id: String,
+        name: Option<String>,
+        output: String,
+    },
+}
+
+/// A normalized client event, as TypeScript's `RealtimeModelV4ClientEvent`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealtimeClientEvent {
+    SessionUpdate(RealtimeSessionConfig),
+    SessionStart(RealtimeSessionConfig),
+    SessionClose,
+    InputAudioMute,
+    InputAudioUnmute,
+    ContextAppend {
+        content: String,
+        delegation_id: Option<String>,
+    },
+    /// Base64 audio in the session's input format.
+    InputAudioAppend(String),
+    InputAudioCommit,
+    InputAudioClear,
+    ConversationItemCreate(RealtimeItem),
+    ConversationItemTruncate {
+        item_id: String,
+        content_index: u32,
+        audio_end_ms: u64,
+    },
+    ResponseCreate {
+        options: Option<Value>,
+    },
+    ResponseCancel,
+}
+
+/// A normalized server event, as TypeScript's `RealtimeModelV4ServerEvent`;
+/// `raw` is the provider message it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RealtimeServerEvent {
+    pub kind: RealtimeServerEventKind,
+    pub raw: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealtimeServerEventKind {
+    SessionCreated {
+        session_id: Option<String>,
+    },
+    SessionUpdated,
+    SpeechStarted {
+        item_id: Option<String>,
+    },
+    SpeechStopped {
+        item_id: Option<String>,
+    },
+    AudioCommitted {
+        item_id: Option<String>,
+    },
+    InputTranscriptionCompleted {
+        item_id: String,
+        transcript: String,
+    },
+    ResponseCreated {
+        response_id: String,
+    },
+    ResponseDone {
+        response_id: String,
+        status: String,
+    },
+    AudioDelta {
+        response_id: String,
+        item_id: String,
+        delta: String,
+    },
+    AudioDone {
+        response_id: String,
+        item_id: String,
+    },
+    AudioTranscriptDelta {
+        response_id: String,
+        item_id: String,
+        delta: String,
+    },
+    AudioTranscriptDone {
+        response_id: String,
+        item_id: String,
+        transcript: Option<String>,
+    },
+    TextDelta {
+        response_id: String,
+        item_id: String,
+        delta: String,
+    },
+    TextDone {
+        response_id: String,
+        item_id: String,
+        text: Option<String>,
+    },
+    FunctionCallArgumentsDelta {
+        response_id: String,
+        item_id: String,
+        call_id: String,
+        delta: String,
+    },
+    FunctionCallArgumentsDone {
+        response_id: String,
+        item_id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    Error {
+        message: String,
+        code: Option<String>,
+    },
+    /// A provider message with no normalized kind, by its provider name.
+    Custom {
+        raw_type: String,
+    },
+}
+
+/// Turns normalized client events into provider messages and provider
+/// messages into normalized server events, for one connection. It keeps the
+/// state a protocol needs across messages, such as turn numbers.
+pub trait RealtimeCodec: Send {
+    /// The provider message for a client event, or `None` when the provider
+    /// takes nothing for it.
+    fn encode(
+        &mut self,
+        event: &RealtimeClientEvent,
+    ) -> Result<Option<String>, crate::errors::Error>;
+    /// The server events for one provider message.
+    fn decode(&mut self, message: &str) -> Result<Vec<RealtimeServerEvent>, crate::errors::Error>;
+}
