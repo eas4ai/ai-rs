@@ -31,6 +31,7 @@ mod batch;
 mod capabilities;
 mod chat;
 mod completions;
+mod decisions;
 mod dialect;
 mod embedding;
 pub mod errors;
@@ -51,6 +52,7 @@ mod streaming;
 pub mod tools;
 mod transcription;
 pub use completions::OpenAICompletionsProtocol;
+pub use decisions::OpenAIDecisionsProtocol;
 pub use embedding::OpenAIEmbeddingProtocol;
 pub use params::OpenAIParams;
 // Kept for callers of the old name-based choice; it is deprecated.
