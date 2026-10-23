@@ -321,6 +321,9 @@ pub fn register_factories(
     registry.register_protocol_factory("openai_chat_completions", |_| {
         Ok(Arc::new(super::OpenAIChatCompletionsProtocol))
     })?;
+    registry.register_protocol_factory("openai_decisions", |_| {
+        Ok(Arc::new(super::OpenAIDecisionsProtocol))
+    })?;
     for class in ["openai_embedding", "openai_compatible_embedding"] {
         registry.register_protocol_factory(class, |value| {
             Ok(Arc::new(super::embedding::restore(&value)))

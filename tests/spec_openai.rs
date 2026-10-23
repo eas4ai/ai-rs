@@ -4687,3 +4687,190 @@ async fn oai_024_the_live_api_refuses_tokens_updates_and_other_settings() {
     assert!(transport.requests.lock().unwrap().is_empty());
     assert!(socket.requests.lock().unwrap().is_empty());
 }
+
+// OAI-025
+
+use suprnova_ai::providers::operations::{
+    EvaluationInput, EvaluationParams, NoulCriteria, Question,
+};
+
+fn decision_questions() -> std::collections::BTreeMap<String, Question> {
+    let text = |t: &str| EvaluationInput::Text(t.into());
+    [
+        (
+            "mood".to_owned(),
+            Question::Choice {
+                instructions: text("The mood"),
+                criteria: [
+                    ("calm".to_owned(), Some(text("No rush"))),
+                    ("tense".to_owned(), None),
+                ]
+                .into(),
+            },
+        ),
+        (
+            "quality".to_owned(),
+            Question::Score {
+                instructions: text("How good"),
+                criteria: vec![Some(text("bad")), None],
+            },
+        ),
+        (
+            "urgent".to_owned(),
+            Question::Noul {
+                instructions: text("Is it urgent"),
+                criteria: Some(NoulCriteria {
+                    r#true: Some(text("today")),
+                    r#false: None,
+                }),
+            },
+        ),
+    ]
+    .into()
+}
+fn decisions_model(transport: Arc<Recorder>) -> Model {
+    Model::new(
+        "gpt-6-luna",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    )
+    .with_protocol(Arc::new(
+        suprnova_ai::providers::openai::OpenAIDecisionsProtocol,
+    ))
+}
+fn decision_params(options: Value) -> EvaluationParams {
+    EvaluationParams {
+        provider_options: [("openai".to_owned(), options)].into(),
+    }
+}
+
+#[tokio::test]
+async fn oai_025_decisions_send_the_questions_and_read_the_answers() {
+    let transport = Recorder::new([json_reply(
+        json!({"model": "gpt-6-luna", "usage": {"input_tokens": 9, "output_tokens": 2},
+        "answers": [
+            {"type": "choice", "name": "mood", "choice": "tense", "confidence": 0.8, "probabilities": [{"value": "calm", "probability": 0.2}, {"value": "tense", "probability": 0.8}]},
+            {"type": "score", "name": "quality", "score": 1, "probabilities": [{"value": 1, "probability": 0.9}]},
+            {"type": "predicate", "name": "urgent", "probability": 0.7},
+        ]}),
+    )]);
+    let item = suprnova_ai::ops::experimental::evaluate(
+        &decisions_model(transport.clone()),
+        EvaluationInput::Object([("ticket".to_owned(), json!("late"))].into()),
+        decision_questions(),
+        decision_params(json!({"safetyIdentifier": "user-1"})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/decisions");
+    assert_eq!(
+        transport.body(0),
+        json!({"model": "gpt-6-luna", "safety_identifier": "user-1",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "{\"ticket\":\"late\"}"}]}],
+        "questions": [
+            {"type": "choice", "name": "mood", "instructions": "The mood",
+             "choices": [{"value": "calm", "description": "No rush"}, {"value": "tense"}]},
+            {"type": "score", "name": "quality", "instructions": "How good",
+             "levels": [{"label": "0", "description": "bad"}, {"label": "1"}]},
+            {"type": "predicate", "name": "urgent", "instructions": "Is it urgent\n\nCriteria for true:\ntoday"},
+        ]})
+    );
+    assert_eq!(
+        item.value["mood"],
+        json!({"type": "choice", "choice": "tense"})
+    );
+    assert_eq!(
+        item.value["quality"],
+        json!({"type": "score", "score": 1.0})
+    );
+    assert_eq!(item.value["urgent"], json!({"type": "noul", "noul": 0.7}));
+    let md = &item.provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(md["confidence"], json!({"mood": 0.8}));
+    assert_eq!(
+        md["probabilities"]["mood"],
+        json!({"calm": 0.2, "tense": 0.8})
+    );
+    assert_eq!(item.usage.unwrap().input_tokens, 9);
+}
+
+#[tokio::test]
+async fn oai_025_a_refusal_and_a_wrong_answer_set() {
+    let one = |answers: Value| Recorder::new([json_reply(json!({"answers": answers}))]);
+    let urgent = || -> std::collections::BTreeMap<String, Question> {
+        decision_questions()
+            .into_iter()
+            .filter(|(id, _)| id == "urgent")
+            .collect()
+    };
+    let item = suprnova_ai::ops::experimental::evaluate(
+        &decisions_model(one(json!([{"type": "refusal", "name": "urgent"}]))),
+        EvaluationInput::Text("x".into()),
+        urgent(),
+        EvaluationParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(item.value["urgent"], json!({"type": "refusal"}));
+    for answers in [
+        json!([]),
+        json!([{"type": "predicate", "name": "urgent", "probability": 0.5}, {"type": "predicate", "name": "urgent", "probability": 0.5}]),
+        json!([{"type": "predicate", "name": "other", "probability": 0.5}]),
+        json!([{"type": "predicate", "name": "urgent", "probability": 1.5}]),
+    ] {
+        let error = suprnova_ai::ops::experimental::evaluate(
+            &decisions_model(one(answers.clone())),
+            EvaluationInput::Text("x".into()),
+            urgent(),
+            EvaluationParams::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        let suprnova_ai::Error::Provider(error) = error else {
+            panic!("{answers}: not a provider error")
+        };
+        assert_eq!(
+            error.kind,
+            suprnova_ai::errors::ProviderErrorKind::Response,
+            "{answers}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oai_025_the_responses_protocol_evaluates_on_its_language_model() {
+    let answer = json!({"q0": "c1"}).to_string();
+    let reply = responses_sse(&[
+        json!({"type": "response.created", "response": {"id": "resp_e", "model": "gpt-5.4", "status": "in_progress"}}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": answer}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": answer}]}}),
+        json!({"type": "response.completed", "response": {"id": "resp_e", "model": "gpt-5.4", "status": "completed", "output": [], "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+    ]);
+    let transport = Recorder::new([reply]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+    );
+    let mood: std::collections::BTreeMap<String, Question> = decision_questions()
+        .into_iter()
+        .filter(|(id, _)| id == "mood")
+        .collect();
+    let item = suprnova_ai::ops::experimental::evaluate(
+        &model,
+        EvaluationInput::Text("a calm day".into()),
+        mood,
+        EvaluationParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/responses");
+    assert_eq!(
+        item.value["mood"],
+        json!({"type": "choice", "choice": "tense"})
+    );
+    let body = transport.body(0);
+    assert_eq!(body["text"]["format"]["type"], "json_schema", "{body}");
+}
