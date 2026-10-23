@@ -5,12 +5,17 @@ use super::{
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     models::files::DownloadTransport,
-    providers::{ModelsDevProvider, base::provider_config, hosts, http},
+    providers::{
+        ModelsDevProvider,
+        base::provider_config,
+        hosts, http,
+        operations::{DownloadedFile, Item, UploadFile, UploadParams, UploadedFile},
+    },
     transport::{HttpTransport, WebSocketTransport},
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone)]
 pub struct OpenAICompatibleProvider {
@@ -134,6 +139,22 @@ impl OpenAICompatibleProvider {
         self.websocket = Some(websocket);
         self
     }
+    /// OpenAI's own API, whose files, skills and batches the provider
+    /// serves; an OpenAI-compatible server has none of them.
+    fn openai_api(&self) -> bool {
+        self.default_protocol.protocol_class_id() == "openai_responses"
+    }
+    /// The files operation of OpenAI's own API.
+    fn files(&self, operation: &str) -> Result<super::files::Files<'_>, Error> {
+        if !self.openai_api() {
+            return Err(Error::UnsupportedOperation(operation.to_owned()));
+        }
+        Ok(super::files::Files {
+            config: &self.config,
+            transport: self.transport.as_ref(),
+            provider: &self.name,
+        })
+    }
     async fn get(&self, path: &[&str], model: Option<&str>) -> Result<Value, Error> {
         let request = protocol::http_request(&errors::API, "GET", &self.config, path, None, None)?;
         http::json(
@@ -197,6 +218,31 @@ impl Provider for OpenAICompatibleProvider {
             .collect::<Result<Vec<_>, _>>()?;
         ids.sort();
         Ok(ids)
+    }
+    async fn upload_file(
+        &self,
+        file: UploadFile,
+        params: UploadParams,
+    ) -> Result<Item<UploadedFile>, Error> {
+        self.files("upload_file")?.upload(file, params).await
+    }
+    async fn file_info(
+        &self,
+        reference: &BTreeMap<String, String>,
+    ) -> Result<Item<UploadedFile>, Error> {
+        self.files("file_info")?.info(reference).await
+    }
+    async fn download_file(
+        &self,
+        reference: &BTreeMap<String, String>,
+        max_bytes: usize,
+    ) -> Result<Item<DownloadedFile>, Error> {
+        self.files("download_file")?
+            .download(reference, max_bytes)
+            .await
+    }
+    async fn delete_file(&self, reference: &BTreeMap<String, String>) -> Result<Item<bool>, Error> {
+        self.files("delete_file")?.delete(reference).await
     }
     async fn probe(&self, model: &Model) -> Result<(), Error> {
         if !self.is_configured() {
