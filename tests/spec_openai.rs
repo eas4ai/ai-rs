@@ -3422,3 +3422,129 @@ async fn oai_018_another_format_or_a_language_fails_before_a_request() {
         assert!(transport.requests.lock().unwrap().is_empty());
     }
 }
+
+// OAI-019
+
+fn transcription_reply(body: Value) -> (u16, Vec<u8>) {
+    (200, body.to_string().into_bytes())
+}
+fn mp3() -> suprnova_ai::providers::operations::TranscribeInput {
+    suprnova_ai::providers::operations::TranscribeInput::File(
+        suprnova_ai::types::messages::FilePart::from_bytes(vec![1, 2, 3], Some("audio/mpeg"), None)
+            .unwrap(),
+    )
+}
+fn transcribe_params(options: Value) -> suprnova_ai::providers::operations::TranscribeParams {
+    suprnova_ai::providers::operations::TranscribeParams {
+        provider_options: [("openai".to_owned(), options)].into(),
+    }
+}
+fn form(transport: &Recorder, index: usize) -> String {
+    String::from_utf8_lossy(&transport.requests.lock().unwrap()[index].body).into_owned()
+}
+fn field(name: &str, value: &str) -> String {
+    format!("name=\"{name}\"\r\n\r\n{value}\r\n")
+}
+
+#[tokio::test]
+async fn oai_019_a_transcription_form_follows_the_model_and_options() {
+    let transport = Recorder::new([
+        transcription_reply(json!({"text": "hi", "language": "english", "duration": 1.5,
+            "segments": [{"id": 0, "start": 0.0, "end": 1.5, "text": "hi"}]})),
+        transcription_reply(
+            json!({"text": "hi", "segments": [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "A"}],
+            "languages": [{"code": "en"}]}),
+        ),
+        transcription_reply(
+            json!({"text": "hi", "words": [{"word": "hi", "start": 0.0, "end": 0.5}]}),
+        ),
+    ]);
+    let item = suprnova_ai::ops::transcribe(
+        &image_model("whisper-1", transport.clone()),
+        mp3(),
+        transcribe_params(json!({"timestampGranularities": ["word"], "language": "en", "prompt": "p", "temperature": 0.2, "include": ["logprobs"]})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        url(&transport, 0),
+        "https://api.openai.com/v1/audio/transcriptions"
+    );
+    let sent = form(&transport, 0);
+    for (name, value) in [
+        ("model", "whisper-1"),
+        ("response_format", "verbose_json"),
+        ("timestamp_granularities[]", "word"),
+        ("language", "en"),
+        ("prompt", "p"),
+        ("temperature", "0.2"),
+        ("include[]", "logprobs"),
+    ] {
+        assert!(sent.contains(&field(name, value)), "{name}: {sent}");
+    }
+    assert!(
+        sent.contains("name=\"file\"; filename=\"audio.mp3\""),
+        "{sent}"
+    );
+    assert_eq!(item.value.text, "hi");
+    assert_eq!(item.value.language.as_deref(), Some("en"));
+    assert_eq!(item.value.duration_seconds, Some(1.5));
+    assert_eq!(item.value.segments.len(), 1);
+    let item = suprnova_ai::ops::transcribe(
+        &image_model("gpt-4o-transcribe-diarize", transport.clone()),
+        mp3(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let sent = form(&transport, 1);
+    assert!(
+        sent.contains(&field("response_format", "diarized_json")),
+        "{sent}"
+    );
+    assert!(sent.contains(&field("chunking_strategy", "auto")), "{sent}");
+    let md = &item.provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(md["segments"][0]["speaker"], "A", "{md}");
+    assert_eq!(md["languages"], json!([{"code": "en"}]));
+    assert_eq!(item.value.language.as_deref(), Some("en"));
+    let item = suprnova_ai::ops::transcribe(
+        &image_model("gpt-4o-transcribe", transport.clone()),
+        mp3(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(form(&transport, 2).contains(&field("response_format", "json")));
+    assert_eq!(item.value.segments[0].text, "hi");
+    assert_eq!(item.value.segments[0].end_second, 0.5);
+}
+
+#[tokio::test]
+async fn oai_019_a_realtime_model_or_a_bad_option_fails_before_a_request() {
+    for (id, params) in [
+        ("gpt-realtime-whisper", Default::default()),
+        (
+            "whisper-1",
+            transcribe_params(json!({"timestampGranularities": ["sentence"]})),
+        ),
+        ("whisper-1", transcribe_params(json!({"temprature": 0}))),
+    ] {
+        let transport = Recorder::new([transcription_reply(json!({"text": "x"}))]);
+        let error = suprnova_ai::ops::transcribe(
+            &image_model(id, transport.clone()),
+            mp3(),
+            params,
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{id}: {error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty(), "{id}");
+    }
+}
