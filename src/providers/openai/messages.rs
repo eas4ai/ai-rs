@@ -15,7 +15,7 @@
 use super::{
     dialect,
     params::invalid,
-    profile::{Dialect, ResponsesDialect},
+    profile::{self, Dialect, ResponsesDialect},
     protocol::Wire,
 };
 use crate::{
@@ -452,6 +452,114 @@ fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
         }
     }
 }
+/// An assistant turn under OpenAI's Responses rules
+/// (`convert-to-openai-responses-input.ts`). A tool call goes out in full
+/// (OAI-001). With stored responses, reasoning and text with an item id go
+/// out as one reference each, except a reasoning model's text that no
+/// reasoning item precedes, whose stored message OpenAI cannot take without
+/// that item. Without them, text goes out without its id and reasoning only
+/// with its encrypted content (OAI-002).
+fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<Value>) {
+    let reasoning_model = profile::reasoning_model(model);
+    let mut content = vec![];
+    let mut sent = BTreeSet::new();
+    let mut after_reasoning = false;
+    for p in &msg.parts {
+        let md = metadata(p, "openai");
+        if let Part::ToolCall(c) = p {
+            flush_content(out, &mut content);
+            out.push(function_call(c, md));
+            continue;
+        }
+        let id = item_id(md);
+        match p {
+            Part::Text(t) => {
+                if references
+                    && let Some(id) = id
+                    && (!reasoning_model || after_reasoning)
+                {
+                    if sent.insert(id.to_owned()) {
+                        flush_content(out, &mut content);
+                        out.push(json!({"type":"item_reference","id":id}));
+                    }
+                    continue;
+                }
+                content.push(json!({"type":"output_text","text":t.text}));
+            }
+            Part::Reasoning(r) => {
+                flush_content(out, &mut content);
+                after_reasoning |= id.is_some();
+                if references && let Some(id) = id {
+                    if sent.insert(id.to_owned()) {
+                        out.push(json!({"type":"item_reference","id":id}));
+                    }
+                    continue;
+                }
+                let raw = md
+                    .and_then(|m| m.get("raw_item"))
+                    .filter(|raw| raw.is_object());
+                let encrypted = encrypted_reasoning(md).or_else(|| {
+                    raw.and_then(|raw| raw.get("encrypted_content"))
+                        .filter(|value| !value.is_null())
+                });
+                // Without stored responses OpenAI needs the encrypted
+                // content; reasoning without it is left out.
+                let Some(encrypted) = encrypted else {
+                    continue;
+                };
+                // The raw item holds every summary part of its item, so it
+                // goes out once for all of them.
+                if let Some(id) = id
+                    && !sent.insert(id.to_owned())
+                {
+                    if raw.is_none()
+                        && !r.text.is_empty()
+                        && let Some(item) = out.iter_mut().rev().find(|item| item["id"] == id)
+                        && let Some(summary) = item["summary"].as_array_mut()
+                    {
+                        summary.push(json!({"type":"summary_text","text":r.text}));
+                    }
+                    continue;
+                }
+                if let Some(raw) = raw {
+                    let mut raw = raw.clone();
+                    raw["encrypted_content"] = encrypted.clone();
+                    out.push(raw);
+                    continue;
+                }
+                let summary = if r.text.is_empty() {
+                    json!([])
+                } else {
+                    json!([{"type":"summary_text","text":r.text}])
+                };
+                let mut item =
+                    json!({"type":"reasoning","summary":summary,"encrypted_content":encrypted});
+                if let Some(id) = id {
+                    item["id"] = json!(id);
+                }
+                out.push(item);
+            }
+            _ => {
+                if references && let Some(id) = id {
+                    flush_content(out, &mut content);
+                    if sent.insert(id.to_owned()) {
+                        out.push(json!({"type":"item_reference","id":id}));
+                    }
+                    continue;
+                }
+                if let Some(raw) = md.and_then(|m| m.get("raw_item")).filter(|r| r.is_object()) {
+                    flush_content(out, &mut content);
+                    out.push(raw.clone());
+                    continue;
+                }
+                if matches!(p, Part::BuiltinToolCall(_) | Part::BuiltinToolReturn(_)) {
+                    flush_content(out, &mut content);
+                }
+            }
+        }
+    }
+    flush_content(out, &mut content);
+}
 /// A tool call the application runs, as OpenAI's Responses API takes it in
 /// history: its `call_id`, name and arguments, with the namespace its item
 /// recorded (`convert-to-openai-responses-input.ts`).
@@ -574,50 +682,7 @@ pub(super) fn convert(
             {
                 huggingface_assistant(&msg, &mut out);
             }
-            MessageRole::Assistant => {
-                let mut content = vec![];
-                for p in &msg.parts {
-                    let md = metadata(p, "openai");
-                    // A call the application runs pairs with its output only
-                    // by `call_id`, so it is never a reference or its stored item.
-                    if let Part::ToolCall(c) = p {
-                        flush_content(&mut out, &mut content);
-                        out.push(function_call(c, md));
-                        continue;
-                    }
-                    let id = md
-                        .and_then(|m| m.get("item_id").or_else(|| m.get("itemId")))
-                        .and_then(Value::as_str);
-                    if references && let Some(id) = id {
-                        flush_content(&mut out, &mut content);
-                        out.push(json!({"type":"item_reference","id":id}));
-                        continue;
-                    }
-                    if let Some(raw) = md.and_then(|m| m.get("raw_item")).filter(|r| r.is_object())
-                    {
-                        flush_content(&mut out, &mut content);
-                        out.push(raw.clone());
-                        continue;
-                    }
-                    match p {
-                        Part::Text(t) => content.push(json!({"type":"output_text","text":t.text})),
-                        Part::Reasoning(r) => {
-                            flush_content(&mut out, &mut content);
-                            if let Some(encrypted) = md.and_then(|m| {
-                                m.get("reasoning_encrypted_content")
-                                    .or_else(|| m.get("reasoningEncryptedContent"))
-                            }) {
-                                out.push(json!({"type":"reasoning","summary":[{"type":"summary_text","text":r.text}],"encrypted_content":encrypted}));
-                            }
-                        }
-                        Part::BuiltinToolCall(_) | Part::BuiltinToolReturn(_) => {
-                            flush_content(&mut out, &mut content)
-                        }
-                        _ => {}
-                    }
-                }
-                flush_content(&mut out, &mut content);
-            }
+            MessageRole::Assistant => openai_assistant(&msg, model, references, &mut out),
             MessageRole::Tool => {
                 for p in &msg.parts {
                     if let Part::ToolResult(r) = p {

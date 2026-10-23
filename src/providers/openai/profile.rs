@@ -196,3 +196,44 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
 };
+
+/// Whether OpenAI treats a model as a reasoning model: `o` and digits,
+/// followed by `-` or the end, or `gpt-<n>[.<m>][-<variant>]` with `n` at
+/// least 5, except a variant starting with `chat` when there is no `.<m>`
+/// (`openai-language-model-capabilities.ts`).
+pub(crate) fn reasoning_model(model: &str) -> bool {
+    fn digits(text: &str) -> usize {
+        text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len()
+    }
+    if let Some(rest) = model.strip_prefix('o') {
+        let n = digits(rest);
+        return n > 0 && (rest.len() == n || rest[n..].starts_with('-'));
+    }
+    let Some(rest) = model.strip_prefix("gpt-") else {
+        return false;
+    };
+    let n = digits(rest);
+    if n == 0 {
+        return false;
+    }
+    // A major version too long for u64 is still at least 5.
+    let major = rest[..n].parse::<u64>().unwrap_or(u64::MAX);
+    let mut rest = &rest[n..];
+    let mut minor = false;
+    if let Some(after) = rest.strip_prefix('.') {
+        let n = digits(after);
+        if n == 0 {
+            return false;
+        }
+        minor = true;
+        rest = &after[n..];
+    }
+    let variant = match rest.strip_prefix('-') {
+        _ if rest.is_empty() => None,
+        Some(variant) if !variant.is_empty() => Some(variant),
+        _ => return false,
+    };
+    // A chat variant is not a reasoning model unless a minor version names it.
+    let chat = variant.is_some_and(|v| v.starts_with("chat"));
+    major >= 5 && (minor || !chat)
+}
