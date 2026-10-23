@@ -306,7 +306,7 @@ pub(crate) async fn upload(
     }
     let mut item = Item::new(UploadedFile {
         provider_reference: [("google".to_owned(), uri)].into(),
-        media_type: field("mimeType").or(Some(file.media_type.clone())),
+        media_type: field("mimeType"),
         filename: None,
         size_bytes: field("sizeBytes").and_then(|size| size.parse().ok()),
         created_at: field("createTime"),
