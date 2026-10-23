@@ -755,7 +755,12 @@ fn host_call(kind: &str, call: &ToolCallPart, id: Option<&str>) -> Value {
 /// `output`; `shell` takes `{"output": [...], "max_output_length"}`;
 /// `apply_patch` `{"status", "output"}`; and `computer` `{"output":
 /// {"type": "computer_screenshot", ...}, "acknowledged_safety_checks"}`.
-fn host_result(kind: &str, call_id: &str, value: &ToolResultValue) -> Result<Value, Error> {
+fn host_result(
+    kind: &str,
+    call_id: &str,
+    value: &ToolResultValue,
+    breakpoint: Option<Value>,
+) -> Result<Value, Error> {
     let value = match value {
         ToolResultValue::Json(value) => value.clone(),
         other => serde_json::to_value(other)?,
@@ -808,7 +813,16 @@ fn host_result(kind: &str, call_id: &str, value: &ToolResultValue) -> Result<Val
             }
             item
         }
-        _ => json!({"type": "custom_tool_call_output", "call_id": call_id, "output": text(&value)}),
+        // A custom tool's text keeps its prompt cache breakpoint (OAI-026).
+        _ => {
+            let output = match breakpoint {
+                Some(breakpoint) => {
+                    json!([{"type": "input_text", "text": text(&value), "prompt_cache_breakpoint": breakpoint}])
+                }
+                None => text(&value),
+            };
+            json!({"type": "custom_tool_call_output", "call_id": call_id, "output": output})
+        }
     })
 }
 
@@ -1201,6 +1215,25 @@ pub(super) fn convert(
                 if !text.is_empty() {
                     entry["content"] = json!(text);
                 }
+                // On OpenAI's own API a turn whose text has a prompt cache
+                // breakpoint goes as its text parts (OAI-026).
+                if openai_own {
+                    let mut parts = vec![];
+                    let mut marked = false;
+                    for p in &msg.parts {
+                        if let Part::Text(t) = p {
+                            let mut part = json!({"type": "text", "text": t.text});
+                            if let Some(mark) = breakpoint(p)? {
+                                part["prompt_cache_breakpoint"] = mark;
+                                marked = true;
+                            }
+                            parts.push(part);
+                        }
+                    }
+                    if marked {
+                        entry["content"] = Value::Array(parts);
+                    }
+                }
                 match dialect {
                     // V4 needs the field on every assistant turn; earlier
                     // models get no reasoning from before the last user turn.
@@ -1261,7 +1294,12 @@ pub(super) fn convert(
                         && openai_responses
                         && let Some(kind) = history.host_tools.kind(&r.tool_name)
                     {
-                        out.push(host_result(kind, &r.tool_call_id, r.get_model_input())?);
+                        out.push(host_result(
+                            kind,
+                            &r.tool_call_id,
+                            r.get_model_input(),
+                            breakpoint(p)?,
+                        )?);
                         continue;
                     }
                     if let Part::ToolResult(r) = p
@@ -1269,16 +1307,35 @@ pub(super) fn convert(
                         && let Some(wrapper) = parallel.member.get(&r.tool_call_id).cloned()
                     {
                         if parallel.emitted_results.insert(wrapper.clone()) {
+                            // One output of the results joined by newlines,
+                            // as text parts when one has a breakpoint (OAI-026).
                             let mut outputs = vec![];
                             for id in &parallel.groups[&wrapper].1 {
-                                let value =
-                                    tool_result(parallel.results[id].get_model_input(), wire)?;
-                                outputs.push(match value {
+                                let result = &parallel.results[id];
+                                let text = match tool_result(result.get_model_input(), wire)? {
                                     Value::String(text) => text,
                                     other => other.to_string(),
-                                });
+                                };
+                                let mark = breakpoint(&Part::ToolResult(result.clone()))?;
+                                outputs.push((text, mark));
                             }
-                            out.push(json!({"type": "function_call_output", "call_id": wrapper, "output": outputs.join("\n")}));
+                            let output = if outputs.iter().any(|(_, mark)| mark.is_some()) {
+                                let parts =
+                                    outputs.into_iter().enumerate().map(|(i, (text, mark))| {
+                                        let text = if i == 0 { text } else { format!("\n{text}") };
+                                        let mut part = json!({"type": "input_text", "text": text});
+                                        if let Some(mark) = mark {
+                                            part["prompt_cache_breakpoint"] = mark;
+                                        }
+                                        part
+                                    });
+                                Value::Array(parts.collect())
+                            } else {
+                                let texts: Vec<String> =
+                                    outputs.into_iter().map(|(text, _)| text).collect();
+                                json!(texts.join("\n"))
+                            };
+                            out.push(json!({"type": "function_call_output", "call_id": wrapper, "output": output}));
                         }
                         continue;
                     }
