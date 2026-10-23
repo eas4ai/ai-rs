@@ -26,6 +26,7 @@
 //! ```
 
 use std::{
+    collections::BTreeMap,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -399,6 +400,34 @@ pub async fn upload_file(
         provider.upload_file(file.clone(), params.clone())
     })
     .await
+}
+
+/// A file's metadata, by the provider reference its upload returned
+/// (OPS-012). Not built yet.
+pub async fn file_info(
+    _provider: &dyn Provider,
+    _reference: &BTreeMap<String, String>,
+    _options: OperationOptions,
+) -> Result<Item<UploadedFile>, Error> {
+    Err(Error::UnsupportedOperation("file_info is not built".into()))
+}
+
+/// A file's bytes, by its provider reference (OPS-012). Not built yet.
+pub async fn download_file(
+    _provider: &dyn Provider,
+    _reference: &BTreeMap<String, String>,
+    _options: OperationOptions,
+) -> Result<Item<DownloadedFile>, Error> {
+    Err(Error::UnsupportedOperation("download_file is not built".into()))
+}
+
+/// Delete a file by its provider reference (OPS-012). Not built yet.
+pub async fn delete_file(
+    _provider: &dyn Provider,
+    _reference: &BTreeMap<String, String>,
+    _options: OperationOptions,
+) -> Result<Item<bool>, Error> {
+    Err(Error::UnsupportedOperation("delete_file is not built".into()))
 }
 
 /// Transcribe a stream of raw audio chunks as they arrive. Dropping the
