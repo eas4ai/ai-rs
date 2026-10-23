@@ -452,6 +452,22 @@ fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
         }
     }
 }
+/// A tool call the application runs, as OpenAI's Responses API takes it in
+/// history: its `call_id`, name and arguments, with the namespace its item
+/// recorded (`convert-to-openai-responses-input.ts`).
+fn function_call(call: &ToolCallPart, md: Option<&Value>) -> Value {
+    let mut item = json!({"type":"function_call","call_id":call.tool_call_id,"name":call.tool_name,"arguments":call.tool_args});
+    let namespace = md
+        .and_then(|m| {
+            m.get("namespace")
+                .or_else(|| m.get("raw_item").and_then(|raw| raw.get("namespace")))
+        })
+        .filter(|namespace| namespace.is_string());
+    if let Some(namespace) = namespace {
+        item["namespace"] = namespace.clone();
+    }
+    item
+}
 fn flush_content(out: &mut Vec<Value>, content: &mut Vec<Value>) {
     if !content.is_empty() {
         out.push(json!({"role":"assistant","content":std::mem::take(content)}));
@@ -558,6 +574,13 @@ pub(super) fn convert(
                 let mut content = vec![];
                 for p in &msg.parts {
                     let md = metadata(p, "openai");
+                    // A call the application runs pairs with its output only
+                    // by `call_id`, so it is never a reference or its stored item.
+                    if let Part::ToolCall(c) = p {
+                        flush_content(&mut out, &mut content);
+                        out.push(function_call(c, md));
+                        continue;
+                    }
                     let id = md
                         .and_then(|m| m.get("item_id").or_else(|| m.get("itemId")))
                         .and_then(Value::as_str);
@@ -582,10 +605,6 @@ pub(super) fn convert(
                             }) {
                                 out.push(json!({"type":"reasoning","summary":[{"type":"summary_text","text":r.text}],"encrypted_content":encrypted}));
                             }
-                        }
-                        Part::ToolCall(c) => {
-                            flush_content(&mut out, &mut content);
-                            out.push(json!({"type":"function_call","call_id":c.tool_call_id,"name":c.tool_name,"arguments":c.tool_args}));
                         }
                         Part::BuiltinToolCall(_) | Part::BuiltinToolReturn(_) => {
                             flush_content(&mut out, &mut content)
