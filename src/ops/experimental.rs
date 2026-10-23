@@ -143,12 +143,7 @@ where
             ],
         ),
     ];
-    let mut request = InferenceRequestParams {
-        reasoning: ProviderValue::Value(ReasoningParams {
-            effort: ProviderValue::Value(None),
-        }),
-        ..Default::default()
-    };
+    let mut request = InferenceRequestParams::default();
     if !params.provider_options.is_empty() {
         request.provider_params = Some(params.provider_options.clone());
     }

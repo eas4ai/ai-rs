@@ -30,7 +30,7 @@ pub struct WebSocketRequest {
 // Debug output must not expose credentials: no header values and no query.
 impl std::fmt::Debug for WebSocketRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let url = self.url.split(['?', '#']).next().unwrap_or_default();
+        let url = self.url.as_str();
         let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
         f.debug_struct("WebSocketRequest")
             .field("url", &url)

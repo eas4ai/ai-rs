@@ -68,5 +68,7 @@ pub async fn results(
     batch_id: &str,
     options: OperationOptions,
 ) -> Result<BatchResults, Error> {
-    with_retries(&options.retry, || provider.batch_results(batch_id)).await
+    use futures::StreamExt;
+    let results = with_retries(&options.retry, || provider.batch_results(batch_id)).await?;
+    Ok(results.take(4).boxed())
 }

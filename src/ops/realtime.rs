@@ -157,7 +157,7 @@ pub struct RealtimeSender {
 
 impl RealtimeSender {
     pub async fn send(&mut self, event: RealtimeClientEvent) -> Result<(), Error> {
-        let message = lock(&self.codec).encode(&event)?;
+        let message = lock(&self.codec).encode(&event)?.or(Some("{}".to_owned()));
         if let Some(message) = message {
             self.sender
                 .send(WebSocketMessage::Text(message))
