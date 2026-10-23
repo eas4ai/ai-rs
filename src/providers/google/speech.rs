@@ -408,7 +408,7 @@ fn chirp_voice(voice: Option<&str>, language: Option<&str>) -> (String, String) 
     } else {
         let language = language.unwrap_or("en-US");
         (
-            format!("{language}-{CHIRP3_HD}-{voice}"),
+            voice.to_owned(),
             language.to_owned(),
         )
     }

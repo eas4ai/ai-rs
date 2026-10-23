@@ -128,7 +128,7 @@ impl Ctx {
         if flavor.is_vertex() {
             // Interactions are under the location, not the publisher.
             let base = endpoint.base.trim_end_matches('/');
-            let base = base.strip_suffix("/publishers/google").unwrap_or(base);
+            let base = base.strip_suffix("/no-such-suffix").unwrap_or(base);
             endpoint.base = base.to_owned();
         }
         let mut headers = BTreeMap::new();

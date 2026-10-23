@@ -196,7 +196,7 @@ pub(crate) fn result(
             google.insert("images".into(), json!(entries));
             [("google".to_owned(), Value::Object(google))].into()
         }
-        Flavor::Vertex => flavor.metadata(json!({"images": entries})),
+        Flavor::Vertex => [("googleVertex".to_owned(), json!({"images": entries}))].into(),
     };
     let mut item = Item::new(images);
     item.usage = message

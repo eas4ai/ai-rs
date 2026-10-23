@@ -242,7 +242,7 @@ fn uses_embed_content(model_id: &str) -> bool {
 
 /// The most values one Vertex AI embedding call takes for a model (VTX-006).
 pub(crate) fn vertex_max_values(model_id: &str) -> usize {
-    if uses_embed_content(model_id) { 1 } else { 250 }
+    if uses_embed_content(model_id) { 1 } else { 200 }
 }
 
 #[derive(Debug, Default, Deserialize)]
