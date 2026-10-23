@@ -2121,6 +2121,65 @@ async fn ggl_019_a_job_starts_polls_and_downloads_with_the_key_header() {
     assert!(!format!("{:?}", item.value).contains("g-key"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn ggl_019_a_download_follows_redirects_and_keeps_the_key_on_its_origin() {
+    let uri = "https://generativelanguage.googleapis.com/v1beta/files/v1:download?alt=media";
+    let transport = Recorder::new([
+        Reply::json(json!({"name": "models/veo-3.1-generate-preview/operations/op1"})),
+        Reply::json(
+            json!({"name": "x", "done": true, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": uri}}]}}}),
+        ),
+        Reply::status(302, json!({}))
+            .header("location", "https://storage.example.com/v.mp4?sig=s1"),
+        Reply::bytes(vec![0, 0, 0, 24]).header("content-type", "video/mp4"),
+    ]);
+    let prompt = VideoPrompt {
+        text: Some("a wave".into()),
+        ..Default::default()
+    };
+    let options = ops::VideoOptions {
+        poll_interval: std::time::Duration::from_secs(1),
+        ..Default::default()
+    };
+    let item = ops::generate_video(
+        &video_model(transport.clone()),
+        prompt,
+        VideoParams::default(),
+        options,
+    )
+    .await
+    .unwrap();
+    let requests = transport.all();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[2].url, uri);
+    assert_eq!(
+        header(&requests[2], "x-goog-api-key").as_deref(),
+        Some("g-key")
+    );
+    assert_eq!(requests[3].url, "https://storage.example.com/v.mp4?sig=s1");
+    assert_eq!(header(&requests[3], "x-goog-api-key"), None);
+    assert_eq!(item.value[0].data.as_bytes().unwrap(), &[0, 0, 0, 24]);
+
+    let transport = Recorder::new([
+        Reply::status(302, json!({})).header("location", "http://storage.example.com/v.mp4")
+    ]);
+    let model = video_model(transport.clone());
+    let video = FilePart::from_url(uri, Some("video/mp4")).unwrap();
+    let error = model
+        .provider
+        .protocol()
+        .unwrap()
+        .download_video(&model, video, model.provider.as_ref())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    assert_eq!(
+        transport.count(),
+        1,
+        "a redirect from https to http was followed"
+    );
+}
+
 #[tokio::test]
 async fn ggl_019_a_video_on_another_origin_downloads_without_the_key_and_failures_report_the_message()
  {
