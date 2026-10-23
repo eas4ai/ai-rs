@@ -374,6 +374,7 @@ impl RealtimeCodec for Codec {
                 message
             }
             RealtimeClientEvent::ResponseCancel => json!({"type": "response.cancel"}),
+            RealtimeClientEvent::WithEventId { .. } => return Ok(None),
             // The realtime API has no message for these.
             RealtimeClientEvent::SessionStart(_)
             | RealtimeClientEvent::SessionClose
@@ -403,6 +404,7 @@ impl RealtimeCodec for Codec {
             },
             "input_audio_buffer.committed" => RealtimeServerEventKind::AudioCommitted {
                 item_id: optional(&raw, "item_id"),
+                previous_item_id: None,
             },
             "conversation.item.input_audio_transcription.completed" => {
                 RealtimeServerEventKind::InputTranscriptionCompleted {
@@ -472,6 +474,7 @@ impl RealtimeCodec for Codec {
                     .or_else(|| optional(&raw, "message"))
                     .unwrap_or_else(|| "Unknown error".into()),
                 code: optional(&raw["error"], "code").or_else(|| optional(&raw, "code")),
+                client_event_id: None,
             },
             other => RealtimeServerEventKind::Custom {
                 raw_type: other.to_owned(),
@@ -492,6 +495,7 @@ fn invalid_event(raw: Value, message: &str) -> RealtimeServerEvent {
         kind: RealtimeServerEventKind::Error {
             message: message.into(),
             code: Some("invalid_server_event".into()),
+            client_event_id: None,
         },
         raw,
     }
@@ -517,6 +521,7 @@ impl RealtimeCodec for LiveCodec {
             RealtimeClientEvent::ContextAppend {
                 content,
                 delegation_id,
+                ..
             } => {
                 json!({"type": "session.thinking.append", "content": content, "delegation_id": delegation_id})
             }
@@ -649,6 +654,7 @@ impl RealtimeCodec for LiveCodec {
                 Some(message) => RealtimeServerEventKind::Error {
                     message: message.to_owned(),
                     code: optional(&raw["error"], "code"),
+                    client_event_id: None,
                 },
                 None => {
                     return Ok(vec![invalid_event(

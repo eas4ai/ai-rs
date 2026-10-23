@@ -4503,7 +4503,8 @@ fn oai_024_the_realtime_codec_maps_the_typescript_events() {
         ),
         RealtimeServerEventKind::Error {
             message: "bad".into(),
-            code: Some("x".into())
+            code: Some("x".into()),
+            client_event_id: None
         }
     );
     assert_eq!(
@@ -4540,6 +4541,7 @@ async fn oai_024_a_live_model_opens_live_sessions_with_the_providers_key() {
         RealtimeClientEvent::ContextAppend {
             content: "note".into(),
             delegation_id: Some("d1".into()),
+            provider_options: Default::default(),
         },
         RealtimeClientEvent::SessionClose,
     ] {
@@ -4573,6 +4575,165 @@ async fn oai_024_a_live_model_opens_live_sessions_with_the_providers_key() {
         "wss://api.openai.com/v1/realtime?model=gpt-realtime"
     );
     assert_eq!(socket.sent_json()[0]["type"], "session.update");
+}
+
+type Codec = Box<dyn suprnova_ai::providers::operations::RealtimeCodec>;
+
+fn encoded(codec: &mut Codec, event: RealtimeClientEvent) -> Option<Value> {
+    codec
+        .encode(&event)
+        .unwrap()
+        .map(|m| serde_json::from_str::<Value>(&m).unwrap())
+}
+
+fn decoded(codec: &mut Codec, value: Value) -> RealtimeServerEventKind {
+    codec.decode(&value.to_string()).unwrap().remove(0).kind
+}
+
+#[test]
+fn oai_024_the_realtime_codec_maps_items_parts_and_event_ids() {
+    let model = realtime_model(
+        "gpt-realtime",
+        Recorder::new([]),
+        ScriptedSocket::new(vec![]),
+    );
+    let mut codec = suprnova_ai::ops::realtime::codec(&model).unwrap();
+    assert_eq!(
+        encoded(
+            &mut codec,
+            RealtimeClientEvent::InputAudioAppend("AQI=".into()).with_event_id("e1")
+        ),
+        Some(json!({"type": "input_audio_buffer.append", "audio": "AQI=", "event_id": "e1"}))
+    );
+    let update = encoded(
+        &mut codec,
+        RealtimeClientEvent::SessionUpdate(Default::default()).with_event_id("e2"),
+    )
+    .unwrap();
+    assert_eq!(
+        (&update["type"], &update["event_id"]),
+        (&json!("session.update"), &json!("e2"))
+    );
+    // TypeScript sends an id with these two events only.
+    assert_eq!(
+        encoded(
+            &mut codec,
+            RealtimeClientEvent::InputAudioCommit.with_event_id("e3")
+        ),
+        Some(json!({"type": "input_audio_buffer.commit"}))
+    );
+    for (message, kind) in [
+        (
+            json!({"type": "conversation.item.added", "item": {"id": "i1", "type": "message"}}),
+            RealtimeServerEventKind::ConversationItemAdded {
+                item_id: "i1".into(),
+                item: json!({"id": "i1", "type": "message"}),
+            },
+        ),
+        (
+            json!({"type": "response.output_item.added", "response_id": "r1", "item": {"id": "i1"}}),
+            RealtimeServerEventKind::OutputItemAdded {
+                response_id: "r1".into(),
+                item_id: "i1".into(),
+            },
+        ),
+        (
+            json!({"type": "response.output_item.done", "response_id": "r1", "item": {"id": "i1"}}),
+            RealtimeServerEventKind::OutputItemDone {
+                response_id: "r1".into(),
+                item_id: "i1".into(),
+            },
+        ),
+        (
+            json!({"type": "response.content_part.added", "response_id": "r1", "item_id": "i1"}),
+            RealtimeServerEventKind::ContentPartAdded {
+                response_id: "r1".into(),
+                item_id: "i1".into(),
+            },
+        ),
+        (
+            json!({"type": "response.content_part.done", "response_id": "r1", "item_id": "i1"}),
+            RealtimeServerEventKind::ContentPartDone {
+                response_id: "r1".into(),
+                item_id: "i1".into(),
+            },
+        ),
+        (
+            json!({"type": "input_audio_buffer.committed", "item_id": "i2", "previous_item_id": "i1"}),
+            RealtimeServerEventKind::AudioCommitted {
+                item_id: Some("i2".into()),
+                previous_item_id: Some("i1".into()),
+            },
+        ),
+        (
+            json!({"type": "error", "error": {"message": "bad", "code": "x", "event_id": "e1"}}),
+            RealtimeServerEventKind::Error {
+                message: "bad".into(),
+                code: Some("x".into()),
+                client_event_id: Some("e1".into()),
+            },
+        ),
+    ] {
+        assert_eq!(decoded(&mut codec, message.clone()), kind, "{message}");
+    }
+}
+
+#[test]
+fn oai_024_the_live_codec_sends_event_ids_and_context_channels() {
+    let model = realtime_model("gpt-live-1", Recorder::new([]), ScriptedSocket::new(vec![]));
+    let mut codec = suprnova_ai::ops::realtime::codec(&model).unwrap();
+    assert_eq!(
+        encoded(
+            &mut codec,
+            RealtimeClientEvent::InputAudioMute.with_event_id("e1")
+        ),
+        Some(json!({"type": "session.input_audio.mute", "event_id": "e1"}))
+    );
+    assert_eq!(
+        encoded(
+            &mut codec,
+            RealtimeClientEvent::SessionClose.with_event_id("e2")
+        ),
+        Some(json!({"type": "session.close", "event_id": "e2"}))
+    );
+    let start = encoded(
+        &mut codec,
+        RealtimeClientEvent::SessionStart(Default::default()).with_event_id("e3"),
+    )
+    .unwrap();
+    assert_eq!(
+        (&start["type"], &start["event_id"]),
+        (&json!("session.start"), &json!("e3"))
+    );
+    let append = |options: Value| RealtimeClientEvent::ContextAppend {
+        content: "rule".into(),
+        delegation_id: None,
+        provider_options: [("openai".to_owned(), options)].into(),
+    };
+    assert_eq!(
+        encoded(&mut codec, append(json!({"channel": "instructions"}))),
+        Some(
+            json!({"type": "session.instructions.append", "content": "rule", "delegation_id": null})
+        )
+    );
+    for options in [json!({"channel": "loud"}), json!({"other": 1})] {
+        let error = codec.encode(&append(options.clone())).unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{options}: {error:?}"
+        );
+    }
+    assert_eq!(
+        decoded(
+            &mut codec,
+            json!({"type": "error", "error": {"message": "bad", "client_event_id": "e1"}})
+        ),
+        RealtimeServerEventKind::Error {
+            message: "bad".into(),
+            code: None,
+            client_event_id: Some("e1".into()),
+        }
+    );
 }
 
 #[test]
@@ -4610,7 +4771,8 @@ fn oai_024_the_live_codec_decodes_the_typescript_events() {
         ),
         RealtimeServerEventKind::Error {
             message: "Invalid OpenAI Live event time interval.".into(),
-            code: Some("invalid_server_event".into())
+            code: Some("invalid_server_event".into()),
+            client_event_id: None
         }
     );
     assert_eq!(
