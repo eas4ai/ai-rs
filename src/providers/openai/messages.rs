@@ -458,20 +458,24 @@ fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
 /// out as one reference each, except a reasoning model's text that no
 /// reasoning item precedes, whose stored message OpenAI cannot take without
 /// that item. Without them, text goes out without its id and reasoning only
-/// with its encrypted content (OAI-002).
+/// with its encrypted content (OAI-002). Text that goes out in full is one
+/// assistant message per part, with the `phase` of its item.
 fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<Value>) {
     let reasoning_model = profile::reasoning_model(model);
-    let mut content = vec![];
     let mut sent = BTreeSet::new();
+    // Reasoning items rebuilt from their parts, which take later summaries.
+    let mut built = BTreeSet::new();
     let mut after_reasoning = false;
     for p in &msg.parts {
         let md = metadata(p, "openai");
         if let Part::ToolCall(c) = p {
-            flush_content(out, &mut content);
             out.push(function_call(c, md));
             continue;
         }
         let id = item_id(md);
+        let raw = md
+            .and_then(|m| m.get("raw_item"))
+            .filter(|raw| raw.is_object());
         match p {
             Part::Text(t) => {
                 if references
@@ -479,15 +483,23 @@ fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<
                     && (!reasoning_model || after_reasoning)
                 {
                     if sent.insert(id.to_owned()) {
-                        flush_content(out, &mut content);
                         out.push(json!({"type":"item_reference","id":id}));
                     }
                     continue;
                 }
-                content.push(json!({"type":"output_text","text":t.text}));
+                let mut message = json!({"role":"assistant","content":t.text});
+                let phase = md.and_then(|m| {
+                    [m.get("phase"), raw.and_then(|raw| raw.get("phase"))]
+                        .into_iter()
+                        .flatten()
+                        .find(|phase| phase.is_string())
+                });
+                if let Some(phase) = phase {
+                    message["phase"] = phase.clone();
+                }
+                out.push(message);
             }
             Part::Reasoning(r) => {
-                flush_content(out, &mut content);
                 after_reasoning |= id.is_some();
                 if references && let Some(id) = id {
                     if sent.insert(id.to_owned()) {
@@ -495,9 +507,6 @@ fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<
                     }
                     continue;
                 }
-                let raw = md
-                    .and_then(|m| m.get("raw_item"))
-                    .filter(|raw| raw.is_object());
                 let encrypted = encrypted_reasoning(md).or_else(|| {
                     raw.and_then(|raw| raw.get("encrypted_content"))
                         .filter(|value| !value.is_null())
@@ -507,12 +516,12 @@ fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<
                 let Some(encrypted) = encrypted else {
                     continue;
                 };
-                // The raw item holds every summary part of its item, so it
-                // goes out once for all of them.
                 if let Some(id) = id
                     && !sent.insert(id.to_owned())
                 {
-                    if raw.is_none()
+                    // A raw item already holds every summary of its item; a
+                    // rebuilt one takes this part's summary.
+                    if built.contains(id)
                         && !r.text.is_empty()
                         && let Some(item) = out.iter_mut().rev().find(|item| item["id"] == id)
                         && let Some(summary) = item["summary"].as_array_mut()
@@ -536,29 +545,23 @@ fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<
                     json!({"type":"reasoning","summary":summary,"encrypted_content":encrypted});
                 if let Some(id) = id {
                     item["id"] = json!(id);
+                    built.insert(id.to_owned());
                 }
                 out.push(item);
             }
             _ => {
                 if references && let Some(id) = id {
-                    flush_content(out, &mut content);
                     if sent.insert(id.to_owned()) {
                         out.push(json!({"type":"item_reference","id":id}));
                     }
                     continue;
                 }
-                if let Some(raw) = md.and_then(|m| m.get("raw_item")).filter(|r| r.is_object()) {
-                    flush_content(out, &mut content);
+                if let Some(raw) = raw {
                     out.push(raw.clone());
-                    continue;
-                }
-                if matches!(p, Part::BuiltinToolCall(_) | Part::BuiltinToolReturn(_)) {
-                    flush_content(out, &mut content);
                 }
             }
         }
     }
-    flush_content(out, &mut content);
 }
 /// A tool call the application runs, as OpenAI's Responses API takes it in
 /// history: its `call_id`, name and arguments, with the namespace its item
@@ -579,11 +582,6 @@ fn function_call(call: &ToolCallPart, md: Option<&Value>) -> Value {
         item["namespace"] = namespace.clone();
     }
     item
-}
-fn flush_content(out: &mut Vec<Value>, content: &mut Vec<Value>) {
-    if !content.is_empty() {
-        out.push(json!({"role":"assistant","content":std::mem::take(content)}));
-    }
 }
 pub(super) fn convert(
     messages: Vec<Message>,

@@ -254,12 +254,18 @@ fn start(
                     })
             })
             .unwrap_or("png");
+        let hold_reasoning = wire.responses_dialect() == Some(ResponsesDialect::OpenAI)
+            && options
+                .params
+                .as_ref()
+                .is_some_and(|p| params::unstored(p, wire));
         Ok::<_, Error>(streaming::parse(
             response.body,
             provider_name,
             wire,
             format!("image/{image_type}"),
             options.output_schema.is_some(),
+            hold_reasoning,
         ))
     })
     .try_flatten()
