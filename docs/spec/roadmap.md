@@ -1,0 +1,178 @@
+# Roadmap
+
+Current: openai-call-pairing
+
+## rename-to-suprnova-ai
+
+Requirements: PKG-001, PKG-002, PKG-003, PKG-004, PKG-005, PKG-006
+
+Rename the crate from `ai` to `suprnova-ai` (library `suprnova_ai`) and the
+repository from `eas4ai/ai-rs` to `eas4ai/suprnova-ai-rs`. Change the package
+name in `Cargo.toml`, rewrite every `ai::` crate path in `src/`, `tests/`,
+`README.md` and `docs/PORT.md`, retitle `README.md`, set the `Cargo.toml`
+repository URL, reword `NOTICE`, move the `scripts/check.sh` build directory
+to a `suprnova-ai-rs` path, and regenerate `Cargo.lock`. The public API does
+not change apart from the crate name. suprchat is not changed: it pins an
+older revision by Git URL, and GitHub redirects that URL.
+
+Done when the identity, remote and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## core-hardening
+
+Requirements: MOD-001, MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007, MOD-008, AGT-001, AGT-002, AGT-003, AGT-004, AGT-005, PKG-002, PKG-006
+
+Harden the core before the provider port builds on it. Remove the gateway
+remnants: the default `gateway` route in `get_model`, the alias folding in
+`canonical_provider_id`, and the gateway-only `routing` and `tags` request
+parameters with their types. Make model snapshots credential-free and
+restore credentials from the registered provider of the same name. Add
+call retries with backoff that honors `retry-after`, optional idle and
+total timeouts, and drop-safe retry waits to `stream` and `generate`. Add
+the `testing` feature with a scripted provider. In the agent loop, add
+async step checks that continue, steer or stop, turn calls to unknown tools
+into error results the model sees, add an optional tool concurrency cap,
+total run usage and the run's stop reason. Update `README.md`,
+`src/agents/README.md` and `docs/PORT.md` to state the departures from
+Python. Each requirement's tests in `tests/spec_models.rs` and
+`tests/spec_agents.rs` are named after it, and `scripts/check-core.sh`
+reports one result per requirement.
+
+Done when the core, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## chat-hosts
+
+Requirements: HST-001, HST-002, HST-003, HST-004, HST-005, HST-006, HST-007, AGT-001, AGT-006, PKG-002, PKG-006
+
+Add the first hosted providers on one shared provider layer. Move the parts
+the OpenAI and Anthropic adapters each carry today into shared code under
+`src/providers/`: the HTTP request builder (URL joins, query, auth and
+header order, the bounded body read), the error mapping, and the SSE to JSON
+reader. Their behavior does not change, so today's tests keep passing.
+Give the Chat Completions protocol a host profile for the request and
+response differences in `docs/spec/hosts.md`, and stop choosing the default
+protocol by the provider name. Add `providers::hosts` with Cerebras,
+DeepInfra, Fireworks, Together AI and Z.ai on Chat Completions and MiniMax on
+the Anthropic Messages protocol, each restorable from a snapshot. Send
+`stream_options.include_usage` only where HST-002 says. In the agent loop,
+skip step checks after a step that ends on a deferred hook, count progress
+across every run of the loop, and add `AgentStream::interrupted_messages()`.
+Update `README.md`, `src/agents/README.md` and `docs/PORT.md`. Each
+requirement's tests in `tests/spec_hosts.rs` and `tests/spec_agents.rs` are
+named after it; `scripts/check-hosts.sh` and `scripts/check-core.sh` report
+one result per requirement through the shared `scripts/spec-tests.sh`.
+
+Done when the hosts, core, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## dialect-hosts
+
+Requirements: HST-001, HST-002, HST-008, HST-009, HST-010, HST-011, HST-012, HST-013, HST-014, HST-015, HST-016, HST-017, HST-018, MOD-009, AGT-006, PKG-002, PKG-006
+
+Add DeepSeek, Moonshot AI and Mistral to `providers::hosts` on the Chat
+Completions protocol, each restorable from a snapshot. Their profiles also
+change how messages, schemas and stream content are written and read: the
+DeepSeek `thinking` field, V4 reasoning history and schema system message;
+the Moonshot AI model families, MFJS schemas, video input and image
+downloads through a provider built with a download transport; and the
+Mistral seed, tool choice, thinking chunks, document parts and content
+arrays. Each rejects the settings its TypeScript provider never sends. Key
+Chat Completions tool call deltas without an index by their position, and
+give the three hosts' stream errors a kind and a retry flag. Give
+`ReqwestTransport::new()` only a 10 s connect limit and TCP keepalive. Make
+`AgentStream::interrupted_messages()` keep the loop's copy of a response up
+to its last received tool call, with the results of the tools that
+finished, and add `AgentStream::stop()`. Update `README.md`,
+`src/agents/README.md` and `docs/PORT.md`. Each requirement's tests in
+`tests/spec_hosts.rs`, `tests/spec_models.rs` and `tests/spec_agents.rs`
+are named after it; `scripts/check-hosts.sh` and `scripts/check-core.sh`
+report one result per requirement through the shared
+`scripts/spec-tests.sh`.
+
+Done when the hosts, core, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## responses-hosts
+
+Requirements: HST-001, HST-019, HST-020, HST-021, HST-022, HST-023, HST-024, HST-025, PKG-002, PKG-006
+
+Give the Responses protocol a host profile, as Chat Completions has, with
+OpenAI's rules as today's default, and add xAI and Hugging Face to
+`providers::hosts` on it, each restorable from a snapshot and chosen by
+models.dev metadata. xAI is ported for text: its settings, effort map, store
+and include rules, history items without references, item metadata under
+`xai`, cached-token usage and `code: error` messages; its built-in tools fail
+with `Error::UnsupportedOperation`. Hugging Face gets its schema, tool choice
+and history rules and takes only image files. Each host rejects the settings
+its TypeScript package never sends. Fix the Responses reader for every
+Responses provider: `response.failed` and `error` events end the call with a
+classified `ProviderError`, `response.done` counts as `response.completed`,
+`response.incomplete` always reports a finish reason, and reasoning keeps its
+encrypted content when its summary ends first. Update `README.md`,
+`docs/PORT.md` and the adapter docs. Each requirement's tests in
+`tests/spec_hosts.rs` are named after it; `scripts/check-hosts.sh` reports
+one result per requirement through the shared `scripts/spec-tests.sh`.
+
+Done when the hosts, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## google
+
+Requirements: GGL-001, GGL-002, GGL-003, GGL-004, GGL-005, GGL-006, GGL-007, GGL-008, GGL-009, GGL-010, GGL-011, GGL-012, GGL-013, GGL-014, GGL-015, GGL-016, GGL-017, GGL-018, GGL-019, GGL-020, GGL-021, GGL-022, GGL-023, GGL-024, GGL-025, GGL-026, GGL-027, GGL-028, GGL-029, GGL-030, GGL-031, GGL-032, VTX-001, VTX-002, VTX-003, VTX-004, VTX-005, VTX-006, VTX-007, VTX-008, VTX-009, VTX-010, VTX-011, VTX-012, VTX-013, VTX-014, VTX-015, OPS-001, OPS-002, OPS-003, OPS-004, OPS-005, OPS-006, OPS-007, OPS-008, OPS-009, OPS-010, OPS-011, PKG-002, PKG-006
+
+Port Google whole: every model kind of the AI SDK for TypeScript 7.0.148
+packages `@ai-sdk/google` and `@ai-sdk/google-vertex`. Add `suprnova_ai::ops`
+with its front ends for embeddings, images, video jobs, speech,
+transcription and its streaming form, speech translation, file uploads,
+batches, realtime sessions and evaluation, and a `WebSocketTransport` trait
+with a tokio-tungstenite implementation behind a feature. Add
+`providers::google` for the Gemini API: language models streamed and
+buffered, with thinking, thought signatures, schemas, files, tools and
+grounding; embeddings, Gemini image generation, speech, transcription,
+speech translation, Veo video, the files API, batches, the Live API with
+ephemeral tokens and the realtime codec, the Interactions API with its
+agents, background runs and stream reconnection, and evaluation. Add
+`providers::google_vertex` for Vertex AI: Express Mode keys, credentials
+from Google's `google-cloud-auth` crate behind the `google-auth` feature or
+an access token source; Gemini, embeddings, images, video, Chirp and Gemini
+speech, Cloud Speech-to-Text and Gemini transcription and Interactions on
+Vertex; and the Anthropic, open-model and xAI partner providers. Media
+responses read up to 256 MiB. The crate reads no environment. Update
+`README.md`, `docs/PORT.md` and the provider docs. Each requirement's tests
+in `tests/spec_google.rs`, `tests/spec_vertex.rs` and
+`tests/spec_operations.rs` are named after it; `scripts/check-google.sh`,
+`scripts/check-vertex.sh` and `scripts/check-operations.sh` report one
+result per requirement through the shared `scripts/spec-tests.sh`. Live
+tests use free-tier Gemini models only; the paid-only models (Veo, the
+Gemini and Imagen image models, Pro speech) and Vertex AI, which has no
+credentials here, are tested from recorded requests only.
+
+Done when the google, vertex, operations, identity and checks mechanisms
+pass for every requirement above, their receipts are current, and the
+review and the adversary report have no open findings.
+
+## openai-call-pairing
+
+Requirements: OAI-001, PKG-002, PKG-006
+
+Send each tool call of an assistant turn to OpenAI's Responses API as a full
+`function_call` item, never as a reference to a stored item, so that every
+`function_call_output` pairs with its call by `call_id`
+(`src/providers/openai/messages.rs`). Replace the test in
+`tests/providers_openai.rs` that asserts the reference. Add
+`tests/fixtures/README.md`, which says that
+`vertex-test-service-account-key.pem` is a key made only for the tests and
+signs in to nothing, and a `.gitleaks.toml` that allowlists that file. The
+tests of OAI-001 in `tests/spec_openai.rs` are named after it, and
+`scripts/check-openai.sh` reports its result through the shared
+`scripts/spec-tests.sh`.
+
+Done when the openai, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
