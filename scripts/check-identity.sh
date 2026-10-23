@@ -80,9 +80,12 @@ apache=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
 if [ -n "$meta_ok" ]; then
   n=0
   [ "$(sha256sum LICENSE | cut -d' ' -f1)" = "$apache" ] || { echo "LICENSE is not the Apache License 2.0 text"; n=1; }
-  # A license header, or a comment line that starts with Copyright.
+  # A license header: the Apache boilerplate, an SPDX line, or a line whose
+  # comment punctuation (`//`, `//!`, `///`, `/*!`, `#`, `"""`, `<!--`, ...)
+  # comes before `Copyright`.
   found -rnIE --exclude=check-identity.sh \
-    -e 'Licensed under the Apache License' -e '^[[:space:]]*(//|#|/\*|\*)[[:space:]]*Copyright' \
+    -e 'Licensed under the Apache License' -e 'SPDX-(License-Identifier|FileCopyrightText)' \
+    -e '^[[:space:]]*[^[:alnum:][:space:]]+[[:space:]]*Copyright' \
     src tests scripts && n=1
   grep -qxF "$holder" <<<"$authors" || { echo "Cargo.toml authors lack $holder"; n=1; }
   # The first paragraph after the title line.
