@@ -22,7 +22,7 @@ use suprnova_ai::providers::openai::{
 };
 use suprnova_ai::providers::{ModelsDevProvider, ProviderRegistry};
 use suprnova_ai::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError};
-use suprnova_ai::types::messages::{ContentOutput, ContentPart, FilePart};
+use suprnova_ai::types::messages::{ContentOutput, ContentPart, FilePart, ReasoningPart};
 use suprnova_ai::types::{
     Event, Message, MessageRole, Part, TextPart, Tool, ToolCallPart, ToolResultPart, ToolSpec,
 };
@@ -516,7 +516,7 @@ async fn finish_reason_normalization() {
 }
 
 #[tokio::test]
-async fn history_repair_and_store_false_replay() {
+async fn history_repair_store_false_replay_and_calls_in_full() {
     for chat in [false, true] {
         let fake = Scripted::sse(vec![]);
         let messages = vec![
@@ -583,6 +583,57 @@ async fn history_repair_and_store_false_replay() {
             fake.body()["input"][1],
             json!({"type":"function_call_output","call_id":"call_1","output":"sunny"})
         );
+    }
+    // Reasoning and text with an item id go out as references when responses
+    // are stored, and as their raw items when they are not.
+    let reasoning_raw = json!({"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"enc"});
+    let text_raw = json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]});
+    for store in [false, true] {
+        let fake = Scripted::sse(vec![]);
+        let mut reasoning = ReasoningPart::new("think");
+        reasoning.provider_metadata = Some(
+            [(
+                "openai".into(),
+                json!({"item_id":"rs_1","reasoning_encrypted_content":"enc","raw_item":reasoning_raw}),
+            )]
+            .into(),
+        );
+        let mut text = TextPart::new("hello");
+        text.provider_metadata = Some(
+            [(
+                "openai".into(),
+                json!({"item_id":"msg_1","raw_item":text_raw}),
+            )]
+            .into(),
+        );
+        collect(
+            fake.clone(),
+            false,
+            vec![
+                Message::new(MessageRole::User, vec![Part::Text(TextPart::new("hi"))]),
+                Message::new(
+                    MessageRole::Assistant,
+                    vec![Part::Reasoning(reasoning), Part::Text(text)],
+                ),
+                Message::new(MessageRole::User, vec![Part::Text(TextPart::new("again"))]),
+            ],
+            StreamOptions {
+                params: Some(
+                    InferenceRequestParams::default()
+                        .with_provider_param("openai", json!({"store":store})),
+                ),
+                ..Default::default()
+            },
+        )
+        .await;
+        let input = &fake.body()["input"];
+        if store {
+            assert_eq!(input[1], json!({"type":"item_reference","id":"rs_1"}));
+            assert_eq!(input[2], json!({"type":"item_reference","id":"msg_1"}));
+        } else {
+            assert_eq!(input[1], reasoning_raw);
+            assert_eq!(input[2], text_raw);
+        }
     }
 }
 
