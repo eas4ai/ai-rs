@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: license-attribution
+Current: openai-whole
 
 ## rename-to-suprnova-ai
 
@@ -217,3 +217,30 @@ Apache License 2.0. `docs/PORT.md` states where the license and notice live.
 Done when the identity and checks mechanisms pass for every requirement
 above, their receipts are current, and the review and the adversary report
 have no open findings.
+
+## openai-whole
+
+Requirements: OAI-001, OAI-002, OAI-003, OAI-004, OAI-005, OAI-006, OAI-007, OAI-008, OAI-009, OAI-010, OAI-011, OAI-012, OAI-013, OAI-014, OAI-015, OAI-016, OAI-017, OAI-018, OAI-019, OAI-020, OAI-021, OAI-022, OAI-023, OAI-024, OAI-025, OAI-026, OAI-027, OPS-012, OPS-013, OPS-014, PKG-002, PKG-006
+
+Port OpenAI whole: every model kind of the AI SDK for TypeScript 7.0.148
+package `@ai-sdk/openai`. Give the Responses and Chat Completions protocols
+the TypeScript provider options, model capabilities, user files, history
+items, tools, stream items, usage and prompt caching; add the host-run
+provider tools, with `AgentTool::with_provider_declaration`, and MCP
+approvals through the `ToolApproval` hook. Add `OpenAICompletionsProtocol`
+and an embedding protocol that OpenAI-compatible servers can also use, and
+OpenAI's images, speech, transcription and its streaming form, speech
+translation, files, skills, batches, realtime and Live sessions and
+decisions. Add the `ops` front ends for file info, download and delete,
+skill uploads, realtime server connections and WebRTC sessions, and
+`OpenAICompatibleProvider::with_download_transport`, and log the settings a
+model does not take at debug through the `tracing` crate. OAI-001 and
+OAI-002 stay as they are. Update `README.md`, `docs/PORT.md` and the provider docs.
+Each requirement's tests in `tests/spec_openai.rs` and
+`tests/spec_operations.rs` are named after it; `scripts/check-openai.sh` and
+`scripts/check-operations.sh` report one result per requirement. Live tests
+use only the calls the developer approves: OpenAI has no free tier.
+
+Done when the openai, operations, identity and checks mechanisms pass for
+every requirement above, their receipts are current, and the review and the
+adversary report have no open findings.

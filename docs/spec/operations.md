@@ -6,9 +6,10 @@ The operations beyond chat, in `suprnova_ai::ops`. The front ends keep the
 names of the Python SDK 0.8.0 `ai.ops` module: `embed`, `generate_image`,
 `generate_video`, `generate_audio`, `transcribe`, `rerank` and
 `experimental::evaluate`. The module adds the operations that the AI SDK for
-TypeScript 7.0.148 core runs and Google's packages implement: video jobs,
-file uploads, batches, streaming transcription, speech translation and
-realtime sessions. Each front end calls the model's protocol, the model's
+TypeScript 7.0.148 core runs and Google's and OpenAI's packages implement:
+video jobs, file uploads and their info, download and delete, skill uploads,
+batches, streaming transcription, speech translation, realtime sessions with
+their server connections and WebRTC sessions. Each front end calls the model's protocol, the model's
 override first and then the provider's. The operation results keep the
 existing `Item` shape: a value, usage, warnings and provider metadata. A
 warning has the TypeScript fields: `kind` (`unsupported` or `other`),
@@ -166,4 +167,42 @@ level count minus one, or a probability lies outside 0 to 1.
 Falsifier: A scripted language model receives another prompt, schema or reasoning setting; an answer of `c1` for a choice of options `a` and `b` gives other than `b`; a score of 3 on a two-level question, a probability of 1.5, a missing key, non-JSON text or a `length` finish does not fail with that error kind.
 Mechanism: operations
 Rationale: `DecisionLanguageModel` in `provider-utils`; the crate's question types and answer shapes are the Python SDK's (`ai/ops/experimental/evaluation.py`).
+Status: Agreed 2026-10-23
+
+[OPS-012] `ops::file_info`, `ops::download_file` and `ops::delete_file` MUST
+take a provider and a file's provider reference, as `UploadedFile` holds it,
+and call the provider's files operation: info MUST return an `UploadedFile`
+with the fields the provider reports, download the file's bytes and the media
+type the provider reports, read up to 256 MiB, and delete whether the provider
+deleted the file. A provider without the operation MUST fail with
+`Error::UnsupportedOperation` naming it before any request is sent, and each
+MUST retry as OPS-001 says.
+Falsifier: A scripted files operation receives another reference, or a front end returns other fields, bytes, media type or deleted flag; a download over 256 MiB is not refused; or a provider without the operation sends a request or fails with another error kind.
+Mechanism: operations
+Rationale: `FilesV4` in `@ai-sdk/provider` has `getFileMetadata`, `downloadFile` and `deleteFile`, which OpenAI and xAI implement.
+Status: Agreed 2026-10-23
+
+[OPS-013] `ops::upload_skill` MUST take a provider, the skill's files, each a
+path and its bytes, and an optional display title, call the provider's skills
+operation and return an `UploadedSkill` with the provider reference and the
+name, description, latest version and metadata the provider reports. A
+provider without the operation MUST fail with `Error::UnsupportedOperation`
+before any request is sent.
+Falsifier: A scripted skills operation receives other files, paths or title, or the front end returns another reference or a field the provider did not report; or a provider without the operation sends a request or fails with another error kind.
+Mechanism: operations
+Rationale: `upload-skill/upload-skill.ts` and `SkillsV4`, which OpenAI and Anthropic implement.
+Status: Agreed 2026-10-23
+
+[OPS-014] `ops::realtime::connect_server` MUST open a session with the
+provider's own credentials through its WebSocket transport, for a server that
+holds the key, and send the session setup as the protocol starts a session: a
+session start for a protocol whose sessions start once, a session update
+otherwise. `ops::realtime::create_webrtc_session` MUST send an SDP offer and a
+session configuration through the protocol and return the session id and the
+SDP answer. A protocol without either MUST fail with
+`Error::UnsupportedOperation` before any request is sent, and a dropped
+connection MUST close its socket as OPS-009 says.
+Falsifier: A scripted WebSocket transport receives another URL, headers or first message; a scripted protocol's WebRTC session receives another offer or configuration, or the front end returns another id or answer; or a protocol without either sends a request or fails with another error kind.
+Mechanism: operations
+Rationale: OpenAI's Live API is opened by a server with its key (`getServerWebSocketConfig`) or by a browser through WebRTC, and takes no client secrets.
 Status: Agreed 2026-10-23
