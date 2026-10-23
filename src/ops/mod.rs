@@ -403,31 +403,45 @@ pub async fn upload_file(
 }
 
 /// A file's metadata, by the provider reference its upload returned
-/// (OPS-012). Not built yet.
+/// (OPS-012).
 pub async fn file_info(
-    _provider: &dyn Provider,
-    _reference: &BTreeMap<String, String>,
-    _options: OperationOptions,
+    provider: &dyn Provider,
+    reference: &BTreeMap<String, String>,
+    options: OperationOptions,
 ) -> Result<Item<UploadedFile>, Error> {
-    Err(Error::UnsupportedOperation("file_info is not built".into()))
+    with_retries(&options.retry, || provider.file_info(reference)).await
 }
 
-/// A file's bytes, by its provider reference (OPS-012). Not built yet.
+/// A file's bytes and the media type the provider reports, by its provider
+/// reference, up to 256 MiB (OPS-012).
 pub async fn download_file(
-    _provider: &dyn Provider,
-    _reference: &BTreeMap<String, String>,
-    _options: OperationOptions,
+    provider: &dyn Provider,
+    reference: &BTreeMap<String, String>,
+    options: OperationOptions,
 ) -> Result<Item<DownloadedFile>, Error> {
-    Err(Error::UnsupportedOperation("download_file is not built".into()))
+    let item = with_retries(&options.retry, || {
+        provider.download_file(reference, MAX_DOWNLOAD_BYTES)
+    })
+    .await?;
+    if item.value.data.len() > MAX_DOWNLOAD_BYTES {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Response,
+            format!("the downloaded file is over the limit of {MAX_DOWNLOAD_BYTES} bytes"),
+        )
+        .with_provider(provider.name())
+        .into());
+    }
+    Ok(item)
 }
 
-/// Delete a file by its provider reference (OPS-012). Not built yet.
+/// Delete a file by its provider reference; whether the provider deleted it
+/// (OPS-012).
 pub async fn delete_file(
-    _provider: &dyn Provider,
-    _reference: &BTreeMap<String, String>,
-    _options: OperationOptions,
+    provider: &dyn Provider,
+    reference: &BTreeMap<String, String>,
+    options: OperationOptions,
 ) -> Result<Item<bool>, Error> {
-    Err(Error::UnsupportedOperation("delete_file is not built".into()))
+    with_retries(&options.retry, || provider.delete_file(reference)).await
 }
 
 /// Transcribe a stream of raw audio chunks as they arrive. Dropping the
