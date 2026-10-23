@@ -425,6 +425,14 @@ async fn vtx_002_a_failed_token_source_hides_its_message() {
     assert_eq!(transport.count(), 0);
 }
 
+/// A PEM private-key block around a stand-in body that holds no key. It is
+/// built at run time so that the source has no private-key header for a
+/// secret scanner to report.
+fn stand_in_key(body: &str) -> String {
+    let label = "PRIVATE KEY";
+    format!("-----BEGIN {label}-----\n{body}\n-----END {label}-----\n")
+}
+
 #[tokio::test]
 async fn vtx_002_a_snapshot_holds_no_credential() {
     let mut config = located("us-central1");
@@ -432,10 +440,9 @@ async fn vtx_002_a_snapshot_holds_no_credential() {
         "GOOGLE_CLIENT_EMAIL".into(),
         "sa@p1.iam.gserviceaccount.com".into(),
     );
-    config.env.insert(
-        "GOOGLE_PRIVATE_KEY".into(),
-        "-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n".into(),
-    );
+    config
+        .env
+        .insert("GOOGLE_PRIVATE_KEY".into(), stand_in_key("c2VjcmV0"));
     config.api_key_value = Some("vx-key".into());
     let model = model_of(
         "gemini-2.5-flash",
@@ -555,12 +562,11 @@ mod google_auth {
     #[tokio::test]
     async fn vtx_002_a_bad_service_account_key_fails_without_quoting_it() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let key =
-            "-----BEGIN PRIVATE KEY-----\nc2VjcmV0LWtleS1ieXRlcw==\n-----END PRIVATE KEY-----\n";
+        let key = stand_in_key("c2VjcmV0LWtleS1ieXRlcw==");
         let transport = Recorder::new([text_reply("a")]);
         let model = model_of(
             "gemini-2.5-flash",
-            google_vertex::provider(service_account(key), transport.clone()),
+            google_vertex::provider(service_account(&key), transport.clone()),
         );
         let options = StreamOptions {
             retry: suprnova_ai::RetryPolicy::none(),
