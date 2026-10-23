@@ -41,6 +41,7 @@ pub(crate) mod profile;
 pub mod protocol;
 mod provider;
 mod responses;
+mod socket;
 mod speech;
 mod streaming;
 pub mod tools;

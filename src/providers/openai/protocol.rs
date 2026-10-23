@@ -1,7 +1,7 @@
 use super::{
     chat, dialect, embedding, images, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
-    responses, speech, streaming, transcription,
+    responses, socket, speech, streaming, transcription,
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
@@ -9,8 +9,10 @@ use crate::{
     providers::{
         EventStream, http,
         operations::{
-            AudioParams, AudioPrompt, CallLimits, EmbedParams, ImageParams, ImagePrompt, Item,
-            TranscribeInput, TranscribeParams, Transcription,
+            AudioChunks, AudioFormat, AudioParams, AudioPrompt, CallLimits, EmbedParams,
+            ImageParams, ImagePrompt, Item, StreamTranscribeParams, StreamTranslateParams,
+            TranscribeInput, TranscribeParams, Transcription, TranscriptionStream,
+            TranslationStream,
         },
     },
     transport::HttpRequest,
@@ -24,7 +26,7 @@ use std::sync::Arc;
 /// The `ProviderProtocol` of one of OpenAI's language model protocols: its
 /// class id, its stream on `wire` with the downloads `|this|` gives, and the
 /// operations they share: embeddings (OAI-016), images (OAI-017), speech
-/// (OAI-018) and transcription (OAI-019).
+/// (OAI-018), transcription (OAI-019) and streaming audio (OAI-020).
 macro_rules! openai_protocol {
     ($ty:ty, $class:expr, $wire:expr, |$this:ident| $downloads:expr) => {
         #[async_trait]
@@ -90,6 +92,26 @@ macro_rules! openai_protocol {
                 provider: &dyn Provider,
             ) -> Result<Item<Transcription>, Error> {
                 transcription::transcribe(model, audio, params, provider).await
+            }
+            async fn stream_transcription(
+                &self,
+                model: &Model,
+                audio: AudioChunks,
+                format: AudioFormat,
+                params: StreamTranscribeParams,
+                provider: &dyn Provider,
+            ) -> Result<TranscriptionStream, Error> {
+                socket::stream_transcription(model, audio, format, params, provider).await
+            }
+            async fn stream_translation(
+                &self,
+                model: &Model,
+                audio: AudioChunks,
+                format: AudioFormat,
+                params: StreamTranslateParams,
+                provider: &dyn Provider,
+            ) -> Result<TranslationStream, Error> {
+                socket::stream_translation(model, audio, format, params, provider).await
             }
         }
     };

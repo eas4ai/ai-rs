@@ -36,8 +36,6 @@ pub(super) struct TranscriptionOptions {
 #[serde(deny_unknown_fields)]
 pub(super) struct StreamingOptions {
     pub delay: Option<String>,
-    // Read by streaming transcription (OAI-020).
-    #[allow(dead_code)]
     pub include: Option<Vec<String>>,
 }
 
