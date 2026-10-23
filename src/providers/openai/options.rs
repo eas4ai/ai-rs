@@ -45,8 +45,6 @@ pub(crate) struct ResponsesOptions {
     pub safety_identifier: Option<String>,
     pub service_tier: Option<String>,
     pub store: Option<bool>,
-    // Read by the file conversion of OAI-007.
-    #[allow(dead_code)]
     #[serde(default, deserialize_with = "not_null")]
     pub pass_through_unsupported_files: Option<bool>,
     pub strict_json_schema: Option<bool>,

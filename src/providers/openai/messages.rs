@@ -28,17 +28,27 @@ fn dialect_of(wire: Wire) -> Dialect {
         Wire::Responses(_) => Dialect::OpenAI,
     }
 }
-fn file(part: &FilePart, wire: Wire) -> Result<Value, Error> {
-    let responses = matches!(wire, Wire::Responses(_));
+/// A user file, the `index`-th part of its message, as the API takes it.
+fn file(part: &FilePart, index: usize, wire: Wire, history: &History<'_>) -> Result<Value, Error> {
     let mt = if part.media_type == "image/*" {
         "image/jpeg"
     } else {
         &part.media_type
     };
-    match wire.responses_dialect() {
-        Some(ResponsesDialect::Xai) => return xai_file(part, mt),
-        Some(ResponsesDialect::HuggingFace) => return huggingface_file(part, mt),
-        _ => {}
+    match wire {
+        Wire::Responses(profile) => {
+            return match profile.dialect {
+                ResponsesDialect::Xai => xai_file(part, mt),
+                ResponsesDialect::HuggingFace => huggingface_file(part, mt),
+                ResponsesDialect::OpenAI => {
+                    openai_file(part, mt, index, true, history.pass_through_files)
+                }
+            };
+        }
+        Wire::Chat(profile) if profile.openai_own => {
+            return openai_file(part, mt, index, false, false);
+        }
+        Wire::Chat(_) => {}
     }
     match dialect_of(wire) {
         Dialect::OpenAI | Dialect::VertexXai => {}
@@ -56,38 +66,23 @@ fn file(part: &FilePart, wire: Wire) -> Result<Value, Error> {
     let data = media_ref(&part.data);
     if mt.starts_with("image/") {
         let url = media::data_to_data_url(data, mt);
-        return Ok(if responses {
-            json!({"type":"input_image","image_url":url})
-        } else {
-            json!({"type":"image_url","image_url":{"url":url}})
-        });
+        return Ok(json!({"type":"image_url","image_url":{"url":url}}));
     }
     let url = part
         .data
         .as_text()
         .filter(|s| media::is_downloadable_url(s));
     if mt == "application/pdf" {
-        if let Some(url) = url {
-            if responses {
-                return Ok(json!({"type":"input_file","file_url":url}));
-            }
-            return Err(invalid(
-                "chat PDF URLs require a download transport; supply file bytes or configure protocol downloads",
-            ));
+        if url.is_some() {
+            return Err(chat_url_error("PDF"));
         }
         let filename = part.filename.as_deref().unwrap_or("document.pdf");
         let data = media::data_to_data_url(data, mt);
-        return Ok(if responses {
-            json!({"type":"input_file","filename":filename,"file_data":data})
-        } else {
-            json!({"type":"file","file":{"filename":filename,"file_data":data}})
-        });
+        return Ok(json!({"type":"file","file":{"filename":filename,"file_data":data}}));
     }
-    if mt.starts_with("audio/") && !responses {
+    if mt.starts_with("audio/") {
         if url.is_some() {
-            return Err(invalid(
-                "chat audio URLs require a download transport; supply file bytes or configure protocol downloads",
-            ));
+            return Err(chat_url_error("audio"));
         }
         return Ok(
             json!({"type":"input_audio","input_audio":{"format":mt.split_once('/').map_or(mt,|(_,v)|v),"data":media::data_to_base64(data)}}),
@@ -95,9 +90,117 @@ fn file(part: &FilePart, wire: Wire) -> Result<Value, Error> {
     }
     if mt.starts_with("text/") {
         let text = text_file(part)?;
-        return Ok(json!({"type":if responses {"input_text"}else {"text"},"text":text}));
+        return Ok(json!({"type":"text","text":text}));
     }
     Err(invalid(format!("Unsupported media type for OpenAI: {mt}")))
+}
+fn chat_url_error(kind: &str) -> Error {
+    invalid(format!(
+        "chat {kind} URLs require a download transport; supply file bytes or build the provider with with_download_transport"
+    ))
+}
+/// A user file as OpenAI's own Responses (`responses`) or Chat Completions
+/// API takes it (OAI-007). Text data that starts with `file-` names a file
+/// uploaded to OpenAI. A `text/*` file goes as text unless
+/// `passThroughUnsupportedFiles` sends it as a file, as Shawn ruled for
+/// OAI-007 on 2026-10-23.
+fn openai_file(
+    part: &FilePart,
+    mt: &str,
+    index: usize,
+    responses: bool,
+    pass_through: bool,
+) -> Result<Value, Error> {
+    let text = part.data.as_text();
+    let file_id = text.filter(|s| s.starts_with("file-"));
+    let url = text.filter(|s| media::is_downloadable_url(s));
+    let data = media_ref(&part.data);
+    let detail = part
+        .provider_metadata
+        .as_ref()
+        .and_then(|md| md.get("openai")?.get("imageDetail"))
+        .filter(|detail| !detail.is_null());
+    if !responses && let Some(id) = file_id {
+        return Ok(json!({"type": "file", "file": {"file_id": id}}));
+    }
+    if mt.starts_with("image/") {
+        let mut image = match (responses, file_id) {
+            (true, Some(id)) => json!({"type": "input_image", "file_id": id}),
+            (true, None) => {
+                json!({"type": "input_image", "image_url": media::data_to_data_url(data, mt)})
+            }
+            (false, _) => {
+                json!({"type": "image_url", "image_url": {"url": media::data_to_data_url(data, mt)}})
+            }
+        };
+        if let Some(detail) = detail {
+            let target = if responses {
+                &mut image
+            } else {
+                &mut image["image_url"]
+            };
+            target["detail"] = detail.clone();
+        }
+        return Ok(image);
+    }
+    if let Some(id) = file_id {
+        return Ok(json!({"type": "input_file", "file_id": id}));
+    }
+    let filename = |default: String| part.filename.clone().unwrap_or(default);
+    if mt == "application/pdf" {
+        if let Some(url) = url {
+            if responses {
+                return Ok(json!({"type": "input_file", "file_url": url}));
+            }
+            return Err(chat_url_error("PDF"));
+        }
+        let filename = filename(format!("part-{index}.pdf"));
+        let data = media::data_to_data_url(data, mt);
+        return Ok(if responses {
+            json!({"type": "input_file", "filename": filename, "file_data": data})
+        } else {
+            json!({"type": "file", "file": {"filename": filename, "file_data": data}})
+        });
+    }
+    if !responses && mt.starts_with("audio/") {
+        if url.is_some() {
+            return Err(chat_url_error("audio"));
+        }
+        let format = match mt {
+            "audio/wav" => "wav",
+            "audio/mp3" | "audio/mpeg" => "mp3",
+            _ => {
+                return Err(invalid(format!(
+                    "OpenAI chat completions takes WAV and MP3 audio, not {mt}"
+                )));
+            }
+        };
+        return Ok(
+            json!({"type": "input_audio", "input_audio": {"data": media::data_to_base64(data), "format": format}}),
+        );
+    }
+    if responses && pass_through {
+        return Ok(match url {
+            Some(url) => json!({"type": "input_file", "file_url": url}),
+            None => json!({
+                "type": "input_file",
+                "filename": filename(format!("part-{index}")),
+                "file_data": media::data_to_data_url(data, mt),
+            }),
+        });
+    }
+    if mt.starts_with("text/") {
+        let text = text_file(part)?;
+        return Ok(json!({"type": if responses { "input_text" } else { "text" }, "text": text}));
+    }
+    Err(invalid(format!(
+        "OpenAI does not take {mt} files{}",
+        if responses {
+            " unless the option passThroughUnsupportedFiles is true"
+        } else {
+            ""
+        }
+    )))
 }
 fn text_file(part: &FilePart) -> Result<String, Error> {
     Ok(match &part.data {
@@ -580,6 +683,8 @@ pub(super) struct History<'a> {
     pub system_role: Option<&'static str>,
     /// Why a reasoning effort update cannot apply, when it cannot.
     pub update_blocked: Option<&'a str>,
+    /// `passThroughUnsupportedFiles`: send other files as `input_file`.
+    pub pass_through_files: bool,
 }
 
 impl<'a> History<'a> {
@@ -591,6 +696,7 @@ impl<'a> History<'a> {
             reasoning: profile::reasoning_model(model),
             system_role: Some("system"),
             update_blocked: None,
+            pass_through_files: false,
         }
     }
 }
@@ -665,12 +771,12 @@ pub(super) fn convert(
                     continue;
                 }
                 let mut content = vec![];
-                for p in msg.parts {
+                for (index, p) in msg.parts.into_iter().enumerate() {
                     match p {
                         Part::Text(t) => content.push(
                             json!({"type":if responses {"input_text"}else {"text"},"text":t.text}),
                         ),
-                        Part::File(f) => content.push(file(&f, wire)?),
+                        Part::File(f) => content.push(file(&f, index, wire, &history)?),
                         _ => {}
                     }
                 }
@@ -776,6 +882,10 @@ fn mistral_content(msg: &Message) -> Value {
 /// Whether the host needs a file of this media type inline, so that a media
 /// URL is downloaded first when the protocol has a download transport.
 fn downloads(wire: Wire, media_type: &str) -> bool {
+    // A Responses server fetches the URLs it takes, and refuses the others.
+    if matches!(wire, Wire::Responses(_)) {
+        return false;
+    }
     match dialect_of(wire) {
         Dialect::OpenAI => media_type.starts_with("audio/") || media_type == "application/pdf",
         Dialect::Moonshot => ["image/", "video/", "text/"]

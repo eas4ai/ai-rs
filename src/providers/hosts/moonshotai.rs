@@ -53,6 +53,7 @@ static PROFILE: ChatProfile = ChatProfile {
     ],
     dialect: Dialect::Moonshot,
     stream_error_kinds: true,
+    openai_own: false,
 };
 
 pub(super) static HOST: Host = Host {

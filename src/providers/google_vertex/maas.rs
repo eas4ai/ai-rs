@@ -46,6 +46,7 @@ static PROFILE: ChatProfile = ChatProfile {
     unsupported: &[],
     dialect: Dialect::VertexMaas,
     stream_error_kinds: false,
+    openai_own: false,
 };
 
 fn base_url(config: &ProviderConfig) -> Result<String, Error> {

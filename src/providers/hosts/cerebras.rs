@@ -42,6 +42,7 @@ static PROFILE: ChatProfile = ChatProfile {
     unsupported: &[],
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
+    openai_own: false,
 };
 
 pub(super) static HOST: Host = Host {
