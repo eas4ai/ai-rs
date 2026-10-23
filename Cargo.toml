@@ -1,9 +1,10 @@
 [package]
 name = "suprnova-ai"
 version = "0.1.0"
+authors = ["Shawn McAllister <@eas4ai>"]
 edition = "2024"
 rust-version = "1.95.0"
-description = "Inference core for the AI SDK Rust port"
+description = "Language models, model operations and agents for Rust, begun as a port of the Vercel AI SDK"
 license = "Apache-2.0"
 repository = "https://github.com/eas4ai/suprnova-ai-rs"
 
