@@ -35,6 +35,7 @@ same streams. It departs from Python only where a requirement says so.
 | agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency, run usage, stopping a run and the history of an interrupted run |
 | operations.md | OPS | the `ops` front ends: embeddings, images, video jobs, speech, transcription and its streaming form, speech translation, file uploads, batches, realtime sessions and the WebSocket transport, and evaluation on a language model |
 | google.md | GGL | the Gemini API: language models, buffered calls, embeddings, image generation, speech, transcription, speech translation, Veo video, the files API, batches, the Live API, the Interactions API and evaluation |
+| openai.md | OAI | OpenAI's own APIs: the tool calls of the history a Responses call sends |
 | vertex.md | VTX | Google Vertex AI: endpoints and authentication, Gemini on Vertex, embeddings, images, video, Chirp and Gemini speech, Cloud Speech-to-Text and Gemini transcription, the Interactions API, and the Anthropic, open-model and xAI partner providers |
 | hosts.md | HST | the hosted chat providers that use the Chat Completions, Responses or Messages protocol: Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI, Z.ai, xAI, Hugging Face and MiniMax; tool calls without an index in any Chat Completions stream; errors and terminal events in any Responses stream |
 

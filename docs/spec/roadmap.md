@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: google
+Current: openai-call-pairing
 
 ## rename-to-suprnova-ai
 
@@ -156,3 +156,23 @@ credentials here, are tested from recorded requests only.
 Done when the google, vertex, operations, identity and checks mechanisms
 pass for every requirement above, their receipts are current, and the
 review and the adversary report have no open findings.
+
+## openai-call-pairing
+
+Requirements: OAI-001, PKG-002, PKG-006
+
+Send each tool call of an assistant turn to OpenAI's Responses API as a full
+`function_call` item, never as a reference to a stored item, so that every
+`function_call_output` pairs with its call by `call_id`
+(`src/providers/openai/messages.rs`). Replace the test in
+`tests/providers_openai.rs` that asserts the reference. Add
+`tests/fixtures/README.md`, which says that
+`vertex-test-service-account-key.pem` is a key made only for the tests and
+signs in to nothing, and a `.gitleaks.toml` that allowlists that file. The
+tests of OAI-001 in `tests/spec_openai.rs` are named after it, and
+`scripts/check-openai.sh` reports its result through the shared
+`scripts/spec-tests.sh`.
+
+Done when the openai, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
