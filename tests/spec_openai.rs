@@ -3017,3 +3017,115 @@ async fn oai_015_a_compatible_server_takes_its_own_options() {
         );
     }
 }
+
+// OAI-016
+
+fn embeddings_reply(count: usize, tokens: u64) -> (u16, Vec<u8>) {
+    let data: Vec<Value> = (0..count)
+        .map(|index| json!({"object": "embedding", "index": index, "embedding": [0.5, index as f64]}))
+        .collect();
+    (
+        200,
+        json!({"object": "list", "data": data, "model": "text-embedding-3-small", "usage": {"prompt_tokens": tokens, "total_tokens": tokens}})
+            .to_string()
+            .into_bytes(),
+    )
+}
+fn embed_options(key: &str, options: Value) -> suprnova_ai::providers::operations::EmbedParams {
+    suprnova_ai::providers::operations::EmbedParams {
+        provider_options: [(key.to_owned(), options)].into(),
+    }
+}
+
+#[tokio::test]
+async fn oai_016_embeddings_go_out_as_typescript_sends_them() {
+    let transport = Recorder::new([embeddings_reply(2, 7)]);
+    let model = Model::new(
+        "text-embedding-3-small",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+    );
+    let item = suprnova_ai::ops::embed(
+        &model,
+        vec!["a".into(), "b".into()],
+        embed_options("openai", json!({"dimensions": 256, "user": "u"})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/embeddings");
+    assert_eq!(
+        transport.body(0),
+        json!({"model": "text-embedding-3-small", "input": ["a", "b"], "encoding_format": "float", "dimensions": 256, "user": "u"})
+    );
+    assert_eq!(item.value, vec![vec![0.5, 0.0], vec![0.5, 1.0]]);
+    assert_eq!(item.usage.unwrap().input_tokens, 7);
+    let error = suprnova_ai::ops::embed(
+        &model,
+        vec!["a".into()],
+        embed_options("openai", json!({"dimension": 256})),
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn oai_016_more_than_2048_values_split_into_calls() {
+    let transport = Recorder::new([embeddings_reply(2048, 1), embeddings_reply(1, 1)]);
+    let model = Model::new(
+        "text-embedding-3-small",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+    );
+    let values: Vec<String> = (0..2049).map(|n| n.to_string()).collect();
+    let item = suprnova_ai::ops::embed(&model, values, Default::default(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(item.value.len(), 2049);
+    let mut sizes: Vec<usize> = (0..2)
+        .map(|n| transport.body(n)["input"].as_array().unwrap().len())
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [1, 2048]);
+}
+
+#[tokio::test]
+async fn oai_016_a_compatible_server_has_its_own_limit_and_metadata() {
+    use suprnova_ai::providers::openai::OpenAIEmbeddingProtocol;
+    let mut reply = embeddings_reply(1, 3);
+    let mut body: Value = serde_json::from_slice(&reply.1).unwrap();
+    body["providerMetadata"] = json!({"my-server": {"region": "eu"}});
+    reply.1 = body.to_string().into_bytes();
+    let transport = Recorder::new([reply.clone(), reply]);
+    let metadata: suprnova_ai::providers::ModelsDevProvider = serde_json::from_value(
+        json!({"id": "my-server", "name": "my-server", "api": "https://local.test/v1", "env": [], "npm": "@ai-sdk/openai-compatible", "models": {}}),
+    )
+    .unwrap();
+    let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+        &metadata,
+        config_without_url(),
+        transport.clone(),
+    )
+    .unwrap();
+    let model = Model::new("nomic-embed", Arc::new(provider))
+        .with_protocol(Arc::new(OpenAIEmbeddingProtocol::compatible(1, false)));
+    let item = suprnova_ai::ops::embed(
+        &model,
+        vec!["a".into(), "b".into()],
+        embed_options("myServer", json!({"dimensions": 8})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
+    assert_eq!(url(&transport, 0), "https://local.test/v1/embeddings");
+    assert_eq!(transport.body(0)["dimensions"], 8);
+    assert_eq!(item.value.len(), 2);
+    assert_eq!(
+        item.provider_metadata.unwrap()["my-server"],
+        json!({"region": "eu"})
+    );
+}
