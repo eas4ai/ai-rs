@@ -105,14 +105,12 @@ fn items(body: &Value) -> &Vec<Value> {
 /// A history of a user turn, an assistant tool call `call_1` whose OpenAI
 /// metadata holds the item id `fc_1` and its raw item, and the call's result.
 fn history(raw: Value) -> Vec<Message> {
+    history_with(json!({"item_id": "fc_1", "raw_item": raw}))
+}
+/// The same history with this OpenAI metadata on the call.
+fn history_with(metadata: Value) -> Vec<Message> {
     let mut call = ToolCallPart::new("call_1", "weather", r#"{"city":"SF"}"#);
-    call.provider_metadata = Some(
-        [(
-            "openai".to_owned(),
-            json!({"item_id": "fc_1", "raw_item": raw}),
-        )]
-        .into(),
-    );
+    call.provider_metadata = Some([("openai".to_owned(), metadata)].into());
     vec![
         user("weather in SF?"),
         Message::new(MessageRole::Assistant, vec![Part::ToolCall(call)]),
@@ -164,14 +162,27 @@ fn oai_001_a_tool_call_is_sent_in_full_whether_or_not_responses_are_stored() {
 fn oai_001_a_tool_call_keeps_the_namespace_of_its_item() {
     let mut raw = raw_call();
     raw["namespace"] = json!("tools");
-    for value in [None, Some(false)] {
-        let body = body(history(raw.clone()), &store(value));
-        let call = items(&body)
-            .iter()
-            .find(|item| item["type"] == "function_call")
-            .unwrap_or_else(|| panic!("store {value:?} sent no function_call: {body}"));
-        assert_eq!(call["namespace"], "tools", "store {value:?}: {body}");
-        assert!(call.get("id").is_none(), "store {value:?}: {body}");
+    // The namespace on the raw item, as the crate's reader keeps it; on the
+    // metadata itself, as TypeScript keeps it; and a null one on the metadata
+    // above the raw item's.
+    let shapes = [
+        json!({"item_id": "fc_1", "raw_item": raw}),
+        json!({"itemId": "fc_1", "namespace": "tools"}),
+        json!({"item_id": "fc_1", "namespace": null, "raw_item": raw}),
+    ];
+    for metadata in shapes {
+        for value in [None, Some(true), Some(false)] {
+            let body = body(history_with(metadata.clone()), &store(value));
+            let call = items(&body)
+                .iter()
+                .find(|item| item["type"] == "function_call")
+                .unwrap_or_else(|| panic!("store {value:?} sent no function_call: {body}"));
+            assert_eq!(
+                call["namespace"], "tools",
+                "{metadata} with store {value:?}: {body}"
+            );
+            assert!(call.get("id").is_none(), "store {value:?}: {body}");
+        }
     }
 }
 
