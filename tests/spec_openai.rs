@@ -1966,3 +1966,252 @@ fn oai_009_chat_completions_function_tools_are_strict_only_when_marked() {
     assert_eq!(body["tools"][0]["function"].get("strict"), None, "{body}");
     assert_eq!(body["tools"][1]["function"]["strict"], true, "{body}");
 }
+
+// OAI-010
+
+/// A response that streams these output items, each added then done.
+fn items_reply(items: &[Value]) -> (u16, Vec<u8>) {
+    let mut events = vec![
+        json!({"type": "response.created", "response": {"id": "resp_h", "model": "gpt-5.4", "status": "in_progress"}}),
+    ];
+    for (index, item) in items.iter().enumerate() {
+        let mut added = item.clone();
+        added["status"] = json!("in_progress");
+        events.push(
+            json!({"type": "response.output_item.added", "output_index": index, "item": added}),
+        );
+        events.push(
+            json!({"type": "response.output_item.done", "output_index": index, "item": item}),
+        );
+    }
+    events.push(json!({"type": "response.completed", "response": {"id": "resp_h", "model": "gpt-5.4", "status": "completed", "output": items, "usage": {"input_tokens": 1, "output_tokens": 1}}}));
+    responses_sse(&events)
+}
+fn host_items() -> Vec<Value> {
+    vec![
+        json!({"type": "local_shell_call", "id": "lsh_1", "call_id": "call_ls", "status": "completed",
+               "action": {"type": "exec", "command": ["ls"], "timeout_ms": 1000}}),
+        json!({"type": "shell_call", "id": "sh_1", "call_id": "call_sh", "status": "completed",
+               "action": {"commands": ["ls"], "timeout_ms": null, "max_output_length": 100}}),
+        json!({"type": "apply_patch_call", "id": "ap_1", "call_id": "call_ap", "status": "completed",
+               "operation": {"type": "create_file", "path": "a.txt", "diff": "+a"}}),
+        json!({"type": "computer_call", "id": "cu_1", "call_id": "call_cu", "status": "completed",
+               "actions": [{"type": "click", "button": "left", "x": 1, "y": 2}], "pending_safety_checks": []}),
+        json!({"type": "custom_tool_call", "id": "ct_1", "call_id": "call_ct", "name": "sql", "input": "select 1"}),
+    ]
+}
+fn host_tools() -> Vec<Tool> {
+    use suprnova_ai::providers::openai::tools;
+    vec![
+        tools::local_shell(),
+        tools::shell(json!({})).unwrap(),
+        tools::apply_patch(),
+        tools::computer(),
+        tools::custom("sql", json!({})).unwrap(),
+    ]
+}
+
+#[tokio::test]
+async fn oai_010_calls_the_application_runs_are_delivered_as_tool_calls() {
+    let transport = Recorder::new([items_reply(&host_items())]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    );
+    let mut handle = suprnova_ai::stream(&model, vec![user("go")], with_tools(host_tools()));
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    let message = handle.message().clone();
+    assert!(
+        !message
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::BuiltinToolCall(_) | Part::BuiltinToolReturn(_))),
+        "{message:?}"
+    );
+    let calls: Vec<(String, String, Value)> = message
+        .tool_calls()
+        .into_iter()
+        .map(|c| {
+            (
+                c.tool_call_id.clone(),
+                c.tool_name.clone(),
+                serde_json::from_str(&c.tool_args).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            (
+                "call_ls".into(),
+                "local_shell".into(),
+                json!({"action": {"type": "exec", "command": ["ls"], "timeout_ms": 1000}})
+            ),
+            (
+                "call_sh".into(),
+                "shell".into(),
+                json!({"action": {"commands": ["ls"], "max_output_length": 100}})
+            ),
+            (
+                "call_ap".into(),
+                "apply_patch".into(),
+                json!({"call_id": "call_ap", "operation": {"type": "create_file", "path": "a.txt", "diff": "+a"}})
+            ),
+            (
+                "call_cu".into(),
+                "computer".into(),
+                json!({"actions": [{"type": "click", "button": "left", "x": 1, "y": 2}], "pending_safety_checks": [], "status": "completed"})
+            ),
+            ("call_ct".into(), "sql".into(), json!("select 1")),
+        ]
+    );
+    assert_eq!(handle.finish_reason(), Some("tool_call"));
+}
+
+#[tokio::test]
+async fn oai_010_a_shell_in_a_container_stays_a_built_in_call() {
+    let shell = suprnova_ai::providers::openai::tools::shell(
+        json!({"environment": {"type": "container_auto"}}),
+    )
+    .unwrap();
+    let transport = Recorder::new([items_reply(&host_items()[1..2])]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    );
+    let mut handle = suprnova_ai::stream(&model, vec![user("go")], with_tools(vec![shell]));
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    let message = handle.message().clone();
+    assert!(message.tool_calls().is_empty(), "{message:?}");
+    assert!(
+        message
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::BuiltinToolCall(c) if c.tool_name == "shell")),
+        "{message:?}"
+    );
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ShellInput {
+    #[allow(dead_code)]
+    action: Value,
+}
+
+#[tokio::test]
+async fn oai_010_an_agent_runs_a_provider_declared_tool() {
+    use suprnova_ai::agents::{Agent, AgentTool};
+    let shell =
+        AgentTool::new::<ShellInput, Value, _, _>("local_shell", "Run a command", |_, _| async {
+            Ok(json!({"output": "a.txt"}))
+        })
+        .unwrap()
+        .with_provider_declaration(suprnova_ai::providers::openai::tools::local_shell())
+        .unwrap();
+    let transport = Recorder::new([items_reply(&host_items()[..1]), text_reply()]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+    );
+    let mut run = Agent::new(vec![shell]).run(model, vec![user("list files")]);
+    while let Some(event) = run.next().await {
+        event.unwrap();
+    }
+    assert_eq!(transport.body(0)["tools"], json!([{"type": "local_shell"}]));
+    let body = transport.body(1);
+    assert_eq!(
+        items(&body)[1..],
+        [
+            json!({"type": "item_reference", "id": "lsh_1"}),
+            json!({"type": "local_shell_call_output", "call_id": "call_ls", "output": "a.txt"}),
+        ],
+        "{body}"
+    );
+    let named_otherwise =
+        AgentTool::new::<ShellInput, Value, _, _>("shell_x", "x", |_, _| async { Ok(json!(null)) })
+            .unwrap()
+            .with_provider_declaration(suprnova_ai::providers::openai::tools::local_shell());
+    assert!(named_otherwise.is_err());
+}
+
+#[test]
+fn oai_010_calls_and_results_go_back_as_their_own_items() {
+    let call = |id: &str, name: &str, args: Value| {
+        let mut call = ToolCallPart::new(id, name, args.to_string());
+        call.provider_metadata = md(json!({"item_id": format!("item_{id}")}));
+        Part::ToolCall(call)
+    };
+    let result =
+        |id: &str, name: &str, value: Value| Part::ToolResult(ToolResultPart::new(id, name, value));
+    let messages = vec![
+        user("go"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                call(
+                    "call_ap",
+                    "apply_patch",
+                    json!({"call_id": "call_ap", "operation": {"type": "delete_file", "path": "a"}}),
+                ),
+                call(
+                    "call_cu",
+                    "computer",
+                    json!({"actions": [], "pending_safety_checks": [], "status": "completed"}),
+                ),
+                call("call_ct", "sql", json!("select 1")),
+                call("call_sh", "shell", json!({"action": {"commands": ["ls"]}})),
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![
+                result(
+                    "call_ap",
+                    "apply_patch",
+                    json!({"status": "completed", "output": "done"}),
+                ),
+                result(
+                    "call_cu",
+                    "computer",
+                    json!({"output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AA=="}}),
+                ),
+                result("call_ct", "sql", json!("1 row")),
+                result(
+                    "call_sh",
+                    "shell",
+                    json!({"output": [{"stdout": "a", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}]}),
+                ),
+            ],
+        ),
+    ];
+    let options = with_tools(host_tools());
+    let body = body_for("gpt-5.4", messages.clone(), &options);
+    assert_eq!(references(&body, "item_call_ap"), 1, "{body}");
+    assert_eq!(
+        items(&body)[5..],
+        [
+            json!({"type": "apply_patch_call_output", "call_id": "call_ap", "status": "completed", "output": "done"}),
+            json!({"type": "computer_call_output", "call_id": "call_cu", "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AA=="}}),
+            json!({"type": "custom_tool_call_output", "call_id": "call_ct", "output": "1 row"}),
+            json!({"type": "shell_call_output", "call_id": "call_sh", "output": [{"stdout": "a", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}]}),
+        ],
+        "{body}"
+    );
+    let mut unstored = options.clone();
+    unstored.params = store(Some(false)).params;
+    let body = body_for("gpt-5.4", messages, &unstored);
+    assert_eq!(
+        items(&body)[1..5],
+        [
+            json!({"type": "apply_patch_call", "call_id": "call_ap", "id": "item_call_ap", "status": "completed", "operation": {"type": "delete_file", "path": "a"}}),
+            json!({"type": "computer_call", "call_id": "call_cu", "id": "item_call_cu", "status": "completed", "actions": [], "pending_safety_checks": []}),
+            json!({"type": "custom_tool_call", "call_id": "call_ct", "id": "item_call_ct", "name": "sql", "input": "select 1"}),
+            json!({"type": "shell_call", "call_id": "call_sh", "id": "item_call_sh", "status": "completed", "action": {"commands": ["ls"]}}),
+        ],
+        "{body}"
+    );
+}
