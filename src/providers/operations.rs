@@ -871,10 +871,66 @@ pub enum RealtimeServerEventKind {
         message: String,
         code: Option<String>,
     },
+    /// A session that starts once started, with who runs its delegations:
+    /// `client` or `provider`.
+    SessionStarted {
+        session_id: String,
+        delegation_mode: String,
+    },
+    /// A session closed, with the seconds it used and why.
+    SessionClosed {
+        session_id: Option<String>,
+        usage_seconds: f64,
+        reason: String,
+    },
+    /// The seconds a session used so far, and how full its context window is.
+    SessionUsage {
+        usage_seconds: f64,
+        context_window_usage_ratio: Option<f64>,
+    },
+    /// Base64 output audio of a continuous session.
+    AudioChunk {
+        delta: String,
+    },
+    /// Transcript text of the `user` or the `assistant`, with its time span.
+    TranscriptFragment {
+        speaker: String,
+        delta: String,
+        start_ms: f64,
+        end_ms: f64,
+    },
+    /// The model handed a task to the `client` or the `provider`.
+    DelegationCreated {
+        delegation_id: String,
+        target: Option<String>,
+        offset_ms: Option<f64>,
+        response_id: Option<String>,
+    },
+    /// The provider applied a client command, such as `session.input_audio.mute`.
+    CommandAcknowledged {
+        command: String,
+        client_event_id: Option<String>,
+    },
     /// A provider message with no normalized kind, by its provider name.
     Custom {
         raw_type: String,
     },
+}
+
+/// How a session starts on a server connection: with a session start, for
+/// a protocol whose sessions start once, or a session update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealtimeStartup {
+    SessionStart,
+    SessionUpdate,
+}
+
+/// A WebRTC session the provider created from an SDP offer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebRtcSession {
+    pub session_id: String,
+    /// The provider's SDP answer.
+    pub answer_sdp: String,
 }
 
 /// Turns normalized client events into provider messages and provider

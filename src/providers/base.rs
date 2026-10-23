@@ -338,6 +338,27 @@ pub trait ProviderProtocol: Send + Sync {
     ) -> Result<(WebSocketRequest, bool), Error> {
         Err(unsupported("realtime"))
     }
+
+    /// The WebSocket a server opens with the provider's own credentials,
+    /// and how a session starts on it (OPS-014).
+    fn realtime_server_connection(
+        &self,
+        _model: &Model,
+        _provider: &dyn Provider,
+    ) -> Result<(WebSocketRequest, RealtimeStartup), Error> {
+        Err(unsupported("realtime server connection"))
+    }
+
+    /// Create a WebRTC session from a client's SDP offer (OPS-014).
+    async fn create_webrtc_session(
+        &self,
+        _model: &Model,
+        _offer_sdp: String,
+        _config: RealtimeSessionConfig,
+        _provider: &dyn Provider,
+    ) -> Result<WebRtcSession, Error> {
+        Err(unsupported("webrtc session"))
+    }
 }
 
 /// Implement a provider to own a transport and select a default wire protocol.
