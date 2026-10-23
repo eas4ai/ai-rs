@@ -5061,3 +5061,167 @@ async fn oai_027_another_property_names_fails_before_a_request() {
     );
     assert!(transport.requests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn oai_003_every_operation_uses_its_path_key_organization_and_project() {
+    use suprnova_ai::providers::openai::{OpenAICompletionsProtocol, OpenAIDecisionsProtocol};
+    use suprnova_ai::providers::operations::{
+        AudioParams, BatchParams, ImagePrompt, MediaInput, SkillFile, SkillParams,
+        TranscribeParams, UploadFile, UploadParams,
+    };
+    let transport = Recorder::new([
+        completion_stream(&["a"], "stop"),
+        embeddings_reply(1, 1),
+        images_reply(1, 0),
+        images_reply(1, 0),
+        (200, vec![1]),
+        transcription_reply(json!({"text": "hi"})),
+        json_reply(file_object()),
+        json_reply(json!({"id": "skill_1"})),
+        json_reply(json!({"id": "file-in"})),
+        json_reply(batch_object("validating")),
+        json_reply(json!({"value": "ek_1"})),
+        json_reply(
+            json!({"session": {"id": "s1"}, "transport": {"type": "webrtc", "sdp": "answer"}}),
+        ),
+        json_reply(
+            json!({"answers": [{"type": "predicate", "name": "urgent", "probability": 0.5}]}),
+        ),
+    ]);
+    let provider = Arc::new(OpenAICompatibleProvider::new(
+        org_config(),
+        transport.clone(),
+    ));
+    let model = |id: &str| Model::new(id, provider.clone());
+    let none = || suprnova_ai::ops::OperationOptions::default();
+    run(
+        &model("gpt-3.5-turbo-instruct").with_protocol(Arc::new(OpenAICompletionsProtocol::new())),
+        StreamOptions::default(),
+    )
+    .await
+    .unwrap();
+    suprnova_ai::ops::embed(
+        &model("text-embedding-3-small"),
+        vec!["a".into()],
+        Default::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    suprnova_ai::ops::generate_image(
+        &model("gpt-image-1"),
+        text_prompt("a cat"),
+        Default::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    let edit = ImagePrompt {
+        text: Some("hat".into()),
+        images: vec![MediaInput::Bytes(vec![1])],
+        mask: None,
+    };
+    suprnova_ai::ops::generate_image(&model("gpt-image-1"), edit, Default::default(), none())
+        .await
+        .unwrap();
+    suprnova_ai::ops::generate_audio(
+        &model("tts-1"),
+        speech_prompt("hi"),
+        AudioParams::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    suprnova_ai::ops::transcribe(
+        &model("whisper-1"),
+        mp3(),
+        TranscribeParams::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    let file = UploadFile {
+        data: Bytes::from_static(b"x"),
+        media_type: "text/plain".into(),
+        filename: Some("x.txt".into()),
+    };
+    suprnova_ai::ops::upload_file(provider.as_ref(), file, UploadParams::default(), none())
+        .await
+        .unwrap();
+    let skill = vec![SkillFile {
+        path: "s/SKILL.md".into(),
+        data: Bytes::from_static(b"# S"),
+    }];
+    suprnova_ai::ops::upload_skill(provider.as_ref(), skill, SkillParams::default(), none())
+        .await
+        .unwrap();
+    suprnova_ai::ops::batch::start(
+        provider.as_ref(),
+        vec![text_request("r1", "gpt-4.1")],
+        BatchParams::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    suprnova_ai::ops::realtime::create_token(&model("gpt-realtime"), Default::default(), none())
+        .await
+        .unwrap();
+    suprnova_ai::ops::realtime::create_webrtc_session(
+        &model("gpt-live-1"),
+        "offer".into(),
+        Default::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    let urgent: std::collections::BTreeMap<String, Question> = decision_questions()
+        .into_iter()
+        .filter(|(id, _)| id == "urgent")
+        .collect();
+    suprnova_ai::ops::experimental::evaluate(
+        &model("gpt-6-luna").with_protocol(Arc::new(OpenAIDecisionsProtocol)),
+        EvaluationInput::Text("x".into()),
+        urgent,
+        EvaluationParams::default(),
+        none(),
+    )
+    .await
+    .unwrap();
+    let paths = [
+        "/completions",
+        "/embeddings",
+        "/images/generations",
+        "/images/edits",
+        "/audio/speech",
+        "/audio/transcriptions",
+        "/files",
+        "/skills",
+        "/files",
+        "/batches",
+        "/realtime/client_secrets",
+        "/live/sessions",
+        "/decisions",
+    ];
+    assert_eq!(transport.requests.lock().unwrap().len(), paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        assert_eq!(
+            url(&transport, index),
+            format!("https://api.openai.com/v1{path}")
+        );
+        assert_eq!(
+            header(&transport, index, "authorization").as_deref(),
+            Some("Bearer sk-test"),
+            "{path}"
+        );
+        assert_eq!(
+            header(&transport, index, "OpenAI-Organization").as_deref(),
+            Some("org_1"),
+            "{path}"
+        );
+        assert_eq!(
+            header(&transport, index, "OpenAI-Project").as_deref(),
+            Some("proj_1"),
+            "{path}"
+        );
+    }
+}
