@@ -110,19 +110,68 @@ pub async fn connect_server(
     model: &Model,
     config: RealtimeSessionConfig,
 ) -> Result<RealtimeConnection, Error> {
-    let _ = (model, config);
-    Err(Error::UnsupportedOperation("connect_server is not built".into()))
+    let protocol = protocol_of(model)?;
+    let (request, startup) = protocol.realtime_server_connection(model, model.provider.as_ref())?;
+    let codec = Arc::new(Mutex::new(protocol.realtime_codec(model)?));
+    let first = match startup {
+        RealtimeStartup::SessionStart => RealtimeClientEvent::SessionStart(config),
+        RealtimeStartup::SessionUpdate => RealtimeClientEvent::SessionUpdate(config),
+    };
+    // Encode the setup before connecting, so a setup the protocol refuses
+    // opens no socket.
+    let setup = lock(&codec).encode(&first)?;
+    let transport = model.provider.websocket().ok_or_else(|| {
+        Error::Configuration(format!(
+            "provider {:?} has no WebSocket transport for realtime sessions",
+            model.provider.name()
+        ))
+    })?;
+    let provider = model.provider.name().to_owned();
+    let mut socket = transport
+        .connect(request)
+        .await
+        .map_err(|error| connection_error(&provider, error))?;
+    if let Some(setup) = setup {
+        socket
+            .sender
+            .send(WebSocketMessage::Text(setup))
+            .await
+            .map_err(|error| connection_error(&provider, error))?;
+    }
+    Ok(RealtimeConnection {
+        sender: RealtimeSender {
+            sender: socket.sender,
+            codec: codec.clone(),
+            provider: provider.clone(),
+        },
+        events: RealtimeEvents {
+            receiver: socket.receiver,
+            codec,
+            pending: VecDeque::new(),
+            provider,
+        },
+    })
 }
 
-/// Create a WebRTC session from a client's SDP offer (OPS-014). Not built yet.
+/// Create a WebRTC session from a client's SDP offer and a session
+/// configuration through the protocol; the session id and the SDP answer
+/// (OPS-014).
 pub async fn create_webrtc_session(
     model: &Model,
     offer_sdp: String,
     config: RealtimeSessionConfig,
     options: OperationOptions,
 ) -> Result<WebRtcSession, Error> {
-    let _ = (model, offer_sdp, config, options);
-    Err(Error::UnsupportedOperation("create_webrtc_session is not built".into()))
+    let protocol = protocol_of(model)?;
+    with_retries(&options.retry, || {
+        protocol.create_webrtc_session(
+            model,
+            offer_sdp.clone(),
+            config.clone(),
+            model.provider.as_ref(),
+        )
+    })
+    .await
 }
 
 /// An open realtime session: send client events and read server events.
