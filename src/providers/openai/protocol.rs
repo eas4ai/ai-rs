@@ -1,5 +1,5 @@
 use super::{
-    dialect, messages, params,
+    chat, dialect, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
     responses, streaming,
 };
@@ -298,6 +298,11 @@ pub(crate) fn wire_request(
         }
         _ => None,
     };
+    // As does OpenAI's own Chat Completions API.
+    let chat_call = match wire {
+        Wire::Chat(profile) if profile.openai_own => Some(chat::ChatCall::new(model, &p)?),
+        _ => None,
+    };
     let mut body = params::build(&p, wire)?;
     match wire {
         Wire::Chat(profile) => dialect::request(profile, model, &p, &mut body),
@@ -305,6 +310,9 @@ pub(crate) fn wire_request(
     }
     if let Some(call) = &call {
         call.apply(model, &p, &mut body);
+    }
+    if let Some(chat_call) = &chat_call {
+        chat_call.apply(model, &mut body);
     }
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
@@ -327,7 +335,14 @@ pub(crate) fn wire_request(
             quoted_results: &quoted_results,
             host_tools: &host_tools,
         },
-        None => messages::History::plain(model, use_references),
+        None => match &chat_call {
+            Some(chat_call) => messages::History {
+                reasoning: chat_call.reasoning,
+                system_role: chat_call.system_role(),
+                ..messages::History::plain(model, use_references)
+            },
+            None => messages::History::plain(model, use_references),
+        },
     };
     let mut converted = messages::convert(messages, wire, history)?;
     if let Some(call) = &call {
@@ -429,7 +444,8 @@ pub(crate) fn wire_request(
             }
             Wire::Chat(profile) if profile.sends_json_schema(model) => {
                 let schema = strict_output_schema(schema)?;
-                body.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":name,"schema":schema,"strict":true}}));
+                let strict = chat_call.as_ref().is_none_or(chat::ChatCall::strict);
+                body.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":name,"schema":schema,"strict":strict}}));
             }
             Wire::Chat(_) => {
                 body.insert("response_format".into(), json!({"type":"json_object"}));
