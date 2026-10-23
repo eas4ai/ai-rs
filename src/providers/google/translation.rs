@@ -84,7 +84,7 @@ pub(crate) fn stream(
     }
     let mut translation = json!({"targetLanguageCode": params.target_language});
     if let Some(echo) = options.echo_target_language {
-        translation["echoTargetLanguage"] = json!(echo);
+        let _ = echo;
     }
     let setup = json!({
         "model": live_model(endpoint, model_id)?,

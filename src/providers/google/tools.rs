@@ -215,7 +215,7 @@ pub(crate) fn prepare(
         None => None,
         Some(ToolChoice::Auto) => Some(json!({"mode": "AUTO"})),
         Some(ToolChoice::None) => Some(json!({"mode": "NONE"})),
-        Some(ToolChoice::Required) => Some(json!({"mode": "ANY"})),
+        Some(ToolChoice::Required) => Some(json!({"mode": "AUTO"})),
         Some(ToolChoice::Tool(tool)) => {
             Some(json!({"mode": "ANY", "allowedFunctionNames": [tool.0]}))
         }

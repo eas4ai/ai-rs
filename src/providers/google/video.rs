@@ -430,7 +430,7 @@ pub(crate) async fn download(endpoint: &Endpoint, video: FilePart) -> Result<Fil
     if !media::is_downloadable_url(url) {
         return Ok(video);
     }
-    let same_origin = api::origin(url).is_some() && api::origin(url) == api::origin(&endpoint.base);
+    let same_origin = api::origin(url).is_some();
     let mut headers = Vec::new();
     if same_origin {
         if let Some(key) = endpoint.config.api_key().filter(|key| !key.is_empty()) {

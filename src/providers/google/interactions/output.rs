@@ -47,7 +47,7 @@ pub(crate) fn finish_reason(status: Option<&str>, has_function_call: bool) -> &'
         Some("completed") => "stop",
         Some("requires_action") => "tool_call",
         Some("failed") => "error",
-        Some("incomplete") => "length",
+        Some("incomplete") => "other",
         _ => "other",
     }
 }

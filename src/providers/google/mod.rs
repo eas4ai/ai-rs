@@ -192,7 +192,10 @@ impl ProviderProtocol for GeminiProtocol {
             state,
             questions,
             params,
-            |messages, options| async move { call.generate(messages, &options).await },
+            |messages, mut options: StreamOptions| async move {
+                options.output_schema = None;
+                call.generate(messages, &options).await
+            },
         )
         .await
     }
@@ -570,7 +573,7 @@ pub fn register_provider(
 ) -> Result<(), Error> {
     let mut next = registry.clone();
     let shared = Arc::new(provider.clone());
-    for handle in ["google", "@ai-sdk/google"] {
+    for handle in ["google"] {
         next.register(handle, shared.clone())?;
     }
     let template = provider.clone();

@@ -308,7 +308,7 @@ fn tools(
     let choice = match choice {
         Some(choice) if has_function => Some(match choice {
             ToolChoice::Auto => json!("auto"),
-            ToolChoice::Required => json!("any"),
+            ToolChoice::Required => json!("required"),
             ToolChoice::None => json!("none"),
             ToolChoice::Tool(tool) => {
                 json!({"allowed_tools": {"mode": "validated", "tools": [tool.0]}})
@@ -422,7 +422,7 @@ fn merge_texts(content: Vec<Value>) -> Vec<Value> {
             && last.get("annotations").is_none()
         {
             let text = format!(
-                "{}\n\n{}",
+                "{}\n{}",
                 last["text"].as_str().unwrap_or_default(),
                 block["text"].as_str().unwrap_or_default()
             );

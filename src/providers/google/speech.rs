@@ -28,7 +28,7 @@ use crate::{
     types::messages::{FileData, FilePart, generate_id},
 };
 
-const DEFAULT_VOICE: &str = "Kore";
+const DEFAULT_VOICE: &str = "Puck";
 const DEFAULT_SAMPLE_RATE: u32 = 24000;
 
 #[derive(Debug, Default, Deserialize)]

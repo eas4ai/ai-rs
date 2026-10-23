@@ -347,7 +347,7 @@ pub(crate) fn connection(token: &RealtimeToken) -> Result<(WebSocketRequest, boo
     Ok((
         WebSocketRequest {
             url: token.url.clone(),
-            headers: vec![("authorization".into(), format!("Token {}", token.token))],
+            headers: vec![("authorization".into(), format!("Bearer {}", token.token))],
         },
         true,
     ))
@@ -579,7 +579,7 @@ impl Codec {
             }
             events.push(event(RealtimeServerEventKind::ResponseDone {
                 response_id,
-                status: "completed".into(),
+                status: "done".into(),
             }));
             self.turn_closed = true;
             if self.preserve_input {
@@ -624,7 +624,7 @@ impl RealtimeCodec for Codec {
                 "mimeType": format!("audio/pcm;rate={}", self.rate),
             }}}),
             RealtimeClientEvent::InputAudioCommit => {
-                json!({"realtimeInput": {"audioStreamEnd": true}})
+                json!({"realtimeInput": {"audioEnd": true}})
             }
             RealtimeClientEvent::ConversationItemCreate(RealtimeItem::Text(text)) => {
                 json!({"realtimeInput": {"text": text}})

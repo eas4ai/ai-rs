@@ -186,10 +186,7 @@ impl Call {
                 .await?;
             reader.headers(&headers);
             match reader.chunk(&value)? {
-                Some(token) => {
-                    reader.start_continuation();
-                    body.insert("continuationToken".into(), json!(token));
-                }
+                Some(_) => break,
                 None => break,
             }
         }

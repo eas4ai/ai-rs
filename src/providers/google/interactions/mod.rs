@@ -68,7 +68,7 @@ use crate::{
 /// The protocol class id of the Interactions protocols in snapshots.
 pub(crate) const CLASS_ID: &str = "google_interactions";
 
-const FIRST_POLL: Duration = Duration::from_secs(1);
+const FIRST_POLL: Duration = Duration::from_secs(2);
 const MAX_POLL: Duration = Duration::from_secs(10);
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Consecutive failed attempts after which a background stream gives up.
