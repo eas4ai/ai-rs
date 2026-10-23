@@ -123,7 +123,9 @@ async fn request_endpoints_system_roles_and_input() {
         } else {
             assert_eq!(
                 b["input"],
-                json!([{"role":"system","content":"rules"},{"role":"user","content":[{"type":"input_text","text":"Hi"}]}])
+                // gpt-5.4 is a reasoning model, whose system messages go
+                // out as developer messages (OAI-005).
+                json!([{"role":"developer","content":"rules"},{"role":"user","content":[{"type":"input_text","text":"Hi"}]}])
             );
             assert!(b.get("messages").is_none());
         }
@@ -1290,7 +1292,7 @@ async fn common_params_and_allowed_tool_choices() {
                 json!({"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"a"}},{"type":"function","function":{"name":"z"}}]}})
             );
         } else {
-            assert_eq!(b["reasoning"], json!({"effort":"none","summary":null}));
+            assert_eq!(b["reasoning"], json!({"effort":"none"}));
             assert_eq!(b["text"]["verbosity"], Value::Null);
             assert_eq!(
                 b["tool_choice"],

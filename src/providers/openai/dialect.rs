@@ -70,26 +70,8 @@ pub(super) fn responses_request(
 ) {
     match profile.dialect {
         ResponsesDialect::Xai => xai_request(model, body),
-        // An unstored response of a reasoning model needs its reasoning back
-        // as encrypted content (OAI-002).
-        ResponsesDialect::OpenAI => {
-            if body.get("store") == Some(&Value::Bool(false))
-                && super::profile::reasoning_model(model)
-            {
-                include(body, "reasoning.encrypted_content");
-            }
-        }
-        ResponsesDialect::HuggingFace => {}
-    }
-}
-
-/// Add a value to the body's `include` list once.
-fn include(body: &mut Map<String, Value>, value: &str) {
-    let include = body.entry("include").or_insert_with(|| json!([]));
-    if let Some(include) = include.as_array_mut()
-        && !include.iter().any(|v| v == value)
-    {
-        include.push(json!(value));
+        // OpenAI's own rules are in `responses.rs`.
+        ResponsesDialect::OpenAI | ResponsesDialect::HuggingFace => {}
     }
 }
 
@@ -112,7 +94,7 @@ fn xai_request(model: &str, body: &mut Map<String, Value>) {
         Some(Value::Bool(true)) => {
             body.remove("store");
         }
-        Some(Value::Bool(false)) => include(body, "reasoning.encrypted_content"),
+        Some(Value::Bool(false)) => super::responses::include(body, "reasoning.encrypted_content"),
         _ => {}
     }
 }
