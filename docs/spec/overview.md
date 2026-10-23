@@ -2,10 +2,10 @@
 
 suprnova-ai is a Rust library crate. It ports the AI SDK for Python 0.8.0
 (`https://github.com/vercel-labs/ai-python`) to Rust. It covers model
-references, streaming and generation, OpenAI-compatible and
-Anthropic-compatible provider adapters and the hosted providers that use
-them, a tool-calling agent loop, and an adapter for Vercel AI SDK v6 UI
-messages. Its repository is
+references, streaming and generation, model operations beyond chat,
+OpenAI-compatible, Anthropic-compatible and Google provider adapters and
+the hosted providers that use them, Google Vertex AI, a tool-calling agent
+loop, and an adapter for Vercel AI SDK v6 UI messages. Its repository is
 `https://github.com/eas4ai/suprnova-ai-rs`.
 
 ## The problem
@@ -33,6 +33,9 @@ same streams. It departs from Python only where a requirement says so.
 | package.md | PKG | package, library and repository names, the upstream credit, the origin remote and the check script |
 | models.md | MOD | model ids, model snapshots, retries, timeouts and dropping a call, the time limits of the reqwest transport, and the scripted test provider |
 | agents.md | AGT | step checks that steer or stop an agent run, why a run stopped, unknown tool calls, tool concurrency, run usage, stopping a run and the history of an interrupted run |
+| operations.md | OPS | the `ops` front ends: embeddings, images, video jobs, speech, transcription and its streaming form, speech translation, file uploads, batches, realtime sessions and the WebSocket transport, and evaluation on a language model |
+| google.md | GGL | the Gemini API: language models, buffered calls, embeddings, image generation, speech, transcription, speech translation, Veo video, the files API, batches, the Live API, the Interactions API and evaluation |
+| vertex.md | VTX | Google Vertex AI: endpoints and authentication, Gemini on Vertex, embeddings, images, video, Chirp and Gemini speech, Cloud Speech-to-Text and Gemini transcription, the Interactions API, and the Anthropic, open-model and xAI partner providers |
 | hosts.md | HST | the hosted chat providers that use the Chat Completions, Responses or Messages protocol: Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral, Moonshot AI, Together AI, Z.ai, xAI, Hugging Face and MiniMax; tool calls without an index in any Chat Completions stream; errors and terminal events in any Responses stream |
 
 ## Not yet specified

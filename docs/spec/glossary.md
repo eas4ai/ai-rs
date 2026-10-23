@@ -83,3 +83,26 @@ server-sent events.
 **Check script.** `scripts/check.sh`. It runs the format check, the builds
 and tests with no features and with all features, clippy and rustdoc, with
 warnings denied.
+
+**Thought signature.** An opaque `thoughtSignature` that a Gemini model returns
+with a part of its response. The part's metadata keeps it under `google`, and
+the history sends it back with that part, as Gemini 3 requires for tool calls.
+
+**Express Mode.** Vertex AI access with an API key instead of Google Cloud
+credentials. Requests go to the global host and send the key as
+`x-goog-api-key`.
+
+**Live API.** Gemini's WebSocket API for realtime sessions, live
+transcription and speech translation.
+
+**Interactions API.** Gemini's stateful generation API (`/interactions`). It
+runs models and agents, keeps a server-side record of each interaction, and
+can run in the background.
+
+**Access token source.** An application-supplied object that returns a
+Google OAuth access token for Vertex AI. It needs no crate feature.
+
+**Vertex auth headers.** The headers that sign a Vertex AI request in: the
+`authorization` header and, when the credentials name a quota project,
+`x-goog-user-project`. The feature `google-auth` gets them from Google's
+`google-cloud-auth` crate, which also finds application default credentials.

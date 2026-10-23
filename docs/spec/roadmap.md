@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: responses-hosts
+Current: google
 
 ## rename-to-suprnova-ai
 
@@ -121,3 +121,38 @@ one result per requirement through the shared `scripts/spec-tests.sh`.
 Done when the hosts, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
 adversary report have no open findings.
+
+## google
+
+Requirements: GGL-001, GGL-002, GGL-003, GGL-004, GGL-005, GGL-006, GGL-007, GGL-008, GGL-009, GGL-010, GGL-011, GGL-012, GGL-013, GGL-014, GGL-015, GGL-016, GGL-017, GGL-018, GGL-019, GGL-020, GGL-021, GGL-022, GGL-023, GGL-024, GGL-025, GGL-026, GGL-027, GGL-028, GGL-029, GGL-030, GGL-031, GGL-032, VTX-001, VTX-002, VTX-003, VTX-004, VTX-005, VTX-006, VTX-007, VTX-008, VTX-009, VTX-010, VTX-011, VTX-012, VTX-013, VTX-014, VTX-015, OPS-001, OPS-002, OPS-003, OPS-004, OPS-005, OPS-006, OPS-007, OPS-008, OPS-009, OPS-010, OPS-011, PKG-002, PKG-006
+
+Port Google whole: every model kind of the AI SDK for TypeScript 7.0.148
+packages `@ai-sdk/google` and `@ai-sdk/google-vertex`. Add `suprnova_ai::ops`
+with its front ends for embeddings, images, video jobs, speech,
+transcription and its streaming form, speech translation, file uploads,
+batches, realtime sessions and evaluation, and a `WebSocketTransport` trait
+with a tokio-tungstenite implementation behind a feature. Add
+`providers::google` for the Gemini API: language models streamed and
+buffered, with thinking, thought signatures, schemas, files, tools and
+grounding; embeddings, Gemini image generation, speech, transcription,
+speech translation, Veo video, the files API, batches, the Live API with
+ephemeral tokens and the realtime codec, the Interactions API with its
+agents, background runs and stream reconnection, and evaluation. Add
+`providers::google_vertex` for Vertex AI: Express Mode keys, credentials
+from Google's `google-cloud-auth` crate behind the `google-auth` feature or
+an access token source; Gemini, embeddings, images, video, Chirp and Gemini
+speech, Cloud Speech-to-Text and Gemini transcription and Interactions on
+Vertex; and the Anthropic, open-model and xAI partner providers. Media
+responses read up to 256 MiB. The crate reads no environment. Update
+`README.md`, `docs/PORT.md` and the provider docs. Each requirement's tests
+in `tests/spec_google.rs`, `tests/spec_vertex.rs` and
+`tests/spec_operations.rs` are named after it; `scripts/check-google.sh`,
+`scripts/check-vertex.sh` and `scripts/check-operations.sh` report one
+result per requirement through the shared `scripts/spec-tests.sh`. Live
+tests use free-tier Gemini models only; the paid-only models (Veo, the
+Gemini and Imagen image models, Pro speech) and Vertex AI, which has no
+credentials here, are tested from recorded requests only.
+
+Done when the google, vertex, operations, identity and checks mechanisms
+pass for every requirement above, their receipts are current, and the
+review and the adversary report have no open findings.
