@@ -1,5 +1,5 @@
 use super::{
-    chat, dialect, embedding, messages, params,
+    chat, dialect, embedding, images, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
     responses, streaming,
 };
@@ -8,15 +8,70 @@ use crate::{
     models::params::{ExtraHeaderValue, InferenceRequestParams},
     providers::{
         EventStream, http,
-        operations::{CallLimits, EmbedParams, Item},
+        operations::{CallLimits, EmbedParams, ImageParams, ImagePrompt, Item},
     },
     transport::HttpRequest,
-    types::{Message, ToolChoice},
+    types::{Message, ToolChoice, messages::FilePart},
 };
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+/// The `ProviderProtocol` of one of OpenAI's language model protocols: its
+/// class id, its stream on `wire` with the downloads `|this|` gives, and the
+/// operations they share: embeddings (OAI-016) and images (OAI-017).
+macro_rules! openai_protocol {
+    ($ty:ty, $class:expr, $wire:expr, |$this:ident| $downloads:expr) => {
+        #[async_trait]
+        impl ProviderProtocol for $ty {
+            fn protocol_class_id(&self) -> &str {
+                $class
+            }
+            fn stream(
+                &self,
+                model: &Model,
+                messages: Vec<Message>,
+                options: StreamOptions,
+                provider: &dyn Provider,
+            ) -> EventStream {
+                let $this = self;
+                start(model, messages, options, provider, $wire, $downloads)
+            }
+            async fn embed(
+                &self,
+                model: &Model,
+                values: Vec<String>,
+                params: EmbedParams,
+                provider: &dyn Provider,
+            ) -> Result<Item<Vec<Vec<f64>>>, Error> {
+                embedding::embed(
+                    embedding::OpenAIEmbeddingProtocol::new(),
+                    model,
+                    values,
+                    params,
+                    provider,
+                )
+                .await
+            }
+            fn embed_limits(&self, _model: &Model) -> CallLimits {
+                embedding::openai_limits()
+            }
+            async fn generate_image(
+                &self,
+                model: &Model,
+                prompt: ImagePrompt,
+                params: ImageParams,
+                provider: &dyn Provider,
+            ) -> Result<Item<Vec<FilePart>>, Error> {
+                images::generate(model, prompt, params, provider).await
+            }
+            fn image_limits(&self, model: &Model) -> CallLimits {
+                images::limits(model)
+            }
+        }
+    };
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpenAIChatCompletionsProtocol;
@@ -115,88 +170,6 @@ impl ProviderProtocol for HostChatProtocol {
         )
     }
 }
-#[async_trait]
-impl ProviderProtocol for OpenAIChatCompletionsProtocol {
-    async fn embed(
-        &self,
-        model: &Model,
-        values: Vec<String>,
-        params: EmbedParams,
-        provider: &dyn Provider,
-    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
-        embedding::embed(
-            embedding::OpenAIEmbeddingProtocol::new(),
-            model,
-            values,
-            params,
-            provider,
-        )
-        .await
-    }
-    fn embed_limits(&self, _model: &Model) -> CallLimits {
-        embedding::openai_limits()
-    }
-    fn protocol_class_id(&self) -> &str {
-        profile::OPENAI.protocol_class_id
-    }
-    fn stream(
-        &self,
-        model: &Model,
-        messages: Vec<Message>,
-        options: StreamOptions,
-        provider: &dyn Provider,
-    ) -> EventStream {
-        start(
-            model,
-            messages,
-            options,
-            provider,
-            Wire::Chat(&profile::OPENAI),
-            None,
-        )
-    }
-}
-#[async_trait]
-impl ProviderProtocol for OpenAIResponsesProtocol {
-    async fn embed(
-        &self,
-        model: &Model,
-        values: Vec<String>,
-        params: EmbedParams,
-        provider: &dyn Provider,
-    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
-        embedding::embed(
-            embedding::OpenAIEmbeddingProtocol::new(),
-            model,
-            values,
-            params,
-            provider,
-        )
-        .await
-    }
-    fn embed_limits(&self, _model: &Model) -> CallLimits {
-        embedding::openai_limits()
-    }
-    fn protocol_class_id(&self) -> &str {
-        "openai_responses"
-    }
-    fn stream(
-        &self,
-        model: &Model,
-        messages: Vec<Message>,
-        options: StreamOptions,
-        provider: &dyn Provider,
-    ) -> EventStream {
-        start(
-            model,
-            messages,
-            options,
-            provider,
-            Wire::Responses(&profile::OPENAI_RESPONSES),
-            None,
-        )
-    }
-}
 /// Chat Completions with explicit public-network media downloads.
 /// Download transports must honor the core DNS-pinning contract. Runtime transports
 /// are not serialized; configure downloads again after restoring a snapshot.
@@ -212,47 +185,24 @@ impl OpenAIChatCompletionsProtocol {
         OpenAIChatCompletionsWithDownloads { downloads }
     }
 }
-#[async_trait]
-impl ProviderProtocol for OpenAIChatCompletionsWithDownloads {
-    async fn embed(
-        &self,
-        model: &Model,
-        values: Vec<String>,
-        params: EmbedParams,
-        provider: &dyn Provider,
-    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
-        embedding::embed(
-            embedding::OpenAIEmbeddingProtocol::new(),
-            model,
-            values,
-            params,
-            provider,
-        )
-        .await
-    }
-    fn embed_limits(&self, _model: &Model) -> CallLimits {
-        embedding::openai_limits()
-    }
-    fn protocol_class_id(&self) -> &str {
-        profile::OPENAI.protocol_class_id
-    }
-    fn stream(
-        &self,
-        model: &Model,
-        messages: Vec<Message>,
-        options: StreamOptions,
-        provider: &dyn Provider,
-    ) -> EventStream {
-        start(
-            model,
-            messages,
-            options,
-            provider,
-            Wire::Chat(&profile::OPENAI),
-            Some(self.downloads.clone()),
-        )
-    }
-}
+openai_protocol!(
+    OpenAIChatCompletionsProtocol,
+    profile::OPENAI.protocol_class_id,
+    Wire::Chat(&profile::OPENAI),
+    |_this| None
+);
+openai_protocol!(
+    OpenAIResponsesProtocol,
+    "openai_responses",
+    Wire::Responses(&profile::OPENAI_RESPONSES),
+    |_this| None
+);
+openai_protocol!(
+    OpenAIChatCompletionsWithDownloads,
+    profile::OPENAI.protocol_class_id,
+    Wire::Chat(&profile::OPENAI),
+    |this| Some(this.downloads.clone())
+);
 fn start(
     model: &Model,
     messages: Vec<Message>,

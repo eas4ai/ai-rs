@@ -33,6 +33,7 @@ mod completions;
 mod dialect;
 mod embedding;
 pub mod errors;
+mod images;
 mod messages;
 mod options;
 pub mod params;
