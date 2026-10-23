@@ -223,8 +223,10 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   with `Error::Validation`, where TypeScript drops them with a warning.
   Settings OpenAI takes for other models only are left out and logged as a
   `tracing` debug event with target `suprnova_ai::openai`, which names the
-  setting and the model. A `text/*` file goes as `input_text` unless the
-  option `passThroughUnsupportedFiles` sends it as a file. An MCP approval
+  setting and the model. On Responses a `text/*` file goes as `input_text`
+  unless the option `passThroughUnsupportedFiles` sends it as a file; OpenAI's
+  Chat Completions API refuses it, as TypeScript does, where Python sends it
+  as text. An MCP approval
   request is a pending `ToolApproval` hook. Tools the application runs, such
   as `local_shell`, `shell` with a local environment, `apply_patch`,
   `computer` and custom tools, are tool calls an agent runs through
