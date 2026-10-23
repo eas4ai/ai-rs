@@ -2467,3 +2467,68 @@ async fn oai_011_a_stream_cut_after_text_fails_as_incomplete() {
         suprnova_ai::errors::ProviderErrorKind::IncompleteResponse
     );
 }
+
+// OAI-012
+
+#[tokio::test]
+async fn oai_012_a_chat_completions_stream_error_keeps_its_fields_and_kind() {
+    let chunk = |error: Value| {
+        (
+            200,
+            format!("data: {}\n\n", json!({"error": error})).into_bytes(),
+        )
+    };
+    let chat = |transport: Arc<Recorder>| {
+        let provider = OpenAICompatibleProvider::new(config(), transport)
+            .with_protocol(Arc::new(OpenAIChatCompletionsProtocol));
+        Model::new("gpt-4.1", Arc::new(provider))
+    };
+    let options = || StreamOptions {
+        retry: suprnova_ai::RetryPolicy::none(),
+        ..Default::default()
+    };
+    let transport = Recorder::new([chunk(
+        json!({"message": "slow", "code": "rate_limit_exceeded", "type": "requests"}),
+    )]);
+    let Err(suprnova_ai::Error::Provider(error)) = run(&chat(transport), options()).await else {
+        panic!("the error chunk did not end the call")
+    };
+    assert_eq!(error.message, "slow");
+    assert_eq!(error.code.as_deref(), Some("rate_limit_exceeded"));
+    assert_eq!(error.error_type.as_deref(), Some("requests"));
+    assert_eq!(
+        error.kind,
+        suprnova_ai::errors::ProviderErrorKind::RateLimit
+    );
+    assert!(error.is_retryable);
+    let transport = Recorder::new([chunk(
+        json!({"message": "no credit", "code": "insufficient_quota"}),
+    )]);
+    let Err(suprnova_ai::Error::Provider(error)) = run(&chat(transport), options()).await else {
+        panic!("the error chunk did not end the call")
+    };
+    assert!(!error.is_retryable, "{error:?}");
+}
+
+#[tokio::test]
+async fn oai_012_a_responses_call_answered_with_chat_completions_names_the_other_protocol() {
+    let transport = Recorder::new([chat_reply()]);
+    let model = Model::new(
+        "gpt-4.1",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    );
+    let options = StreamOptions {
+        retry: suprnova_ai::RetryPolicy::none(),
+        ..Default::default()
+    };
+    let Err(suprnova_ai::Error::Provider(error)) = run(&model, options).await else {
+        panic!("a Chat Completions answer did not fail")
+    };
+    assert_eq!(error.kind, suprnova_ai::errors::ProviderErrorKind::Response);
+    assert!(
+        error.message.contains("Chat Completions")
+            && error.message.contains("OpenAIChatCompletionsProtocol"),
+        "{}",
+        error.message
+    );
+}
