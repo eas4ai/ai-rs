@@ -452,8 +452,10 @@ pub async fn upload_skill(
     params: SkillParams,
     options: OperationOptions,
 ) -> Result<Item<UploadedSkill>, Error> {
-    let _ = (provider, files, params, options);
-    Err(Error::UnsupportedOperation("upload_skill is not built".into()))
+    with_retries(&options.retry, || {
+        provider.upload_skill(files.clone(), params.clone())
+    })
+    .await
 }
 
 /// Transcribe a stream of raw audio chunks as they arrive. Dropping the
