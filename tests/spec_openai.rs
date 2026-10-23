@@ -2625,3 +2625,246 @@ async fn oai_013_finish_reasons_follow_typescript() {
         assert_eq!(handle.finish_reason(), Some(expected));
     }
 }
+
+// OAI-014
+
+fn chat_body(model: &str, messages: Vec<Message>, options: &StreamOptions) -> Value {
+    let request = build_request(model, &config(), messages, options, false).unwrap();
+    serde_json::from_slice(&request.body).unwrap()
+}
+
+#[test]
+fn oai_014_each_chat_option_goes_out_under_its_wire_name() {
+    let cases = [
+        (
+            json!({"logitBias": {"50256": -100}}),
+            "/logit_bias",
+            json!({"50256": -100}),
+        ),
+        (json!({"logprobs": true}), "/top_logprobs", json!(0)),
+        (json!({"logprobs": true}), "/logprobs", json!(true)),
+        (json!({"logprobs": 3}), "/top_logprobs", json!(3)),
+        (
+            json!({"parallelToolCalls": false}),
+            "/parallel_tool_calls",
+            json!(false),
+        ),
+        (json!({"user": "u"}), "/user", json!("u")),
+        (
+            json!({"forceReasoning": true, "reasoningEffort": "low"}),
+            "/reasoning_effort",
+            json!("low"),
+        ),
+        (
+            json!({"maxCompletionTokens": 50}),
+            "/max_completion_tokens",
+            json!(50),
+        ),
+        (json!({"store": false}), "/store", json!(false)),
+        (
+            json!({"metadata": {"a": "b"}}),
+            "/metadata",
+            json!({"a": "b"}),
+        ),
+        (
+            json!({"prediction": {"type": "content", "content": "x"}}),
+            "/prediction",
+            json!({"type": "content", "content": "x"}),
+        ),
+        (
+            json!({"serviceTier": "priority"}),
+            "/service_tier",
+            json!("priority"),
+        ),
+        (json!({"textVerbosity": "low"}), "/verbosity", json!("low")),
+        (
+            json!({"promptCacheKey": "k"}),
+            "/prompt_cache_key",
+            json!("k"),
+        ),
+        (
+            json!({"promptCacheOptions": {"mode": "explicit", "ttl": "30m"}}),
+            "/prompt_cache_options",
+            json!({"mode": "explicit", "ttl": "30m"}),
+        ),
+        (
+            json!({"promptCacheRetention": "24h"}),
+            "/prompt_cache_retention",
+            json!("24h"),
+        ),
+        (
+            json!({"safetyIdentifier": "s"}),
+            "/safety_identifier",
+            json!("s"),
+        ),
+    ];
+    for (options, pointer, expected) in cases {
+        let body = chat_body("gpt-4.1", vec![user("hi")], &openai(options.clone()));
+        assert_eq!(body.pointer(pointer), Some(&expected), "{options}: {body}");
+    }
+    let limited = StreamOptions {
+        params: Some(InferenceRequestParams {
+            output: Some(OutputParams {
+                max_tokens: Some(64),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let body = chat_body("gpt-5.4", vec![user("hi")], &limited);
+    assert_eq!(body["max_completion_tokens"], 64, "{body}");
+    assert_eq!(body.get("max_tokens"), None, "{body}");
+}
+
+#[tokio::test]
+async fn oai_014_unknown_chat_options_and_a_reasoning_summary_fail_before_a_request() {
+    for options in [
+        json!({"reasoningSummary": "auto"}),
+        json!({"reasoningEfort": "low"}),
+        json!({"logprobs": null}),
+    ] {
+        let transport = Recorder::new([chat_reply()]);
+        let provider = OpenAICompatibleProvider::new(config(), transport.clone())
+            .with_protocol(Arc::new(OpenAIChatCompletionsProtocol));
+        let model = Model::new("gpt-4.1", Arc::new(provider));
+        let error = run(&model, openai(options.clone()))
+            .await
+            .expect_err("an invalid option");
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{options}: {error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn oai_014_search_preview_models_leave_out_a_temperature() {
+    let (body, events) = logged(|| {
+        chat_body(
+            "gpt-4o-search-preview",
+            vec![user("hi")],
+            &temperature(None, json!({})),
+        )
+    });
+    assert_eq!(body.get("temperature"), None, "{body}");
+    assert!(
+        events.contains(&("temperature".to_owned(), "gpt-4o-search-preview".to_owned())),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn oai_014_citations_predictions_logprobs_and_audio_reach_the_message() {
+    let chunks = [
+        json!({"id": "c_1", "object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0,
+               "delta": {"role": "assistant", "content": null, "audio": {"transcript": "said"}}, "finish_reason": null}]}),
+        json!({"id": "c_1", "object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0,
+               "delta": {"content": " more", "annotations": [{"type": "url_citation", "url_citation": {"url": "https://a.test", "title": "A", "start_index": 0, "end_index": 1}}]},
+               "logprobs": {"content": [{"token": " more", "logprob": -0.2, "top_logprobs": []}]}, "finish_reason": null}]}),
+        json!({"id": "c_1", "object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+               "usage": {"prompt_tokens": 3, "completion_tokens": 4, "completion_tokens_details": {"accepted_prediction_tokens": 2, "rejected_prediction_tokens": 1}}}),
+    ];
+    let mut text: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    text.push_str("data: [DONE]\n\n");
+    let transport = Recorder::new([(200, text.into_bytes())]);
+    let provider = OpenAICompatibleProvider::new(config(), transport)
+        .with_protocol(Arc::new(OpenAIChatCompletionsProtocol));
+    let model = Model::new("gpt-4o", Arc::new(provider));
+    let mut handle = suprnova_ai::stream(&model, vec![user("hi")], StreamOptions::default());
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    let message = handle.message();
+    assert_eq!(message.text(), "said more");
+    let md = &message.provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(md["acceptedPredictionTokens"], 2, "{md}");
+    assert_eq!(md["rejectedPredictionTokens"], 1, "{md}");
+    assert_eq!(
+        md["logprobs"],
+        json!([{"token": " more", "logprob": -0.2, "top_logprobs": []}]),
+        "{md}"
+    );
+    assert_eq!(md["sources"][0]["url"], "https://a.test", "{md}");
+    assert_eq!(md["sources"].as_array().unwrap().len(), 1, "{md}");
+}
+
+#[test]
+fn oai_005_chat_system_messages_follow_the_model_and_the_option() {
+    let first = |model: &str, options: Value| {
+        chat_body(model, vec![system("rules"), user("hi")], &openai(options))["messages"][0].clone()
+    };
+    assert_eq!(first("gpt-5.4", json!({}))["role"], "developer");
+    assert_eq!(first("gpt-4.1", json!({}))["role"], "system");
+    assert_eq!(
+        first("gpt-5.4", json!({"systemMessageMode": "system"}))["role"],
+        "system"
+    );
+    assert_eq!(
+        first("gpt-4.1", json!({"forceReasoning": true}))["role"],
+        "developer"
+    );
+}
+
+#[test]
+fn oai_005_chat_settings_the_model_does_not_take_are_left_out_and_logged() {
+    let cases: Vec<(&str, StreamOptions, &str, &str)> = vec![
+        (
+            "o3",
+            temperature(None, json!({})),
+            "temperature",
+            "/temperature",
+        ),
+        (
+            "gpt-5.4",
+            openai(json!({"logitBias": {"1": 1}})),
+            "logitBias",
+            "/logit_bias",
+        ),
+        (
+            "gpt-5.4",
+            openai(json!({"logprobs": 2})),
+            "topLogprobs",
+            "/top_logprobs",
+        ),
+        (
+            "gpt-5.4",
+            openai(json!({"logprobs": true})),
+            "logprobs",
+            "/logprobs",
+        ),
+        (
+            "gpt-4.1",
+            openai(json!({"reasoningEffort": "low"})),
+            "reasoningEffort",
+            "/reasoning_effort",
+        ),
+        (
+            "gpt-6-astra",
+            openai(json!({"reasoningEffort": "minimal"})),
+            "reasoningEffort",
+            "/reasoning_effort",
+        ),
+        (
+            "gpt-4.1",
+            openai(json!({"serviceTier": "flex"})),
+            "serviceTier",
+            "/service_tier",
+        ),
+    ];
+    for (model, options, setting, pointer) in cases {
+        let (body, events) = logged(|| chat_body(model, vec![user("hi")], &options));
+        assert_eq!(body.pointer(pointer), None, "{model} {setting}: {body}");
+        assert!(
+            events.contains(&(setting.to_owned(), model.to_owned())),
+            "{model} {setting}: {events:?}"
+        );
+    }
+    let body = chat_body(
+        "gpt-5.4",
+        vec![user("hi")],
+        &temperature(Some("none"), json!({})),
+    );
+    assert_eq!(body["temperature"], 0.5, "{body}");
+}

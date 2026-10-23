@@ -158,7 +158,7 @@ async fn request_endpoints_system_roles_and_input() {
         if chat {
             assert_eq!(
                 b["messages"],
-                json!([{"role":"system","content":"rules"},{"role":"user","content":"Hi"}])
+                json!([{"role":"developer","content":"rules"},{"role":"user","content":"Hi"}])
             );
             assert_eq!(b["stream_options"], json!({"include_usage":true}));
         } else {
@@ -309,8 +309,10 @@ async fn chat_params_sampling_and_random_seed() {
         )
         .await;
         let b = fake.body();
-        assert_eq!(b["temperature"], 0.2);
-        assert_eq!(b["top_p"], 0.9);
+        // gpt-5.4 is a reasoning model, which takes no temperature or top-p
+        // (OAI-005).
+        assert_eq!(b.get("temperature"), None);
+        assert_eq!(b.get("top_p"), None);
         assert_eq!(b["max_completion_tokens"], 128);
         assert_eq!(b["service_tier"], "auto");
         assert_eq!(b["store"], false);
