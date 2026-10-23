@@ -1712,6 +1712,47 @@ fn oai_008_an_answered_mcp_approval_goes_back_as_a_response() {
 }
 
 #[test]
+fn oai_008_an_unstored_built_in_item_goes_back_once() {
+    let raw = |item: Value| md(json!({"item_id": item["id"], "raw_item": item}));
+    let search = json!({"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"type": "search", "query": "rust"}});
+    let image = json!({"type": "image_generation_call", "id": "ig_1", "status": "completed", "result": "AA=="});
+    let mut parts = vec![];
+    for (name, item) in [("web_search", &search), ("image_generation", &image)] {
+        let id = item["id"].as_str().unwrap();
+        parts.push(Part::BuiltinToolCall(BuiltinToolCallPart {
+            id: format!("part_{id}"),
+            tool_call_id: id.into(),
+            tool_name: name.into(),
+            tool_args: "{}".into(),
+            provider_metadata: raw(item.clone()),
+        }));
+        parts.push(Part::BuiltinToolReturn(BuiltinToolReturnPart {
+            id: format!("part_r_{id}"),
+            tool_call_id: id.into(),
+            tool_name: name.into(),
+            result: json!({}),
+            is_error: false,
+            provider_metadata: raw(item.clone()),
+        }));
+    }
+    let mut file =
+        suprnova_ai::types::messages::FilePart::from_bytes(vec![0], Some("image/png"), None)
+            .unwrap();
+    file.provider_metadata = raw(image.clone());
+    parts.push(Part::File(file));
+    let messages = vec![
+        user("find and draw"),
+        Message::new(MessageRole::Assistant, parts),
+        user("thanks"),
+    ];
+    let body = body_for("gpt-4.1", messages, &store(Some(false)));
+    for id in ["ws_1", "ig_1"] {
+        let count = items(&body).iter().filter(|item| item["id"] == id).count();
+        assert_eq!(count, 1, "{id}: {body}");
+    }
+}
+
+#[test]
 fn oai_008_an_mcp_request_is_referenced_only_before_its_response() {
     let reference = json!({"type": "item_reference", "id": "mcpr_1"});
     // OpenAI's previous response already holds the request.
