@@ -372,3 +372,29 @@ impl WebSocketTransport for ScriptedSocket {
         })
     }
 }
+
+/// A download transport that answers from a recorder, for the file URLs a
+/// protocol downloads.
+pub struct Downloads(pub Arc<Recorder>);
+
+impl suprnova_ai::models::files::DownloadTransport for Downloads {
+    fn resolve<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+    ) -> BoxFuture<'a, Result<Vec<std::net::IpAddr>, suprnova_ai::models::files::DownloadError>>
+    {
+        Box::pin(async { Ok(vec!["8.8.8.8".parse().unwrap()]) })
+    }
+    fn send_pinned(
+        &self,
+        request: HttpRequest,
+        _addresses: Vec<std::net::IpAddr>,
+    ) -> BoxFuture<'_, Result<HttpResponse, suprnova_ai::models::files::DownloadError>> {
+        Box::pin(async move {
+            self.0.send(request).await.map_err(|_| {
+                suprnova_ai::models::files::DownloadError::new("test", "no scripted download")
+            })
+        })
+    }
+}

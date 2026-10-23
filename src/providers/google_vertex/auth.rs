@@ -290,13 +290,37 @@ fn merge(headers: &mut Vec<(String, String)>, auth: Vec<(String, String)>, auth_
     }
 }
 
-/// An HTTP transport that adds the Vertex auth headers to each request.
+/// Whether a request URL may carry the Vertex auth headers: a URL on the
+/// base URL's host, or an `https` or `wss` URL on a `googleapis.com` host. A
+/// token never goes to another host, such as a video's download URL
+/// elsewhere.
+fn signs(url: &str, base: Option<&str>) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let base_host = base
+        .and_then(|base| url::Url::parse(base).ok())
+        .and_then(|base| base.host_str().map(str::to_owned));
+    if base_host.as_deref() == Some(host) {
+        return true;
+    }
+    matches!(url.scheme(), "https" | "wss")
+        && (host == "googleapis.com" || host.ends_with(".googleapis.com"))
+}
+
+/// An HTTP transport that adds the Vertex auth headers to each request to
+/// the provider's hosts.
 #[derive(Clone)]
 pub(crate) struct AuthTransport {
     pub inner: Arc<dyn HttpTransport>,
     pub auth: Auth,
     pub config: ProviderConfig,
     pub auth_wins: bool,
+    /// The provider's base URL, whose host is signed.
+    pub base_url: fn(&ProviderConfig) -> Result<String, Error>,
 }
 
 impl HttpTransport for AuthTransport {
@@ -305,20 +329,24 @@ impl HttpTransport for AuthTransport {
         mut request: HttpRequest,
     ) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
         Box::pin(async move {
-            let auth = self.auth.headers(&self.config).await?;
-            merge(&mut request.headers, auth, self.auth_wins);
+            let base = (self.base_url)(&self.config).ok();
+            if signs(&request.url, base.as_deref()) {
+                let auth = self.auth.headers(&self.config).await?;
+                merge(&mut request.headers, auth, self.auth_wins);
+            }
             self.inner.send(request).await
         })
     }
 }
 
 /// A WebSocket transport that adds the Vertex auth headers to each
-/// connection.
+/// connection to the provider's hosts.
 #[derive(Clone)]
 pub(crate) struct AuthWebSocket {
     pub inner: Arc<dyn WebSocketTransport>,
     pub auth: Auth,
     pub config: ProviderConfig,
+    pub base_url: fn(&ProviderConfig) -> Result<String, Error>,
 }
 
 impl WebSocketTransport for AuthWebSocket {
@@ -327,8 +355,11 @@ impl WebSocketTransport for AuthWebSocket {
         mut request: WebSocketRequest,
     ) -> BoxFuture<'_, Result<WebSocket, TransportError>> {
         Box::pin(async move {
-            let auth = self.auth.headers(&self.config).await?;
-            merge(&mut request.headers, auth, false);
+            let base = (self.base_url)(&self.config).ok();
+            if signs(&request.url, base.as_deref()) {
+                let auth = self.auth.headers(&self.config).await?;
+                merge(&mut request.headers, auth, false);
+            }
             self.inner.connect(request).await
         })
     }
@@ -343,6 +374,31 @@ mod tests {
             .iter()
             .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn only_the_providers_hosts_are_signed() {
+        let base = Some("https://us-central1-aiplatform.googleapis.com/v1beta1/projects/p");
+        for url in [
+            "https://us-central1-aiplatform.googleapis.com/v1/x",
+            "https://texttospeech.googleapis.com/v1/text:synthesize",
+            "wss://us-central1-aiplatform.googleapis.com/ws/x",
+        ] {
+            assert!(signs(url, base), "{url}");
+        }
+        assert!(signs(
+            "http://localhost:8080/v1",
+            Some("http://localhost:8080")
+        ));
+        for url in [
+            "https://cdn.example/v.mp4",
+            "https://googleapis.com.evil.example/x",
+            "http://speech.googleapis.com/v2",
+            "gs://bucket/v.mp4",
+            "not a url",
+        ] {
+            assert!(!signs(url, base), "{url}");
+        }
     }
 
     #[test]

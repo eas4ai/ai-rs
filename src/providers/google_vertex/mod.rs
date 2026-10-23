@@ -270,6 +270,7 @@ impl VertexProvider {
             auth: self.auth.clone(),
             config: self.config.clone(),
             auth_wins: false,
+            base_url,
         });
         self
     }
@@ -295,6 +296,7 @@ pub fn provider(mut config: ProviderConfig, transport: Arc<dyn HttpTransport>) -
             auth: auth.clone(),
             config: config.clone(),
             auth_wins: false,
+            base_url,
         }),
         config,
         transport,
@@ -338,6 +340,7 @@ impl Provider for VertexProvider {
             inner,
             auth: self.auth.clone(),
             config: self.config.clone(),
+            base_url,
         }))
     }
     fn is_configured(&self) -> bool {

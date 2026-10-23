@@ -70,6 +70,7 @@ impl fmt::Debug for VertexChatProvider {
 }
 
 fn signer(
+    host: &'static ChatHost,
     transport: &Arc<dyn HttpTransport>,
     auth: &Auth,
     config: &ProviderConfig,
@@ -79,6 +80,7 @@ fn signer(
         auth: auth.clone(),
         config: config.clone(),
         auth_wins: true,
+        base_url: host.base_url,
     })
 }
 
@@ -91,10 +93,18 @@ impl VertexChatProvider {
         // These hosts take no Express Mode key.
         config.api_key_value = None;
         config.api_key_env = None;
+        // The Chat Completions protocol builds URLs from the configuration's
+        // base URL. One that does not follow, such as for an invalid
+        // location, stays unset, and the protocol's check names the reason.
+        if config.base_url().is_empty()
+            && let Ok(base) = (host.base_url)(&config)
+        {
+            config.default_base_url = base;
+        }
         let auth = Auth::default();
         Self {
             host,
-            signed: signer(&transport, &auth, &config),
+            signed: signer(host, &transport, &auth, &config),
             config,
             transport,
             auth,
@@ -106,7 +116,7 @@ impl VertexChatProvider {
     #[must_use]
     pub fn with_access_token_source(mut self, source: Arc<dyn super::AccessTokenSource>) -> Self {
         self.auth = Auth::with(Credentials::Token(source));
-        self.signed = signer(&self.transport, &self.auth, &self.config);
+        self.signed = signer(self.host, &self.transport, &self.auth, &self.config);
         self
     }
 
@@ -118,7 +128,7 @@ impl VertexChatProvider {
         credentials: google_cloud_auth::credentials::Credentials,
     ) -> Self {
         self.auth = Auth::with(Credentials::Google(credentials));
-        self.signed = signer(&self.transport, &self.auth, &self.config);
+        self.signed = signer(self.host, &self.transport, &self.auth, &self.config);
         self
     }
 
@@ -223,7 +233,12 @@ pub(crate) fn register(
         let mut restored =
             VertexChatProvider::new(template.host, config, template.transport.clone());
         restored.auth = template.auth.clone();
-        restored.signed = signer(&restored.transport, &restored.auth, &restored.config);
+        restored.signed = signer(
+            restored.host,
+            &restored.transport,
+            &restored.auth,
+            &restored.config,
+        );
         restored.downloads.clone_from(&template.downloads);
         Ok(Arc::new(restored))
     })?;

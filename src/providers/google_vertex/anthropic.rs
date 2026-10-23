@@ -253,6 +253,7 @@ fn signer(
         auth: auth.clone(),
         config: config.clone(),
         auth_wins: false,
+        base_url,
     })
 }
 
