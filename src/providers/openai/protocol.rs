@@ -1,7 +1,7 @@
 use super::{
     dialect, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
-    responses, streaming,
+    streaming,
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
@@ -290,38 +290,15 @@ pub(crate) fn wire_request(
         Wire::Chat(profile) => dialect::check(profile, model, &p, options)?,
         Wire::Responses(profile) => dialect::check_responses(profile, model, &p, options)?,
     }
-    // OpenAI's own Responses API reads the call's `openai` options.
-    let call = match wire {
-        Wire::Responses(profile) if profile.dialect == ResponsesDialect::OpenAI => {
-            Some(responses::Call::new(model, &p)?)
-        }
-        _ => None,
-    };
     let mut body = params::build(&p, wire)?;
     match wire {
         Wire::Chat(profile) => dialect::request(profile, model, &p, &mut body),
         Wire::Responses(profile) => dialect::responses_request(profile, model, &mut body),
     }
-    if let Some(call) = &call {
-        call.apply(model, &p, &mut body);
-    }
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
     body.insert("stream".into(), json!(true));
-    let history = match &call {
-        Some(call) => messages::History {
-            model,
-            references: use_references,
-            reasoning: call.reasoning,
-            system_role: call.system_role(),
-            update_blocked: call.update_blocked(&body),
-        },
-        None => messages::History::plain(model, use_references),
-    };
-    let mut converted = messages::convert(messages, wire, history)?;
-    if let Some(call) = &call {
-        call.finish(model, &mut body, &mut converted, &options.tools)?;
-    }
+    let mut converted = messages::convert(messages, wire, model, use_references)?;
     if let (Some(profile), Some(schema)) = (chat, &options.output_schema)
         && let Some(message) = dialect::schema_message(profile, schema)?
     {
@@ -371,12 +348,6 @@ pub(crate) fn wire_request(
     if send_tools && let Some(choice) = &options.tool_choice {
         body.insert("tool_choice".into(), params::tool_choice(choice, wire)?);
     }
-    if let Some(allowed) = call.as_ref().and_then(|c| c.options.allowed_tools.as_ref())
-        && let Some(sent) = body.get("tools").and_then(Value::as_array)
-    {
-        let choice = super::tools::allowed_tools(allowed, &options.tools, sent, model)?;
-        body.insert("tool_choice".into(), choice);
-    }
     if let Some(profile) = chat
         && profile.dialect == Dialect::Mistral
     {
@@ -402,10 +373,9 @@ pub(crate) fn wire_request(
             }
             Wire::Responses(_) => {
                 let schema = strict_output_schema(schema)?;
-                let strict = call.as_ref().is_none_or(responses::Call::strict);
                 let text = body.entry("text").or_insert_with(|| json!({}));
                 text["format"] =
-                    json!({"type":"json_schema","name":name,"schema":schema,"strict":strict});
+                    json!({"type":"json_schema","name":name,"schema":schema,"strict":true});
             }
             Wire::Chat(profile) if profile.sends_json_schema(model) => {
                 let schema = strict_output_schema(schema)?;

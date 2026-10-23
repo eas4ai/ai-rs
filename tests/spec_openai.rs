@@ -733,11 +733,6 @@ fn with_openai(params: InferenceRequestParams, options: Value) -> StreamOptions 
         ..Default::default()
     }
 }
-/// The error `build_request` gives for this model and these options.
-fn build_error(model: &str, options: &StreamOptions) -> suprnova_ai::Error {
-    build_request(model, &config(), vec![user("hi")], options, true)
-        .expect_err("the request was built")
-}
 fn function_tool(name: &str) -> Tool {
     Tool::function(
         name,
@@ -753,18 +748,58 @@ fn function_tool(name: &str) -> Tool {
 #[test]
 fn oai_004_each_option_goes_out_under_its_wire_name() {
     let cases = [
-        (json!({"conversation": "conv_1"}), "/conversation", json!("conv_1")),
-        (json!({"instructions": "be brief"}), "/instructions", json!("be brief")),
+        (
+            json!({"conversation": "conv_1"}),
+            "/conversation",
+            json!("conv_1"),
+        ),
+        (
+            json!({"instructions": "be brief"}),
+            "/instructions",
+            json!("be brief"),
+        ),
         (json!({"maxToolCalls": 3}), "/max_tool_calls", json!(3)),
-        (json!({"metadata": {"a": "b"}}), "/metadata", json!({"a": "b"})),
-        (json!({"parallelToolCalls": false}), "/parallel_tool_calls", json!(false)),
-        (json!({"previousResponseId": "resp_0"}), "/previous_response_id", json!("resp_0")),
-        (json!({"promptCacheKey": "k"}), "/prompt_cache_key", json!("k")),
-        (json!({"promptCacheRetention": "24h"}), "/prompt_cache_retention", json!("24h")),
-        (json!({"safetyIdentifier": "s"}), "/safety_identifier", json!("s")),
-        (json!({"serviceTier": "priority"}), "/service_tier", json!("priority")),
+        (
+            json!({"metadata": {"a": "b"}}),
+            "/metadata",
+            json!({"a": "b"}),
+        ),
+        (
+            json!({"parallelToolCalls": false}),
+            "/parallel_tool_calls",
+            json!(false),
+        ),
+        (
+            json!({"previousResponseId": "resp_0"}),
+            "/previous_response_id",
+            json!("resp_0"),
+        ),
+        (
+            json!({"promptCacheKey": "k"}),
+            "/prompt_cache_key",
+            json!("k"),
+        ),
+        (
+            json!({"promptCacheRetention": "24h"}),
+            "/prompt_cache_retention",
+            json!("24h"),
+        ),
+        (
+            json!({"safetyIdentifier": "s"}),
+            "/safety_identifier",
+            json!("s"),
+        ),
+        (
+            json!({"serviceTier": "priority"}),
+            "/service_tier",
+            json!("priority"),
+        ),
         (json!({"store": false}), "/store", json!(false)),
-        (json!({"textVerbosity": "low"}), "/text/verbosity", json!("low")),
+        (
+            json!({"textVerbosity": "low"}),
+            "/text/verbosity",
+            json!("low"),
+        ),
         (json!({"truncation": "auto"}), "/truncation", json!("auto")),
         (json!({"user": "u"}), "/user", json!("u")),
         (json!({"logprobs": 5}), "/top_logprobs", json!(5)),
@@ -864,10 +899,19 @@ async fn oai_004_options_and_settings_openai_never_takes_fail_before_a_request()
         ..Default::default()
     };
     let cases = [
-        ("an unknown option", openai(json!({"reasoningEfort": "low"}))),
+        (
+            "an unknown option",
+            openai(json!({"reasoningEfort": "low"})),
+        ),
         ("logprobs 21", openai(json!({"logprobs": 21}))),
-        ("a null forceReasoning", openai(json!({"forceReasoning": null}))),
-        ("a service tier outside the set", openai(json!({"serviceTier": "slow"}))),
+        (
+            "a null forceReasoning",
+            openai(json!({"forceReasoning": null})),
+        ),
+        (
+            "a service tier outside the set",
+            openai(json!({"serviceTier": "slow"})),
+        ),
         (
             "conversation with previousResponseId",
             openai(json!({"conversation": "c", "previousResponseId": "r"})),
@@ -1029,13 +1073,21 @@ fn oai_005_an_effort_without_a_summary_option_asks_for_a_detailed_summary() {
         vec![user("hi")],
         &openai(json!({"reasoningEffort": "high"})),
     );
-    assert_eq!(body["reasoning"], json!({"effort": "high", "summary": "detailed"}));
+    assert_eq!(
+        body["reasoning"],
+        json!({"effort": "high", "summary": "detailed"})
+    );
     let core = StreamOptions {
-        params: Some(InferenceRequestParams::default().with_reasoning_effort(Some("low".into()).into())),
+        params: Some(
+            InferenceRequestParams::default().with_reasoning_effort(Some("low".into()).into()),
+        ),
         ..Default::default()
     };
     let body = body_for("gpt-5.4", vec![user("hi")], &core);
-    assert_eq!(body["reasoning"], json!({"effort": "low", "summary": "detailed"}));
+    assert_eq!(
+        body["reasoning"],
+        json!({"effort": "low", "summary": "detailed"})
+    );
     let body = body_for(
         "gpt-5.4",
         vec![user("hi")],
@@ -1064,7 +1116,12 @@ fn oai_005_settings_the_model_does_not_take_are_left_out_and_logged() {
         options
     };
     let cases: Vec<(&str, StreamOptions, &str, &str)> = vec![
-        ("o3", temperature(None, json!({})), "temperature", "/temperature"),
+        (
+            "o3",
+            temperature(None, json!({})),
+            "temperature",
+            "/temperature",
+        ),
         (
             "gpt-5.4",
             temperature(Some("high"), json!({})),
@@ -1130,7 +1187,11 @@ fn oai_005_settings_the_model_does_not_take_are_left_out_and_logged() {
 
 #[test]
 fn oai_005_sampling_goes_out_where_the_model_takes_it() {
-    let body = body_for("gpt-5.4", vec![user("hi")], &temperature(Some("none"), json!({})));
+    let body = body_for(
+        "gpt-5.4",
+        vec![user("hi")],
+        &temperature(Some("none"), json!({})),
+    );
     assert_eq!(body["temperature"], 0.5, "{body}");
     let body = body_for("gpt-4.1", vec![user("hi")], &temperature(None, json!({})));
     assert_eq!(body["temperature"], 0.5, "{body}");
@@ -1147,8 +1208,13 @@ fn oai_005_sampling_goes_out_where_the_model_takes_it() {
 /// A system message that only sets a reasoning effort.
 fn update(effort: &str, text: &str) -> Message {
     let mut message = system(text);
-    message.provider_metadata =
-        Some([("openai".to_owned(), json!({"reasoningEffortUpdate": effort}))].into());
+    message.provider_metadata = Some(
+        [(
+            "openai".to_owned(),
+            json!({"reasoningEffortUpdate": effort}),
+        )]
+        .into(),
+    );
     message
 }
 
@@ -1189,7 +1255,11 @@ fn oai_005_reasoning_effort_updates_go_out_where_they_apply() {
 fn oai_005_message_level_updates_that_cannot_apply_fail() {
     let cases = [
         ("gpt-5.4", vec![user("hi"), update("low", "")], json!({})),
-        ("gpt-6-sol", vec![update("low", "rules"), user("hi")], json!({})),
+        (
+            "gpt-6-sol",
+            vec![update("low", "rules"), user("hi")],
+            json!({}),
+        ),
         (
             "gpt-6-sol",
             vec![update("low", ""), update("high", ""), user("hi")],
@@ -1200,7 +1270,11 @@ fn oai_005_message_level_updates_that_cannot_apply_fail() {
             vec![update("high", ""), user("hi")],
             json!({"reasoningEffortUpdate": "low"}),
         ),
-        ("gpt-6-astra", vec![update("none", ""), user("hi")], json!({})),
+        (
+            "gpt-6-astra",
+            vec![update("none", ""), user("hi")],
+            json!({}),
+        ),
         (
             "gpt-6-sol",
             vec![update("low", ""), user("hi")],

@@ -446,7 +446,8 @@ fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
 /// that item. Without them, text goes out without its id and reasoning only
 /// with its encrypted content (OAI-002). Text that goes out in full is one
 /// assistant message per part, with the `phase` of its item.
-fn openai_assistant(msg: &Message, reasoning_model: bool, references: bool, out: &mut Vec<Value>) {
+fn openai_assistant(msg: &Message, model: &str, references: bool, out: &mut Vec<Value>) {
+    let reasoning_model = profile::reasoning_model(model);
     let mut sent = BTreeSet::new();
     // Reasoning items rebuilt from their parts, which take later summaries.
     let mut built = BTreeSet::new();
@@ -568,73 +569,12 @@ fn function_call(call: &ToolCallPart, md: Option<&Value>) -> Value {
     }
     item
 }
-/// What the call decides about how its history goes out.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct History<'a> {
-    pub model: &'a str,
-    /// Items OpenAI stored may go out as references (OAI-002).
-    pub references: bool,
-    /// The model is a reasoning model (OAI-005).
-    pub reasoning: bool,
-    /// The role system messages go out with, or `None` to leave them out.
-    pub system_role: Option<&'static str>,
-    /// Why a reasoning effort update cannot apply, when it cannot.
-    pub update_blocked: Option<&'a str>,
-}
-
-impl<'a> History<'a> {
-    /// The history of a server other than OpenAI's own Responses API.
-    pub(super) fn plain(model: &'a str, references: bool) -> Self {
-        Self {
-            model,
-            references,
-            reasoning: profile::reasoning_model(model),
-            system_role: Some("system"),
-            update_blocked: None,
-        }
-    }
-}
-
-/// A system message that only sets a reasoning effort: the
-/// `configuration_update` item it goes out as, at its place (OAI-005).
-fn effort_update(msg: &Message, history: &History<'_>) -> Result<Option<Value>, Error> {
-    let Some(effort) = msg
-        .provider_metadata
-        .as_ref()
-        .and_then(|md| md.get("openai"))
-        .and_then(|md| md.get("reasoningEffortUpdate"))
-    else {
-        return Ok(None);
-    };
-    let effort = effort
-        .as_str()
-        .filter(|effort| super::options::EFFORT_UPDATES.contains(effort))
-        .ok_or_else(|| {
-            invalid(format!(
-                "message-level reasoningEffortUpdate must be one of {}, not {effort}",
-                super::options::EFFORT_UPDATES.join(", ")
-            ))
-        })?;
-    if !msg.text().is_empty() {
-        return Err(invalid(
-            "message-level reasoningEffortUpdate requires empty system message content",
-        ));
-    }
-    if let Some(reason) = history.update_blocked {
-        return Err(invalid(format!("message-level {reason}")));
-    }
-    Ok(Some(
-        json!({"type": "configuration_update", "reasoning": {"effort": effort}}),
-    ))
-}
-
 pub(super) fn convert(
     messages: Vec<Message>,
     wire: Wire,
-    history: History<'_>,
+    model: &str,
+    references: bool,
 ) -> Result<Vec<Value>, Error> {
-    let model = history.model;
-    let openai_responses = wire.responses_dialect() == Some(ResponsesDialect::OpenAI);
     let responses = matches!(wire, Wire::Responses(_));
     let reasoning_field = match wire {
         Wire::Chat(profile) => profile.reasoning_field,
@@ -648,15 +588,9 @@ pub(super) fn convert(
     for (index, msg) in messages.into_iter().enumerate() {
         match msg.role {
             MessageRole::System => {
-                if openai_responses && let Some(update) = effort_update(&msg, &history)? {
-                    out.push(update);
-                    continue;
-                }
                 let text = msg.text();
-                if let Some(role) = history.system_role
-                    && (!responses || !text.is_empty())
-                {
-                    out.push(json!({"role":role,"content":text}));
+                if !responses || !text.is_empty() {
+                    out.push(json!({"role":"system","content":text}));
                 }
             }
             MessageRole::User => {
@@ -732,9 +666,7 @@ pub(super) fn convert(
             {
                 huggingface_assistant(&msg, &mut out);
             }
-            MessageRole::Assistant => {
-                openai_assistant(&msg, history.reasoning, history.references, &mut out)
-            }
+            MessageRole::Assistant => openai_assistant(&msg, model, references, &mut out),
             MessageRole::Tool => {
                 for p in &msg.parts {
                     if let Part::ToolResult(r) = p {
