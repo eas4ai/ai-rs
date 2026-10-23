@@ -1,15 +1,19 @@
 use super::{
-    chat, dialect, messages, params,
+    chat, dialect, embedding, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
     responses, streaming,
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
     models::params::{ExtraHeaderValue, InferenceRequestParams},
-    providers::{EventStream, http},
+    providers::{
+        EventStream, http,
+        operations::{CallLimits, EmbedParams, Item},
+    },
     transport::HttpRequest,
     types::{Message, ToolChoice},
 };
+use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -111,7 +115,27 @@ impl ProviderProtocol for HostChatProtocol {
         )
     }
 }
+#[async_trait]
 impl ProviderProtocol for OpenAIChatCompletionsProtocol {
+    async fn embed(
+        &self,
+        model: &Model,
+        values: Vec<String>,
+        params: EmbedParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
+        embedding::embed(
+            embedding::OpenAIEmbeddingProtocol::new(),
+            model,
+            values,
+            params,
+            provider,
+        )
+        .await
+    }
+    fn embed_limits(&self, _model: &Model) -> CallLimits {
+        embedding::openai_limits()
+    }
     fn protocol_class_id(&self) -> &str {
         profile::OPENAI.protocol_class_id
     }
@@ -132,7 +156,27 @@ impl ProviderProtocol for OpenAIChatCompletionsProtocol {
         )
     }
 }
+#[async_trait]
 impl ProviderProtocol for OpenAIResponsesProtocol {
+    async fn embed(
+        &self,
+        model: &Model,
+        values: Vec<String>,
+        params: EmbedParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
+        embedding::embed(
+            embedding::OpenAIEmbeddingProtocol::new(),
+            model,
+            values,
+            params,
+            provider,
+        )
+        .await
+    }
+    fn embed_limits(&self, _model: &Model) -> CallLimits {
+        embedding::openai_limits()
+    }
     fn protocol_class_id(&self) -> &str {
         "openai_responses"
     }
@@ -168,7 +212,27 @@ impl OpenAIChatCompletionsProtocol {
         OpenAIChatCompletionsWithDownloads { downloads }
     }
 }
+#[async_trait]
 impl ProviderProtocol for OpenAIChatCompletionsWithDownloads {
+    async fn embed(
+        &self,
+        model: &Model,
+        values: Vec<String>,
+        params: EmbedParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<Vec<f64>>>, Error> {
+        embedding::embed(
+            embedding::OpenAIEmbeddingProtocol::new(),
+            model,
+            values,
+            params,
+            provider,
+        )
+        .await
+    }
+    fn embed_limits(&self, _model: &Model) -> CallLimits {
+        embedding::openai_limits()
+    }
     fn protocol_class_id(&self) -> &str {
         profile::OPENAI.protocol_class_id
     }
