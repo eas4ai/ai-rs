@@ -2532,3 +2532,96 @@ async fn oai_012_a_responses_call_answered_with_chat_completions_names_the_other
         error.message
     );
 }
+
+// OAI-013
+
+/// Stream these Responses events, the last one terminal, and give the
+/// stream handle.
+async fn finished(events: Vec<Value>, options: StreamOptions) -> suprnova_ai::StreamHandle {
+    let transport = Recorder::new([responses_sse(&events)]);
+    let model = Model::new(
+        "gpt-5.4",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport)),
+    );
+    let mut handle = suprnova_ai::stream(&model, vec![user("hi")], options);
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    handle
+}
+
+#[tokio::test]
+async fn oai_013_usage_and_final_metadata_follow_typescript() {
+    let handle = finished(
+        vec![
+            json!({"type": "response.created", "response": {"id": "resp_u", "model": "gpt-5.4", "status": "in_progress"}}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+            json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "hi",
+                   "logprobs": [{"token": "hi", "logprob": -0.1, "top_logprobs": []}]}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "hi", "annotations": []}]}}),
+            json!({"type": "response.completed", "response": {"id": "resp_u", "model": "gpt-5.4", "status": "completed",
+                   "service_tier": "flex", "reasoning": {"context": "all_turns"}, "output": [],
+                   "usage": {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 2},
+                             "output_tokens": 20, "output_tokens_details": {"reasoning_tokens": 5}}}}),
+        ],
+        openai(json!({"logprobs": true})),
+    )
+    .await;
+    let message = handle.message();
+    let usage = message.usage.clone().unwrap();
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens
+        ),
+        (10, Some(4), Some(2), 20, Some(5))
+    );
+    let md = &message.provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(md["response_id"], "resp_u", "{md}");
+    assert_eq!(md["service_tier"], "flex", "{md}");
+    assert_eq!(md["reasoning_context"], "all_turns", "{md}");
+    assert_eq!(
+        md["logprobs"],
+        json!([[{"token": "hi", "logprob": -0.1, "top_logprobs": []}]]),
+        "{md}"
+    );
+    assert_eq!(handle.finish_reason(), Some("stop"));
+}
+
+#[tokio::test]
+async fn oai_013_finish_reasons_follow_typescript() {
+    let end = |status: &str, reason: Option<&str>, output: Value| {
+        let mut response = json!({"id": "resp_f", "model": "gpt-5.4", "status": status, "output": output, "usage": {"input_tokens": 1, "output_tokens": 1}});
+        if let Some(reason) = reason {
+            response["incomplete_details"] = json!({"reason": reason});
+        }
+        let kind = if status == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        vec![json!({"type": kind, "response": response})]
+    };
+    for (events, expected) in [
+        (
+            end("completed", None, json!([{"type": "function_call"}])),
+            "tool_call",
+        ),
+        (
+            end("incomplete", Some("max_output_tokens"), json!([])),
+            "length",
+        ),
+        (
+            end("incomplete", Some("content_filter"), json!([])),
+            "content_filter",
+        ),
+        (end("incomplete", Some("other_reason"), json!([])), "other"),
+        (end("completed", None, json!([])), "stop"),
+    ] {
+        let handle = finished(events, StreamOptions::default()).await;
+        assert_eq!(handle.finish_reason(), Some(expected));
+    }
+}
