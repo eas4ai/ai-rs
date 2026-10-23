@@ -4874,3 +4874,120 @@ async fn oai_025_the_responses_protocol_evaluates_on_its_language_model() {
     let body = transport.body(0);
     assert_eq!(body["text"]["format"]["type"], "json_schema", "{body}");
 }
+
+// OAI-026
+
+fn with_breakpoint(mut part: Part) -> Part {
+    let md = md(json!({"promptCacheBreakpoint": {"mode": "explicit", "ttl": "12h"}}));
+    match &mut part {
+        Part::Text(t) => t.provider_metadata = md,
+        Part::ToolResult(r) => r.provider_metadata = md,
+        _ => {}
+    }
+    part
+}
+
+#[test]
+fn oai_026_prompt_cache_options_and_breakpoints_go_out() {
+    use suprnova_ai::models::params::{CacheParams, ProviderValue};
+    let breakpoint = json!({"mode": "explicit", "ttl": "12h"});
+    let mut system_message = system("rules");
+    system_message.provider_metadata =
+        md(json!({"promptCacheBreakpoint": {"mode": "explicit", "ttl": "12h"}}));
+    let mut messages = history(raw_call());
+    messages[0] = Message::new(
+        MessageRole::User,
+        vec![with_breakpoint(Part::Text(TextPart::new("weather in SF?")))],
+    );
+    messages[2].parts[0] = with_breakpoint(messages[2].parts[0].clone());
+    messages.insert(0, system_message);
+    let params = InferenceRequestParams {
+        cache: Some(CacheParams {
+            key: Some("k".into()),
+            retention: ProviderValue::Value("24h".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let options = with_openai(
+        params,
+        json!({"promptCacheOptions": {"mode": "explicit", "ttl": "30m", "prewarm": true}}),
+    );
+    let body = body_for("gpt-4.1", messages.clone(), &options);
+    assert_eq!(body["prompt_cache_key"], "k");
+    assert_eq!(body["prompt_cache_retention"], "24h");
+    assert_eq!(
+        body["prompt_cache_options"],
+        json!({"mode": "explicit", "ttl": "30m", "prewarm": true})
+    );
+    let input = items(&body);
+    assert_eq!(
+        input[0],
+        json!({"role": "system", "content": [{"type": "input_text", "text": "rules", "prompt_cache_breakpoint": breakpoint}]})
+    );
+    assert_eq!(
+        input[1]["content"][0]["prompt_cache_breakpoint"], breakpoint,
+        "{body}"
+    );
+    let output = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(
+        output["output"],
+        json!([{"type": "input_text", "text": "sunny", "prompt_cache_breakpoint": breakpoint}])
+    );
+    let chat_options = openai(json!({"promptCacheOptions": {"mode": "explicit", "ttl": "30m"}}));
+    let chat = chat_body("gpt-4.1", messages, &chat_options);
+    assert_eq!(
+        chat["prompt_cache_options"],
+        json!({"mode": "explicit", "ttl": "30m"})
+    );
+    assert_eq!(
+        chat["messages"][0],
+        json!({"role": "system", "content": [{"type": "text", "text": "rules", "prompt_cache_breakpoint": breakpoint}]})
+    );
+    assert_eq!(
+        chat["messages"][1]["content"],
+        json!([{"type": "text", "text": "weather in SF?", "prompt_cache_breakpoint": breakpoint}])
+    );
+    let tool = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap();
+    assert_eq!(
+        tool["content"],
+        json!([{"type": "text", "text": "sunny", "prompt_cache_breakpoint": breakpoint}])
+    );
+}
+
+#[tokio::test]
+async fn oai_026_a_core_cache_mode_fails_before_a_request() {
+    use suprnova_ai::models::params::{CacheParams, ProviderValue};
+    for chat in [false, true] {
+        let transport = Recorder::new([text_reply()]);
+        let mut provider = OpenAICompatibleProvider::new(config(), transport.clone());
+        if chat {
+            provider = provider.with_protocol(Arc::new(OpenAIChatCompletionsProtocol));
+        }
+        let model = Model::new("gpt-4.1", Arc::new(provider));
+        let options = StreamOptions {
+            params: Some(InferenceRequestParams {
+                cache: Some(CacheParams {
+                    mode: ProviderValue::Value("explicit".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = run(&model, options).await.unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+}
