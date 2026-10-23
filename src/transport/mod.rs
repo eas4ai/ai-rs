@@ -23,8 +23,16 @@ mod reqwest_download;
 #[cfg(feature = "reqwest")]
 mod reqwest_transport;
 pub mod sse;
+#[cfg(feature = "websocket")]
+mod tungstenite;
+pub mod websocket;
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::ReqwestTransport;
+#[cfg(feature = "websocket")]
+pub use tungstenite::TungsteniteTransport;
+pub use websocket::{
+    WebSocket, WebSocketMessage, WebSocketRequest, WebSocketSender, WebSocketTransport,
+};
 
 pub type Headers = Vec<(String, String)>;
 pub type Body = BoxStream<'static, Result<Bytes, TransportError>>;

@@ -28,7 +28,7 @@ use super::operations::*;
 use crate::{
     errors::Error,
     models::{Model, StreamOptions},
-    transport::HttpTransport,
+    transport::{HttpTransport, WebSocketRequest, WebSocketTransport},
     types::{
         events::Event,
         messages::{FilePart, Message},
@@ -235,6 +235,110 @@ pub trait ProviderProtocol: Send + Sync {
     ) -> Result<Item<Vec<RankedDocument>>, Error> {
         Err(unsupported("rerank"))
     }
+
+    /// The values one `embed` call takes for the model.
+    fn embed_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits::default()
+    }
+
+    /// The images one `generate_image` call returns for the model.
+    fn image_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits::default()
+    }
+
+    /// The videos one video call or job returns for the model.
+    fn video_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits::default()
+    }
+
+    /// Start a video job and return its operation value, which
+    /// `video_status` takes.
+    async fn start_video(
+        &self,
+        _model: &Model,
+        _prompt: VideoPrompt,
+        _params: VideoParams,
+        _provider: &dyn Provider,
+    ) -> Result<Item<Value>, Error> {
+        Err(unsupported("start_video"))
+    }
+
+    async fn video_status(
+        &self,
+        _model: &Model,
+        _operation: &Value,
+        _provider: &dyn Provider,
+    ) -> Result<VideoStatus, Error> {
+        Err(unsupported("video_status"))
+    }
+
+    /// Fetch a video that a job returned as a URL, with the credentials the
+    /// protocol attaches. A video already in bytes comes back unchanged.
+    async fn download_video(
+        &self,
+        _model: &Model,
+        _video: FilePart,
+        _provider: &dyn Provider,
+    ) -> Result<FilePart, Error> {
+        Err(unsupported("download_video"))
+    }
+
+    async fn stream_transcription(
+        &self,
+        _model: &Model,
+        _audio: AudioChunks,
+        _format: AudioFormat,
+        _params: StreamTranscribeParams,
+        _provider: &dyn Provider,
+    ) -> Result<TranscriptionStream, Error> {
+        Err(unsupported("stream_transcription"))
+    }
+
+    async fn stream_translation(
+        &self,
+        _model: &Model,
+        _audio: AudioChunks,
+        _format: AudioFormat,
+        _params: StreamTranslateParams,
+        _provider: &dyn Provider,
+    ) -> Result<TranslationStream, Error> {
+        Err(unsupported("stream_translation"))
+    }
+
+    /// An ephemeral token for a client to open a realtime session with.
+    async fn create_realtime_token(
+        &self,
+        _model: &Model,
+        _params: RealtimeTokenParams,
+        _provider: &dyn Provider,
+    ) -> Result<RealtimeToken, Error> {
+        Err(unsupported("realtime"))
+    }
+
+    /// The provider's session setup for a session configuration.
+    fn realtime_session(
+        &self,
+        _model: &Model,
+        _config: &RealtimeSessionConfig,
+    ) -> Result<Value, Error> {
+        Err(unsupported("realtime"))
+    }
+
+    /// A codec for one realtime connection.
+    fn realtime_codec(&self, _model: &Model) -> Result<Box<dyn RealtimeCodec>, Error> {
+        Err(unsupported("realtime"))
+    }
+
+    /// The WebSocket to open for a server-side connection with a token, and
+    /// whether the connection waits for the session-created event before it
+    /// sends a client event.
+    fn realtime_connection(
+        &self,
+        _model: &Model,
+        _token: &RealtimeToken,
+    ) -> Result<(WebSocketRequest, bool), Error> {
+        Err(unsupported("realtime"))
+    }
 }
 
 /// Implement a provider to own a transport and select a default wire protocol.
@@ -429,6 +533,49 @@ pub trait Provider: Send + Sync + AsProvider {
             }
             None => Err(unsupported("rerank")),
         }
+    }
+
+    /// The WebSocket transport for live and realtime sessions, when the
+    /// provider has one.
+    fn websocket(&self) -> Option<Arc<dyn WebSocketTransport>> {
+        None
+    }
+
+    /// Upload a file through the provider's files operation.
+    async fn upload_file(
+        &self,
+        _file: UploadFile,
+        _params: UploadParams,
+    ) -> Result<Item<UploadedFile>, Error> {
+        Err(unsupported("upload_file"))
+    }
+
+    async fn batch_start(
+        &self,
+        _requests: Vec<BatchRequest>,
+        _params: BatchParams,
+    ) -> Result<BatchStarted, Error> {
+        Err(unsupported("batch_start"))
+    }
+
+    async fn batch_status(&self, _batch_id: &str) -> Result<BatchStatus, Error> {
+        Err(unsupported("batch_status"))
+    }
+
+    async fn batch_cancel(&self, _batch_id: &str) -> Result<(), Error> {
+        Err(unsupported("batch_cancel"))
+    }
+
+    async fn batch_list(
+        &self,
+        _page_size: Option<u32>,
+        _cursor: Option<String>,
+    ) -> Result<BatchPage, Error> {
+        Err(unsupported("batch_list"))
+    }
+
+    async fn batch_results(&self, _batch_id: &str) -> Result<BatchResults, Error> {
+        Err(unsupported("batch_results"))
     }
 
     async fn list_models(&self) -> Result<Vec<String>, Error> {

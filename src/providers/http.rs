@@ -26,7 +26,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// The most bytes of a response body read whole, such as an error body.
-const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How an API authenticates and reports its errors.
 #[derive(Clone, Copy, Debug)]
@@ -72,8 +72,32 @@ pub(crate) fn request(
     extra_headers: BTreeMap<String, String>,
     query: BTreeMap<String, Value>,
 ) -> Result<HttpRequest, Error> {
+    request_to(
+        api,
+        &config.base_url(),
+        config,
+        method,
+        path,
+        body,
+        extra_headers,
+        query,
+    )
+}
+
+/// [`request`] to `path` under `base_url` instead of the configured base URL.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn request_to(
+    api: &ApiProfile,
+    base_url: &str,
+    config: &ProviderConfig,
+    method: &str,
+    path: &[&str],
+    body: Option<Value>,
+    extra_headers: BTreeMap<String, String>,
+    query: BTreeMap<String, Value>,
+) -> Result<HttpRequest, Error> {
     let label = api.label;
-    let mut url = url::Url::parse(&config.base_url())
+    let mut url = url::Url::parse(base_url)
         .map_err(|_| Error::Configuration(format!("{label} base URL is invalid")))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(Error::Configuration(format!(
@@ -171,34 +195,78 @@ pub(crate) async fn json(
     provider: &str,
     model_id: Option<&str>,
 ) -> Result<Value, Error> {
+    json_with_limit(
+        api,
+        transport,
+        request,
+        provider,
+        model_id,
+        MAX_RESPONSE_BYTES,
+    )
+    .await
+    .map(|(_, value)| value)
+}
+
+/// [`json`] reading up to `limit` bytes of the response body, with the
+/// response headers.
+pub(crate) async fn json_with_limit(
+    api: &ApiProfile,
+    transport: &dyn HttpTransport,
+    request: HttpRequest,
+    provider: &str,
+    model_id: Option<&str>,
+    limit: usize,
+) -> Result<(Headers, Value), Error> {
     let response = send(api, transport, request, provider, model_id).await?;
-    let (_, bytes) = read_body(api, provider, response).await?;
-    serde_json::from_slice(&bytes).map_err(|_| {
+    let (headers, bytes) = read_body_with_limit(api, provider, response, limit).await?;
+    let value = serde_json::from_slice(&bytes).map_err(|_| {
         response_error(
             provider,
             format!("{} response is not valid JSON", api.label),
         )
-    })
+    })?;
+    Ok((headers, value))
 }
 
 /// Read a whole response body, up to 8 MiB.
 pub(crate) async fn read_body(
     api: &ApiProfile,
     provider: &str,
+    response: HttpResponse,
+) -> Result<(Headers, Bytes), Error> {
+    read_body_with_limit(api, provider, response, MAX_RESPONSE_BYTES).await
+}
+
+/// Read a whole response body, up to `limit` bytes. A longer body fails with
+/// an error naming the limit, without reading past it.
+pub(crate) async fn read_body_with_limit(
+    api: &ApiProfile,
+    provider: &str,
     mut response: HttpResponse,
+    limit: usize,
 ) -> Result<(Headers, Bytes), Error> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.body.next().await {
         let chunk = chunk.map_err(|error| transport_error(api, provider, error))?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(response_error(
-                provider,
-                format!("{} response exceeds the 8 MiB limit", api.label),
-            ));
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(limit_error(api, provider, "response", limit));
         }
         bytes.extend_from_slice(&chunk);
     }
     Ok((response.headers, bytes.into()))
+}
+
+/// A response or stream event over its size limit, naming the limit.
+pub(crate) fn limit_error(api: &ApiProfile, provider: &str, what: &str, limit: usize) -> Error {
+    let size = if limit % (1024 * 1024) == 0 {
+        format!("{} MiB", limit / (1024 * 1024))
+    } else {
+        format!("{limit} bytes")
+    };
+    response_error(
+        provider,
+        format!("{} {what} exceeds the {size} limit", api.label),
+    )
 }
 
 /// A malformed or unexpected response.
@@ -331,9 +399,23 @@ pub(crate) fn sse_json(
     provider: String,
     body: Body,
 ) -> BoxStream<'static, Result<SseJson, Error>> {
-    sse::parse(body)
+    sse_json_with_limit(api, provider, body, sse::MAX_EVENT_BYTES)
+}
+
+/// [`sse_json`] with each line and event's data limited to `limit` bytes;
+/// a longer one fails with an error naming the limit.
+pub(crate) fn sse_json_with_limit(
+    api: ApiProfile,
+    provider: String,
+    body: Body,
+    limit: usize,
+) -> BoxStream<'static, Result<SseJson, Error>> {
+    sse::parse_with_limit(body, limit)
         .map(move |event| {
-            let event = event.map_err(|error| transport_error(&api, &provider, error))?;
+            let event = event.map_err(|error| match error {
+                TransportError::Limit(limit) => limit_error(&api, &provider, "stream event", limit),
+                error => transport_error(&api, &provider, error),
+            })?;
             if event.data.trim() == "[DONE]" {
                 return Ok(SseJson::Done);
             }
