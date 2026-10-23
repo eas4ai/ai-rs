@@ -2405,6 +2405,44 @@ async fn ggl_020_a_chunk_without_a_status_is_sent_again_and_processing_is_polled
     );
 }
 
+#[tokio::test]
+async fn ggl_020_an_upload_fills_only_the_fields_google_reports() {
+    let transport = Recorder::new([
+        Reply::json(json!({})).header("x-goog-upload-url", "https://upload.example/u1"),
+        Reply::json(json!({"file": {"name": "files/abc", "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc", "state": "ACTIVE"}}))
+            .header("x-goog-upload-status", "final"),
+    ]);
+    let provider = google_provider(transport.clone());
+    let file = UploadFile {
+        data: bytes::Bytes::from_static(b"%PDF"),
+        media_type: "application/pdf".into(),
+        filename: None,
+    };
+    let uploaded = ops::upload_file(
+        provider.as_ref(),
+        file,
+        UploadParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        uploaded
+            .value
+            .provider_reference
+            .get("google")
+            .map(String::as_str),
+        Some("https://generativelanguage.googleapis.com/v1beta/files/abc")
+    );
+    assert_eq!(
+        uploaded.value.media_type, None,
+        "a media type Google did not report was filled"
+    );
+    assert_eq!(uploaded.value.size_bytes, None);
+    assert_eq!(uploaded.value.created_at, None);
+    assert_eq!(uploaded.value.expires_at, None);
+}
+
 #[tokio::test(start_paused = true)]
 async fn ggl_020_failures_fail_the_upload() {
     let cases: Vec<Vec<Reply>> = vec![
