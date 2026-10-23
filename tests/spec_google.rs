@@ -3066,6 +3066,13 @@ fn ggl_024_client_events_become_live_messages() {
             json!({"realtimeInput": {"audio": {"data": "AAA=", "mimeType": "audio/pcm;rate=24000"}}})
         )
     );
+    // Gemini Live names no client event, so an event id is left out.
+    assert_eq!(
+        encode(RealtimeClientEvent::InputAudioAppend("AAA=".into()).with_event_id("e1")),
+        Some(
+            json!({"realtimeInput": {"audio": {"data": "AAA=", "mimeType": "audio/pcm;rate=24000"}}})
+        )
+    );
     assert_eq!(
         encode(RealtimeClientEvent::InputAudioCommit),
         Some(json!({"realtimeInput": {"audioStreamEnd": true}}))

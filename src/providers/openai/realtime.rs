@@ -325,12 +325,21 @@ fn optional(value: &Value, key: &str) -> Option<String> {
 
 impl RealtimeCodec for Codec {
     fn encode(&mut self, event: &RealtimeClientEvent) -> Result<Option<String>, Error> {
-        let message = match event {
+        // TypeScript sends an event id with a session update and an audio
+        // append only.
+        let event_id = event.event_id();
+        let with_id = |mut message: Value| {
+            if let Some(id) = event_id {
+                message["event_id"] = json!(id);
+            }
+            message
+        };
+        let message = match event.inner() {
             RealtimeClientEvent::SessionUpdate(config) => {
-                json!({"type": "session.update", "session": session(config, &self.model)?})
+                with_id(json!({"type": "session.update", "session": session(config, &self.model)?}))
             }
             RealtimeClientEvent::InputAudioAppend(audio) => {
-                json!({"type": "input_audio_buffer.append", "audio": audio})
+                with_id(json!({"type": "input_audio_buffer.append", "audio": audio}))
             }
             RealtimeClientEvent::InputAudioCommit => json!({"type": "input_audio_buffer.commit"}),
             RealtimeClientEvent::InputAudioClear => json!({"type": "input_audio_buffer.clear"}),
@@ -374,12 +383,14 @@ impl RealtimeCodec for Codec {
                 message
             }
             RealtimeClientEvent::ResponseCancel => json!({"type": "response.cancel"}),
-            // The realtime API has no message for these.
+            // The realtime API has no message for these; `inner` never
+            // returns an event with an id.
             RealtimeClientEvent::SessionStart(_)
             | RealtimeClientEvent::SessionClose
             | RealtimeClientEvent::InputAudioMute
             | RealtimeClientEvent::InputAudioUnmute
-            | RealtimeClientEvent::ContextAppend { .. } => return Ok(None),
+            | RealtimeClientEvent::ContextAppend { .. }
+            | RealtimeClientEvent::WithEventId { .. } => return Ok(None),
         };
         Ok(Some(message.to_string()))
     }
@@ -390,6 +401,7 @@ impl RealtimeCodec for Codec {
         };
         let response_id =
             || optional(&raw["response"], "id").unwrap_or_else(|| text(&raw, "response_id"));
+        let item_id = || optional(&raw["item"], "id").unwrap_or_else(|| text(&raw, "item_id"));
         let kind = match raw["type"].as_str().unwrap_or_default() {
             "session.created" => RealtimeServerEventKind::SessionCreated {
                 session_id: optional(&raw["session"], "id"),
@@ -403,6 +415,11 @@ impl RealtimeCodec for Codec {
             },
             "input_audio_buffer.committed" => RealtimeServerEventKind::AudioCommitted {
                 item_id: optional(&raw, "item_id"),
+                previous_item_id: optional(&raw, "previous_item_id"),
+            },
+            "conversation.item.added" => RealtimeServerEventKind::ConversationItemAdded {
+                item_id: item_id(),
+                item: raw["item"].clone(),
             },
             "conversation.item.input_audio_transcription.completed" => {
                 RealtimeServerEventKind::InputTranscriptionCompleted {
@@ -416,6 +433,22 @@ impl RealtimeCodec for Codec {
             "response.done" => RealtimeServerEventKind::ResponseDone {
                 response_id: response_id(),
                 status: optional(&raw["response"], "status").unwrap_or_else(|| "completed".into()),
+            },
+            "response.output_item.added" => RealtimeServerEventKind::OutputItemAdded {
+                response_id: text(&raw, "response_id"),
+                item_id: item_id(),
+            },
+            "response.output_item.done" => RealtimeServerEventKind::OutputItemDone {
+                response_id: text(&raw, "response_id"),
+                item_id: item_id(),
+            },
+            "response.content_part.added" => RealtimeServerEventKind::ContentPartAdded {
+                response_id: text(&raw, "response_id"),
+                item_id: text(&raw, "item_id"),
+            },
+            "response.content_part.done" => RealtimeServerEventKind::ContentPartDone {
+                response_id: text(&raw, "response_id"),
+                item_id: text(&raw, "item_id"),
             },
             "response.output_audio.delta" => RealtimeServerEventKind::AudioDelta {
                 response_id: text(&raw, "response_id"),
@@ -472,6 +505,7 @@ impl RealtimeCodec for Codec {
                     .or_else(|| optional(&raw, "message"))
                     .unwrap_or_else(|| "Unknown error".into()),
                 code: optional(&raw["error"], "code").or_else(|| optional(&raw, "code")),
+                client_event_id: optional(&raw["error"], "event_id"),
             },
             other => RealtimeServerEventKind::Custom {
                 raw_type: other.to_owned(),
@@ -492,14 +526,42 @@ fn invalid_event(raw: Value, message: &str) -> RealtimeServerEvent {
         kind: RealtimeServerEventKind::Error {
             message: message.into(),
             code: Some("invalid_server_event".into()),
+            client_event_id: None,
         },
         raw,
     }
 }
 
+/// The Live channel a context append goes to: the `openai` option
+/// `channel`, `thinking` by default.
+fn context_channel(options: &crate::providers::operations::Metadata) -> Result<&str, Error> {
+    let Some(openai) = options.get("openai") else {
+        return Ok("thinking");
+    };
+    let openai = openai
+        .as_object()
+        .ok_or_else(|| invalid("OpenAI Live context-append options must be an object"))?;
+    if let Some(key) = openai.keys().find(|key| *key != "channel") {
+        return Err(invalid(format!(
+            "OpenAI Live context-append takes the option channel, not {key}"
+        )));
+    }
+    match openai.get("channel").filter(|v| !v.is_null()) {
+        None => Ok("thinking"),
+        Some(Value::String(channel))
+            if ["instructions", "thinking", "commentary"].contains(&channel.as_str()) =>
+        {
+            Ok(channel)
+        }
+        Some(other) => Err(invalid(format!(
+            "OpenAI Live context-append channel must be instructions, thinking or commentary, not {other}"
+        ))),
+    }
+}
+
 impl RealtimeCodec for LiveCodec {
     fn encode(&mut self, event: &RealtimeClientEvent) -> Result<Option<String>, Error> {
-        let message = match event {
+        let mut message = match event.inner() {
             RealtimeClientEvent::SessionStart(config) => {
                 json!({"type": "session.start", "session": live_session(config, &self.model, false)?})
             }
@@ -517,8 +579,10 @@ impl RealtimeCodec for LiveCodec {
             RealtimeClientEvent::ContextAppend {
                 content,
                 delegation_id,
+                provider_options,
             } => {
-                json!({"type": "session.thinking.append", "content": content, "delegation_id": delegation_id})
+                let channel = context_channel(provider_options)?;
+                json!({"type": format!("session.{channel}.append"), "content": content, "delegation_id": delegation_id})
             }
             other => {
                 return Err(invalid(format!(
@@ -526,6 +590,10 @@ impl RealtimeCodec for LiveCodec {
                 )));
             }
         };
+        // TypeScript sends the event id with every Live command.
+        if let Some(id) = event.event_id() {
+            message["event_id"] = json!(id);
+        }
         Ok(Some(message.to_string()))
     }
 
@@ -649,6 +717,7 @@ impl RealtimeCodec for LiveCodec {
                 Some(message) => RealtimeServerEventKind::Error {
                     message: message.to_owned(),
                     code: optional(&raw["error"], "code"),
+                    client_event_id: optional(&raw["error"], "client_event_id"),
                 },
                 None => {
                     return Ok(vec![invalid_event(

@@ -594,7 +594,8 @@ fn function_response(output: &str) -> Value {
 
 impl RealtimeCodec for Codec {
     fn encode(&mut self, event: &RealtimeClientEvent) -> Result<Option<String>, Error> {
-        let value = match event {
+        // Gemini Live names no client event, so an event id is left out.
+        let value = match event.inner() {
             RealtimeClientEvent::SessionUpdate(config) => {
                 if let Some(rate) = config
                     .input_audio_format

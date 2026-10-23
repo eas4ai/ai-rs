@@ -765,6 +765,7 @@ pub enum RealtimeItem {
 
 /// A normalized client event, as TypeScript's `RealtimeModelV4ClientEvent`.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum RealtimeClientEvent {
     SessionUpdate(RealtimeSessionConfig),
     SessionStart(RealtimeSessionConfig),
@@ -774,6 +775,9 @@ pub enum RealtimeClientEvent {
     ContextAppend {
         content: String,
         delegation_id: Option<String>,
+        /// Options under the provider's name, such as OpenAI Live's
+        /// `{"openai": {"channel": "instructions"}}`.
+        provider_options: Metadata,
     },
     /// Base64 audio in the session's input format.
     InputAudioAppend(String),
@@ -789,6 +793,40 @@ pub enum RealtimeClientEvent {
         options: Option<Value>,
     },
     ResponseCancel,
+    /// An event with the id the provider names it by in its replies, such
+    /// as an error's `client_event_id`. Build one with
+    /// [`RealtimeClientEvent::with_event_id`].
+    WithEventId {
+        event_id: String,
+        event: Box<RealtimeClientEvent>,
+    },
+}
+
+impl RealtimeClientEvent {
+    /// This event, sent with `event_id`.
+    #[must_use]
+    pub fn with_event_id(self, event_id: impl Into<String>) -> Self {
+        Self::WithEventId {
+            event_id: event_id.into(),
+            event: Box::new(self.inner().clone()),
+        }
+    }
+
+    /// The id this event is sent with, if any.
+    pub fn event_id(&self) -> Option<&str> {
+        match self {
+            Self::WithEventId { event_id, .. } => Some(event_id),
+            _ => None,
+        }
+    }
+
+    /// The event without its id.
+    pub fn inner(&self) -> &Self {
+        match self {
+            Self::WithEventId { event, .. } => event.inner(),
+            other => other,
+        }
+    }
 }
 
 /// A normalized server event, as TypeScript's `RealtimeModelV4ServerEvent`;
@@ -800,6 +838,7 @@ pub struct RealtimeServerEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum RealtimeServerEventKind {
     SessionCreated {
         session_id: Option<String>,
@@ -813,6 +852,12 @@ pub enum RealtimeServerEventKind {
     },
     AudioCommitted {
         item_id: Option<String>,
+        previous_item_id: Option<String>,
+    },
+    /// An item was added to the conversation.
+    ConversationItemAdded {
+        item_id: String,
+        item: Value,
     },
     InputTranscriptionCompleted {
         item_id: String,
@@ -824,6 +869,22 @@ pub enum RealtimeServerEventKind {
     ResponseDone {
         response_id: String,
         status: String,
+    },
+    OutputItemAdded {
+        response_id: String,
+        item_id: String,
+    },
+    OutputItemDone {
+        response_id: String,
+        item_id: String,
+    },
+    ContentPartAdded {
+        response_id: String,
+        item_id: String,
+    },
+    ContentPartDone {
+        response_id: String,
+        item_id: String,
     },
     AudioDelta {
         response_id: String,
@@ -870,6 +931,8 @@ pub enum RealtimeServerEventKind {
     Error {
         message: String,
         code: Option<String>,
+        /// The id of the client event the error is about.
+        client_event_id: Option<String>,
     },
     /// A session that starts once started, with who runs its delegations:
     /// `client` or `provider`.
