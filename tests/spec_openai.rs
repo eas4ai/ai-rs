@@ -719,3 +719,535 @@ async fn oai_003_an_error_body_gives_its_message_type_code_and_status_kind() {
         suprnova_ai::errors::ProviderErrorKind::RateLimit
     );
 }
+
+// OAI-004
+
+/// Call options whose `openai` provider parameters are `options`.
+fn openai(options: Value) -> StreamOptions {
+    with_openai(InferenceRequestParams::default(), options)
+}
+/// These core parameters with `openai` provider parameters `options`.
+fn with_openai(params: InferenceRequestParams, options: Value) -> StreamOptions {
+    StreamOptions {
+        params: Some(params.with_provider_param("openai", options)),
+        ..Default::default()
+    }
+}
+/// The error `build_request` gives for this model and these options.
+fn build_error(model: &str, options: &StreamOptions) -> suprnova_ai::Error {
+    build_request(model, &config(), vec![user("hi")], options, true)
+        .expect_err("the request was built")
+}
+fn function_tool(name: &str) -> Tool {
+    Tool::function(
+        name,
+        ToolSpec {
+            description: None,
+            params: json!({"type": "object", "properties": {}})
+                .try_into()
+                .unwrap(),
+        },
+    )
+}
+
+#[test]
+fn oai_004_each_option_goes_out_under_its_wire_name() {
+    let cases = [
+        (json!({"conversation": "conv_1"}), "/conversation", json!("conv_1")),
+        (json!({"instructions": "be brief"}), "/instructions", json!("be brief")),
+        (json!({"maxToolCalls": 3}), "/max_tool_calls", json!(3)),
+        (json!({"metadata": {"a": "b"}}), "/metadata", json!({"a": "b"})),
+        (json!({"parallelToolCalls": false}), "/parallel_tool_calls", json!(false)),
+        (json!({"previousResponseId": "resp_0"}), "/previous_response_id", json!("resp_0")),
+        (json!({"promptCacheKey": "k"}), "/prompt_cache_key", json!("k")),
+        (json!({"promptCacheRetention": "24h"}), "/prompt_cache_retention", json!("24h")),
+        (json!({"safetyIdentifier": "s"}), "/safety_identifier", json!("s")),
+        (json!({"serviceTier": "priority"}), "/service_tier", json!("priority")),
+        (json!({"store": false}), "/store", json!(false)),
+        (json!({"textVerbosity": "low"}), "/text/verbosity", json!("low")),
+        (json!({"truncation": "auto"}), "/truncation", json!("auto")),
+        (json!({"user": "u"}), "/user", json!("u")),
+        (json!({"logprobs": 5}), "/top_logprobs", json!(5)),
+        (json!({"logprobs": true}), "/top_logprobs", json!(20)),
+        (
+            json!({"include": ["file_search_call.results"]}),
+            "/include",
+            json!(["file_search_call.results"]),
+        ),
+        (
+            json!({"contextManagement": [{"type": "compaction", "compactThreshold": 1000}]}),
+            "/context_management",
+            json!([{"type": "compaction", "compact_threshold": 1000}]),
+        ),
+        // gpt-4.1 takes reasoning settings only when forced to reason (OAI-005).
+        (
+            json!({"forceReasoning": true, "reasoningEffort": "low", "reasoningSummary": "auto"}),
+            "/reasoning",
+            json!({"effort": "low", "summary": "auto"}),
+        ),
+        (
+            json!({"forceReasoning": true, "reasoningMode": "pro"}),
+            "/reasoning",
+            json!({"mode": "pro"}),
+        ),
+        (
+            json!({"forceReasoning": true, "reasoningContext": "all_turns"}),
+            "/reasoning",
+            json!({"context": "all_turns"}),
+        ),
+    ];
+    for (options, pointer, expected) in cases {
+        let body = body_for("gpt-4.1", vec![user("hi")], &openai(options.clone()));
+        assert_eq!(body.pointer(pointer), Some(&expected), "{options}: {body}");
+    }
+    let body = body_for(
+        "gpt-4.1",
+        vec![user("hi")],
+        &openai(json!({"compactionTrigger": true})),
+    );
+    assert_eq!(
+        items(&body).last(),
+        Some(&json!({"type": "compaction_trigger"})),
+        "{body}"
+    );
+}
+
+#[test]
+fn oai_004_an_output_schema_is_strict_unless_the_option_says_otherwise() {
+    let schema = |options: Value| {
+        let mut options = openai(options);
+        options.output_schema = Some(
+            json!({"type": "object", "properties": {"a": {"type": "string"}}})
+                .try_into()
+                .unwrap(),
+        );
+        body_for("gpt-4.1", vec![user("hi")], &options)["text"]["format"]["strict"].clone()
+    };
+    assert_eq!(schema(json!({})), json!(true));
+    assert_eq!(schema(json!({"strictJsonSchema": false})), json!(false));
+}
+
+#[test]
+fn oai_004_allowed_tools_go_out_as_an_allowed_tools_choice() {
+    let mut options = openai(json!({"allowedTools": {"toolNames": ["a"]}}));
+    options.tools = vec![function_tool("a"), function_tool("b")];
+    options.tool_choice = Some(suprnova_ai::types::ToolChoice::None);
+    let body = body_for("gpt-4.1", vec![user("hi")], &options);
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "a"}]})
+    );
+}
+
+#[test]
+fn oai_004_an_option_takes_precedence_over_the_core_parameter() {
+    let mut params = InferenceRequestParams::default();
+    params.provider_service = Some(suprnova_ai::models::params::ProviderServiceParams {
+        service_tier: suprnova_ai::models::params::ProviderValue::Value("priority".into()),
+    });
+    let body = body_for(
+        "gpt-5.4",
+        vec![user("hi")],
+        &with_openai(params, json!({"serviceTier": "flex"})),
+    );
+    assert_eq!(body["service_tier"], "flex", "{body}");
+}
+
+#[tokio::test]
+async fn oai_004_options_and_settings_openai_never_takes_fail_before_a_request() {
+    use suprnova_ai::models::params::{
+        ProviderValue, RepetitionPenaltyParams, SamplerParams, Seed, SeedSamplerParams,
+        TopKSamplerParams,
+    };
+    let sampling = |sampling: SamplerParams| InferenceRequestParams {
+        sampling: ProviderValue::Value(sampling),
+        ..Default::default()
+    };
+    let cases = [
+        ("an unknown option", openai(json!({"reasoningEfort": "low"}))),
+        ("logprobs 21", openai(json!({"logprobs": 21}))),
+        ("a null forceReasoning", openai(json!({"forceReasoning": null}))),
+        ("a service tier outside the set", openai(json!({"serviceTier": "slow"}))),
+        (
+            "conversation with previousResponseId",
+            openai(json!({"conversation": "c", "previousResponseId": "r"})),
+        ),
+        (
+            "a seed",
+            with_openai(
+                sampling(SamplerParams {
+                    seed: Some(SeedSamplerParams {
+                        seed: ProviderValue::Value(Some(Seed::Value(7))),
+                    }),
+                    ..Default::default()
+                }),
+                json!({}),
+            ),
+        ),
+        (
+            "top-k",
+            with_openai(
+                sampling(SamplerParams {
+                    top_k: Some(TopKSamplerParams {
+                        top_k: ProviderValue::Value(Some(4)),
+                    }),
+                    ..Default::default()
+                }),
+                json!({}),
+            ),
+        ),
+        (
+            "a frequency penalty",
+            with_openai(
+                sampling(SamplerParams {
+                    repetition_penalty: Some(RepetitionPenaltyParams {
+                        frequency_penalty: ProviderValue::Value(Some(0.5)),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                json!({}),
+            ),
+        ),
+        (
+            "a presence penalty",
+            with_openai(
+                sampling(SamplerParams {
+                    repetition_penalty: Some(RepetitionPenaltyParams {
+                        presence_penalty: ProviderValue::Value(Some(0.5)),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                json!({}),
+            ),
+        ),
+    ];
+    for (case, options) in cases {
+        let transport = Recorder::new([text_reply()]);
+        let model = Model::new(
+            "gpt-4.1",
+            Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+        );
+        let error = run(&model, options).await.expect_err(case);
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{case}: {error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty(), "{case}");
+    }
+}
+
+// OAI-005
+
+/// The `setting` and `model` fields of each debug event of target
+/// `suprnova_ai::openai` that `f` logs.
+fn logged<T>(f: impl FnOnce() -> T) -> (T, Vec<(String, String)>) {
+    let events = Arc::new(Mutex::new(vec![]));
+    let out = tracing::subscriber::with_default(Capture(events.clone()), f);
+    let events = events.lock().unwrap().clone();
+    (out, events)
+}
+struct Capture(Arc<Mutex<Vec<(String, String)>>>);
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let meta = event.metadata();
+        if meta.target() != "suprnova_ai::openai" || *meta.level() != tracing::Level::DEBUG {
+            return;
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        self.0.lock().unwrap().push((fields.setting, fields.model));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+#[derive(Default)]
+struct Fields {
+    setting: String,
+    model: String,
+}
+impl tracing::field::Visit for Fields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "setting" => self.setting = value.into(),
+            "model" => self.model = value.into(),
+            _ => {}
+        }
+    }
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+fn system(text: &str) -> Message {
+    Message::new(MessageRole::System, vec![Part::Text(TextPart::new(text))])
+}
+fn temperature(effort: Option<&str>, options: Value) -> StreamOptions {
+    let mut params = InferenceRequestParams::default().with_temperature(0.5);
+    if let Some(effort) = effort {
+        params = params.with_reasoning_effort(Some(effort.to_owned()).into());
+    }
+    with_openai(params, options)
+}
+
+#[test]
+fn oai_005_system_messages_follow_the_model_and_the_option() {
+    let first = |model: &str, options: Value| {
+        let body = body_for(model, vec![system("rules"), user("hi")], &openai(options));
+        items(&body)[0].clone()
+    };
+    assert_eq!(first("gpt-5.4", json!({}))["role"], "developer");
+    assert_eq!(first("gpt-4.1", json!({}))["role"], "system");
+    assert_eq!(
+        first("gpt-5.4", json!({"systemMessageMode": "system"}))["role"],
+        "system"
+    );
+    assert_eq!(
+        first("gpt-4.1", json!({"systemMessageMode": "developer"}))["role"],
+        "developer"
+    );
+    assert_eq!(
+        first("gpt-4.1", json!({"forceReasoning": true}))["role"],
+        "developer"
+    );
+    assert_eq!(
+        first("gpt-5.4", json!({"systemMessageMode": "remove"}))["role"],
+        "user"
+    );
+}
+
+#[test]
+fn oai_005_an_effort_without_a_summary_option_asks_for_a_detailed_summary() {
+    let body = body_for(
+        "gpt-5.4",
+        vec![user("hi")],
+        &openai(json!({"reasoningEffort": "high"})),
+    );
+    assert_eq!(body["reasoning"], json!({"effort": "high", "summary": "detailed"}));
+    let core = StreamOptions {
+        params: Some(InferenceRequestParams::default().with_reasoning_effort(Some("low".into()).into())),
+        ..Default::default()
+    };
+    let body = body_for("gpt-5.4", vec![user("hi")], &core);
+    assert_eq!(body["reasoning"], json!({"effort": "low", "summary": "detailed"}));
+    let body = body_for(
+        "gpt-5.4",
+        vec![user("hi")],
+        &openai(json!({"reasoningEffort": "none"})),
+    );
+    assert_eq!(body["reasoning"], json!({"effort": "none"}));
+    let body = body_for(
+        "gpt-5.4",
+        vec![user("hi")],
+        &openai(json!({"reasoningEffort": "high", "reasoningSummary": null})),
+    );
+    assert_eq!(body["reasoning"], json!({"effort": "high"}));
+}
+
+#[test]
+fn oai_005_settings_the_model_does_not_take_are_left_out_and_logged() {
+    let web = || {
+        let mut options = openai(json!({"logprobs": 3}));
+        options.params = Some(
+            options
+                .params
+                .take()
+                .unwrap()
+                .with_reasoning_effort(Some("high".into()).into()),
+        );
+        options
+    };
+    let cases: Vec<(&str, StreamOptions, &str, &str)> = vec![
+        ("o3", temperature(None, json!({})), "temperature", "/temperature"),
+        (
+            "gpt-5.4",
+            temperature(Some("high"), json!({})),
+            "temperature",
+            "/temperature",
+        ),
+        (
+            "gpt-4.1",
+            openai(json!({"reasoningEffort": "low"})),
+            "reasoningEffort",
+            "/reasoning",
+        ),
+        (
+            "gpt-4.1",
+            openai(json!({"reasoningSummary": "auto"})),
+            "reasoningSummary",
+            "/reasoning",
+        ),
+        (
+            "gpt-6-astra",
+            openai(json!({"reasoningEffort": "minimal"})),
+            "reasoningEffort",
+            "/reasoning/effort",
+        ),
+        (
+            "gpt-4.1",
+            openai(json!({"serviceTier": "flex"})),
+            "serviceTier",
+            "/service_tier",
+        ),
+        (
+            "gpt-5-nano",
+            openai(json!({"serviceTier": "priority"})),
+            "serviceTier",
+            "/service_tier",
+        ),
+        ("gpt-6-astra", web(), "logprobs", "/top_logprobs"),
+        (
+            "gpt-5.4",
+            openai(json!({"reasoningEffortUpdate": "low"})),
+            "reasoningEffortUpdate",
+            "/input/0/reasoning",
+        ),
+        (
+            "gpt-6-astra",
+            openai(json!({"promptCacheRetention": "24h"})),
+            "promptCacheRetention",
+            "/prompt_cache_retention",
+        ),
+    ];
+    for (model, options, setting, pointer) in cases {
+        let (body, events) = logged(|| body_for(model, vec![user("hi")], &options));
+        assert_eq!(body.pointer(pointer), None, "{model} {setting}: {body}");
+        assert!(
+            events.contains(&(setting.to_owned(), model.to_owned())),
+            "{model} {setting}: {events:?}"
+        );
+    }
+    // The logprobs include value goes with the top logprobs.
+    let (body, _) = logged(|| body_for("gpt-6-astra", vec![user("hi")], &web()));
+    assert_eq!(body.get("include"), None, "{body}");
+}
+
+#[test]
+fn oai_005_sampling_goes_out_where_the_model_takes_it() {
+    let body = body_for("gpt-5.4", vec![user("hi")], &temperature(Some("none"), json!({})));
+    assert_eq!(body["temperature"], 0.5, "{body}");
+    let body = body_for("gpt-4.1", vec![user("hi")], &temperature(None, json!({})));
+    assert_eq!(body["temperature"], 0.5, "{body}");
+    let body = body_for("gpt-5.4", vec![user("hi")], &openai(json!({"logprobs": 2})));
+    assert_eq!(body["top_logprobs"], 2, "{body}");
+    let body = body_for(
+        "gpt-6-sol",
+        vec![user("hi")],
+        &temperature(Some("none"), json!({})),
+    );
+    assert_eq!(body["temperature"], 0.5, "{body}");
+}
+
+/// A system message that only sets a reasoning effort.
+fn update(effort: &str, text: &str) -> Message {
+    let mut message = system(text);
+    message.provider_metadata =
+        Some([("openai".to_owned(), json!({"reasoningEffortUpdate": effort}))].into());
+    message
+}
+
+#[test]
+fn oai_005_reasoning_effort_updates_go_out_where_they_apply() {
+    let body = body_for(
+        "gpt-6-sol",
+        vec![user("hi")],
+        &openai(json!({"reasoningEffortUpdate": "low"})),
+    );
+    assert_eq!(
+        items(&body)[0],
+        json!({"type": "configuration_update", "reasoning": {"effort": "low"}})
+    );
+    let body = body_for(
+        "gpt-6-sol",
+        vec![user("hi"), update("high", ""), user("more")],
+        &StreamOptions::default(),
+    );
+    assert_eq!(
+        items(&body)[1],
+        json!({"type": "configuration_update", "reasoning": {"effort": "high"}})
+    );
+    // The same update first in the input is not sent twice.
+    let body = body_for(
+        "gpt-6-sol",
+        vec![update("low", ""), user("hi")],
+        &openai(json!({"reasoningEffortUpdate": "low"})),
+    );
+    let updates = items(&body)
+        .iter()
+        .filter(|item| item["type"] == "configuration_update")
+        .count();
+    assert_eq!(updates, 1, "{body}");
+}
+
+#[test]
+fn oai_005_message_level_updates_that_cannot_apply_fail() {
+    let cases = [
+        ("gpt-5.4", vec![user("hi"), update("low", "")], json!({})),
+        ("gpt-6-sol", vec![update("low", "rules"), user("hi")], json!({})),
+        (
+            "gpt-6-sol",
+            vec![update("low", ""), update("high", ""), user("hi")],
+            json!({}),
+        ),
+        (
+            "gpt-6-sol",
+            vec![update("high", ""), user("hi")],
+            json!({"reasoningEffortUpdate": "low"}),
+        ),
+        ("gpt-6-astra", vec![update("none", ""), user("hi")], json!({})),
+        (
+            "gpt-6-sol",
+            vec![update("low", ""), user("hi")],
+            json!({"truncation": "auto"}),
+        ),
+    ];
+    for (model, messages, options) in cases {
+        let error = build_request(model, &config(), messages, &openai(options.clone()), true)
+            .expect_err(model);
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{model} {options}: {error:?}"
+        );
+    }
+}
+
+// OAI-006
+
+#[test]
+fn oai_006_include_values_follow_the_tools_and_options() {
+    let tools = || {
+        vec![
+            suprnova_ai::providers::openai::tools::web_search(json!({})).unwrap(),
+            suprnova_ai::providers::openai::tools::code_interpreter(json!({})).unwrap(),
+        ]
+    };
+    let mut options = openai(json!({"include": ["file_search_call.results"]}));
+    options.tools = tools();
+    let body = body_for("gpt-4.1", vec![user("hi")], &options);
+    assert_eq!(
+        body["include"],
+        json!([
+            "file_search_call.results",
+            "web_search_call.action.sources",
+            "code_interpreter_call.outputs"
+        ])
+    );
+    let mut options = openai(json!({"includeWebSearchSources": false}));
+    options.tools = tools();
+    let body = body_for("gpt-4.1", vec![user("hi")], &options);
+    assert_eq!(body["include"], json!(["code_interpreter_call.outputs"]));
+    let body = body_for("gpt-4.1", vec![user("hi")], &openai(json!({"logprobs": 3})));
+    assert_eq!(body["include"], json!(["message.output_text.logprobs"]));
+    let body = body_for(
+        "gpt-4.1",
+        vec![user("hi")],
+        &openai(json!({"forceReasoning": true, "store": false})),
+    );
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+}

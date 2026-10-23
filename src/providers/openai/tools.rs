@@ -141,3 +141,94 @@ pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
     }
     Ok(result)
 }
+
+/// How a tool of the call can appear in `tool_choice.allowed_tools`.
+#[derive(Clone, Debug, PartialEq)]
+enum Allowed {
+    Entry(Value),
+    Unsupported(String),
+}
+
+/// A sent tool's entry in `allowed_tools` (`toAllowedToolResolution`).
+fn allowed_entry(sent: &Value) -> Allowed {
+    let kind = sent["type"].as_str().unwrap_or_default();
+    match kind {
+        "function" | "custom" => Allowed::Entry(json!({"type": kind, "name": sent["name"]})),
+        "mcp" => Allowed::Entry(json!({"type": "mcp", "server_label": sent["server_label"]})),
+        "file_search" | "web_search" | "web_search_preview" | "image_generation"
+        | "code_interpreter" | "computer" | "apply_patch" | "shell" | "local_shell"
+        | "programmatic_tool_calling" => Allowed::Entry(json!({"type": kind})),
+        _ => Allowed::Unsupported(format!(
+            "OpenAI does not support {kind} tools in tool_choice.allowed_tools"
+        )),
+    }
+}
+
+/// The tool choice of the option `allowedTools`: each named tool of the call
+/// as OpenAI lists it, by its name or by the OpenAI name of a provider tool,
+/// and a name the call does not declare as a function. A tool that cannot be
+/// listed is left out and logged; a list left empty fails
+/// (`openai-responses-prepare-tools.ts`).
+pub(super) fn allowed_tools(
+    allowed: &super::options::AllowedTools,
+    tools: &[Tool],
+    sent: &[Value],
+    model: &str,
+) -> Result<Value, Error> {
+    // By tool name, and by the OpenAI name of a provider tool named otherwise;
+    // `None` marks an OpenAI name that several different tools share.
+    let mut by_name = std::collections::BTreeMap::new();
+    let mut aliases: std::collections::BTreeMap<String, Option<Allowed>> = Default::default();
+    for (tool, sent) in tools.iter().zip(sent) {
+        let resolution = allowed_entry(sent);
+        by_name.insert(tool.name.clone(), resolution.clone());
+        let canonical = sent["type"].as_str().unwrap_or_default();
+        if tool.kind == ToolKind::Provider && canonical != tool.name {
+            aliases
+                .entry(canonical.to_owned())
+                .and_modify(|alias| {
+                    if alias.as_ref() != Some(&resolution) {
+                        *alias = None;
+                    }
+                })
+                .or_insert(Some(resolution));
+        }
+    }
+    let mut entries = vec![];
+    let mut left_out = vec![];
+    for name in &allowed.tool_names {
+        let setting = format!("allowedTools entry {name:?}");
+        let resolution = match (by_name.get(name), aliases.get(name)) {
+            (Some(direct), _) => direct.clone(),
+            (None, Some(Some(alias))) => alias.clone(),
+            (None, Some(None)) => {
+                super::capabilities::dropped(
+                    &setting,
+                    model,
+                    "several tools of the call share this OpenAI tool name",
+                );
+                left_out.push(name.as_str());
+                continue;
+            }
+            (None, None) => Allowed::Entry(json!({"type": "function", "name": name})),
+        };
+        match resolution {
+            Allowed::Entry(entry) => entries.push(entry),
+            Allowed::Unsupported(reason) => {
+                super::capabilities::dropped(&setting, model, &reason);
+                left_out.push(name.as_str());
+            }
+        }
+    }
+    if entries.is_empty() {
+        return Err(invalid(format!(
+            "allowedTools names only tools that cannot be allow-listed: {}",
+            left_out.join(", ")
+        )));
+    }
+    Ok(json!({
+        "type": "allowed_tools",
+        "mode": allowed.mode.as_deref().unwrap_or("auto"),
+        "tools": entries,
+    }))
+}
