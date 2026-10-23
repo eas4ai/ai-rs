@@ -1263,3 +1263,1698 @@ async fn ggl_012_a_buffered_call_continues_a_continuation() {
     assert_eq!(message.text(), "ab");
     assert_eq!(transport.nth_body(1)["continuationToken"], "t1");
 }
+
+// GGL-013
+
+use suprnova_ai::{ops, providers::operations::*};
+
+fn embed_params(google: Value) -> EmbedParams {
+    EmbedParams {
+        provider_options: [("google".to_owned(), google)].into(),
+    }
+}
+
+#[tokio::test]
+async fn ggl_013_one_value_uses_embed_content_and_several_batch_embed_contents() {
+    let transport = Recorder::new([Reply::json(json!({"embedding":{"values":[0.1,0.2]}}))]);
+    let m = model("gemini-embedding-001", transport.clone());
+    let item = ops::embed(
+        &m,
+        vec!["a".into()],
+        embed_params(json!({"outputDimensionality": 2, "taskType": "RETRIEVAL_QUERY"})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(item.value, vec![vec![0.1, 0.2]]);
+    let request = transport.request();
+    assert_eq!(
+        request.url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"model":"models/gemini-embedding-001","content":{"parts":[{"text":"a"}]},"outputDimensionality":2,"taskType":"RETRIEVAL_QUERY"})
+    );
+
+    let transport = Recorder::new([Reply::json(
+        json!({"embeddings":[{"values":[1.0]},{"values":[2.0]}]}),
+    )]);
+    let m = model("gemini-embedding-001", transport.clone());
+    let image = json!({"inlineData":{"mimeType":"image/png","data":"iVBORw=="}});
+    let item = ops::embed(
+        &m,
+        vec!["a".into(), "".into()],
+        embed_params(json!({"content": [null, [image]]})),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(item.value, vec![vec![1.0], vec![2.0]]);
+    assert_eq!(
+        transport.request().url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents"
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"requests":[
+            {"model":"models/gemini-embedding-001","content":{"role":"user","parts":[{"text":"a"}]}},
+            {"model":"models/gemini-embedding-001","content":{"role":"user","parts":[image]}}
+        ]})
+    );
+}
+
+#[tokio::test]
+async fn ggl_013_a_content_list_of_another_length_fails_and_runs_hold_100_values() {
+    let transport = Recorder::new([]);
+    let m = model("gemini-embedding-001", transport.clone());
+    let error = ops::embed(
+        &m,
+        vec!["a".into(), "b".into()],
+        embed_params(json!({"content": [null]})),
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    match error {
+        Error::Validation(message) => assert!(
+            message.contains("(1)") && message.contains("(2)"),
+            "{message}"
+        ),
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+    assert_eq!(transport.count(), 0);
+    let values: Vec<String> = (0..150).map(|i| i.to_string()).collect();
+    let reply = |n: usize| Reply::json(json!({"embeddings": vec![json!({"values":[0.0]}); n]}));
+    let transport = Recorder::new([reply(100), reply(50)]);
+    let m = model("gemini-embedding-001", transport.clone());
+    let item = ops::embed(&m, values, EmbedParams::default(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(item.value.len(), 150);
+    let sizes: Vec<usize> = transport
+        .all()
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["requests"]
+                .as_array()
+                .unwrap()
+                .len()
+        })
+        .collect();
+    assert_eq!(sizes.iter().sum::<usize>(), 150);
+    assert!(sizes.contains(&100) && sizes.contains(&50));
+}
+
+// GGL-014
+
+fn image_response() -> Reply {
+    Reply::json(json!({
+        "candidates":[{"content":{"parts":[{"text":"here"},{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]},"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1290}
+    }))
+}
+
+#[tokio::test]
+async fn ggl_014_image_generation_makes_one_generate_content_call() {
+    let transport = Recorder::new([image_response()]);
+    let m = model("gemini-2.5-flash-image", transport.clone());
+    let prompt = ImagePrompt {
+        text: Some("a cat".into()),
+        images: vec![MediaInput::Bytes(vec![
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a,
+        ])],
+        mask: None,
+    };
+    let params = ImageParams {
+        size: Some("1024x1024".into()),
+        aspect_ratio: Some("16:9".into()),
+        seed: Some(3),
+        provider_options: [(
+            "google".to_owned(),
+            json!({"imageConfig": {"imageSize": "2K"}, "googleSearch": {}}),
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let item = ops::generate_image(&m, prompt, params, Default::default())
+        .await
+        .unwrap();
+    let request = transport.request();
+    assert_eq!(
+        request.url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"
+    );
+    let body = transport.body();
+    assert_eq!(body["contents"][0]["parts"][0], json!({"text":"a cat"}));
+    assert_eq!(
+        body["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+        "image/png"
+    );
+    assert_eq!(
+        body["generationConfig"]["responseModalities"],
+        json!(["IMAGE"])
+    );
+    assert_eq!(
+        body["generationConfig"]["imageConfig"],
+        json!({"imageSize":"2K","aspectRatio":"16:9"})
+    );
+    assert_eq!(body["generationConfig"]["seed"], 3);
+    assert_eq!(body["tools"], json!([{"googleSearch":{}}]));
+    assert_eq!(item.value.len(), 1);
+    assert_eq!(item.value[0].media_type, "image/png");
+    assert!(
+        item.warnings
+            .iter()
+            .any(|w| w.kind == "unsupported" && w.feature.as_deref() == Some("size"))
+    );
+    assert_eq!(item.usage.as_ref().unwrap().output_tokens, 1290);
+    let google = &item.provider_metadata.as_ref().unwrap()["google"];
+    assert_eq!(google["finishReason"], "STOP");
+    assert_eq!(google["images"], json!([{}]));
+    assert!(google.get("usageMetadata").is_some());
+}
+
+#[tokio::test]
+async fn ggl_014_other_models_and_masks_fail_before_a_request() {
+    for (id, mask) in [
+        ("imagen-4.0-generate-001", None),
+        (
+            "gemini-2.5-flash-image",
+            Some(MediaInput::Url("https://example.com/m.png".into())),
+        ),
+    ] {
+        let transport = Recorder::new([]);
+        let prompt = ImagePrompt {
+            text: Some("x".into()),
+            images: vec![],
+            mask,
+        };
+        let error = ops::generate_image(
+            &model(id, transport.clone()),
+            prompt,
+            ImageParams::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::Validation(_)), "{id}: {error:?}");
+        assert_eq!(transport.count(), 0);
+    }
+}
+
+// GGL-015
+
+fn audio_response(mime: &str, data: &[u8]) -> Reply {
+    use base64::Engine as _;
+    Reply::json(
+        json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(data)}}]}}]}),
+    )
+}
+
+#[tokio::test]
+async fn ggl_015_legacy_models_prefix_instructions_and_wrap_pcm_in_wav() {
+    let transport = Recorder::new([audio_response("audio/L16;rate=24000", &[1, 0, 2, 0])]);
+    let m = model("gemini-2.5-flash-preview-tts", transport.clone());
+    let prompt = AudioPrompt {
+        text: "hello".into(),
+        instructions: Some("cheerful".into()),
+    };
+    let params = AudioParams {
+        speed: Some(1.2),
+        language: Some("en".into()),
+        ..Default::default()
+    };
+    let item = ops::generate_audio(&m, prompt, params, Default::default())
+        .await
+        .unwrap();
+    let body = transport.body();
+    assert_eq!(
+        transport.request().url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+    );
+    assert_eq!(
+        body["contents"],
+        json!([{"role":"user","parts":[{"text":"cheerful: hello"}]}])
+    );
+    assert_eq!(
+        body["generationConfig"],
+        json!({"responseModalities":["AUDIO"],"speechConfig":{"voiceConfig":{"prebuiltVoiceConfig":{"voiceName":"Kore"}}}})
+    );
+    let audio = item.value[0].data.as_bytes().unwrap();
+    assert_eq!(audio.len(), 48);
+    assert_eq!(&audio[0..4], b"RIFF");
+    assert_eq!(u32::from_le_bytes(audio[24..28].try_into().unwrap()), 24000);
+    assert_eq!(&audio[44..], &[1, 0, 2, 0]);
+    let features: Vec<&str> = item
+        .warnings
+        .iter()
+        .filter_map(|w| w.feature.as_deref())
+        .collect();
+    assert!(
+        features.contains(&"speed") && features.contains(&"language"),
+        "{features:?}"
+    );
+}
+
+#[tokio::test]
+async fn ggl_015_structured_models_send_turns_and_the_output_format() {
+    let transport = Recorder::new([audio_response("audio/L16;rate=24000", &[1, 0])]);
+    let m = model("gemini-3.8-flash-tts", transport.clone());
+    let speakers = json!({"speakerVoiceConfigs":[{"speaker":"A","voiceConfig":{"prebuiltVoiceConfig":{"voiceName":"Kore"}}},{"speaker":"B","voiceConfig":{"prebuiltVoiceConfig":{"voiceName":"Puck"}}}]});
+    let params = AudioParams {
+        output_format: Some("pcm".into()),
+        provider_options: [("google".to_owned(), json!({
+            "multiSpeakerVoiceConfig": speakers,
+            "turns": [{"text":"Hi","speechMetadata":{"speaker":"A"}},{"text":"Hey","speechMetadata":{"speaker":"B","style":"calm"}}]
+        }))].into(),
+        ..Default::default()
+    };
+    let prompt = AudioPrompt {
+        text: String::new(),
+        instructions: Some("warm".into()),
+    };
+    ops::generate_audio(&m, prompt, params, Default::default())
+        .await
+        .unwrap();
+    let body = transport.body();
+    assert_eq!(
+        body["contents"][0]["parts"],
+        json!([
+            {"text":"Hi","speechMetadata":{"style":"warm","speaker":"A"}},
+            {"text":"Hey","speechMetadata":{"style":"calm","speaker":"B"}}
+        ])
+    );
+    assert_eq!(
+        body["generationConfig"]["responseFormat"],
+        json!({"audio":{"mimeType":"AUDIO_L16"}})
+    );
+    assert_eq!(
+        body["generationConfig"]["speechConfig"]["multiSpeakerVoiceConfig"],
+        speakers
+    );
+}
+
+#[tokio::test]
+async fn ggl_015_custom_voices_empty_text_and_legacy_turns_fail() {
+    let cases = vec![
+        (
+            "gemini-2.5-flash-preview-tts",
+            AudioPrompt {
+                text: "x".into(),
+                instructions: None,
+            },
+            AudioParams {
+                voice: Some("voice_x".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "gemini-2.5-flash-preview-tts",
+            AudioPrompt {
+                text: String::new(),
+                instructions: None,
+            },
+            AudioParams::default(),
+        ),
+        (
+            "gemini-2.5-flash-preview-tts",
+            AudioPrompt {
+                text: "x".into(),
+                instructions: None,
+            },
+            AudioParams {
+                provider_options: [("google".to_owned(), json!({"turns":[{"text":"a"}]}))].into(),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (id, prompt, params) in cases {
+        let transport = Recorder::new([]);
+        let error = ops::generate_audio(
+            &model(id, transport.clone()),
+            prompt,
+            params,
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::Validation(_)), "{error:?}");
+        assert_eq!(transport.count(), 0);
+    }
+}
+
+// GGL-016
+
+#[tokio::test]
+async fn ggl_016_whole_files_go_to_the_interactions_api() {
+    let transport = Recorder::new([Reply::json(
+        json!({"steps":[{"type":"model_output","content":[
+            {"type":"text","text":"hello ","annotations":[{"type":"word_info","text":"hello","start_offset":"1.5s","end_offset":"2s"}]},
+            {"type":"text","text":"world"}
+        ]}]}),
+    )]);
+    let m = model("gemini-3.5-transcribe", transport.clone());
+    let audio = TranscribeInput::File(
+        FilePart::from_bytes(vec![1, 2, 3], Some("audio/wav"), None).unwrap(),
+    );
+    let params = TranscribeParams { provider_options: [("google".to_owned(), json!({"mode":"SMART","diarization":true,"wordTimestamp":true,"languageCodes":["en-US"],"customVocabulary":["Gemini"]}))].into() };
+    let item = ops::transcribe(&m, audio, params, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.request().url,
+        "https://generativelanguage.googleapis.com/v1beta/interactions"
+    );
+    assert_eq!(
+        transport.body(),
+        json!({
+            "model":"gemini-3.5-transcribe",
+            "input":[{"type":"audio","data":"AQID","mime_type":"audio/wav"}],
+            "generation_config":{"transcription_config":{"language_codes":["en-US"],"custom_vocabulary":["Gemini"],"mode":{"type":"smart","diarization_mode":"speaker","timestamp_granularities":["word"]}}}
+        })
+    );
+    assert_eq!(item.value.text, "hello world");
+    assert_eq!(
+        item.value.segments,
+        vec![TranscriptionSegment {
+            text: "hello".into(),
+            start_second: 1.5,
+            end_second: 2.0
+        }]
+    );
+    let error = ops::transcribe(
+        &model_of("gemini-3.5-transcribe-live"),
+        TranscribeInput::Bytes(vec![0; 4]),
+        TranscribeParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+}
+
+fn model_of(id: &str) -> Model {
+    model(id, Recorder::new([]))
+}
+
+// GGL-017
+
+use futures::StreamExt;
+use suprnova_ai::transport::WebSocketMessage;
+
+fn live_model(id: &str, socket: Arc<ScriptedSocket>) -> Model {
+    let mut registry = ProviderRegistry::new();
+    let provider = google::provider(key(), Recorder::new([])).with_websocket_transport(socket);
+    google::register_provider(&mut registry, provider).unwrap();
+    Model::new(id, registry.get_provider("google").unwrap())
+}
+
+fn chunks(n: usize) -> AudioChunks {
+    futures::stream::iter((0..n).map(|i| vec![i as u8, 0])).boxed()
+}
+
+const NEVER: usize = usize::MAX;
+
+async fn transcription_parts(
+    model: &Model,
+    audio: AudioChunks,
+) -> Vec<Result<TranscriptionPart, Error>> {
+    let stream = ops::stream_transcription(
+        model,
+        audio,
+        AudioFormat::pcm(16000),
+        StreamTranscribeParams::default(),
+        Default::default(),
+    )
+    .await;
+    match stream {
+        Ok(stream) => stream.collect().await,
+        Err(error) => vec![Err(error)],
+    }
+}
+
+#[tokio::test]
+async fn ggl_017_a_live_session_sends_the_setup_then_audio_and_reads_transcripts() {
+    let socket = ScriptedSocket::new(vec![
+        (1, text_message(json!({"setupComplete": {}}))),
+        (
+            4,
+            text_message(json!({"serverContent": {"interimInputTranscription": {"text": "hel"}}})),
+        ),
+        (
+            4,
+            text_message(
+                json!({"serverContent": {"inputTranscription": {"text": "hello", "languageCode": "en-US"}}}),
+            ),
+        ),
+        (
+            4,
+            text_message(
+                json!({"serverContent": {"inputTranscription": {"text": " world", "finished": true}}}),
+            ),
+        ),
+        (
+            4,
+            text_message(
+                json!({"serverContent": {"turnComplete": true}, "usageMetadata": {"totalTokenCount": 9}}),
+            ),
+        ),
+    ]);
+    let model = live_model("gemini-3.5-transcribe-live", socket.clone());
+    let parts: Vec<TranscriptionPart> = transcription_parts(&model, chunks(2))
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    let request = socket.request();
+    assert_eq!(
+        request.url,
+        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    );
+    assert!(!request.url.contains("key="));
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(n, v)| n == "x-goog-api-key" && v == "g-key")
+    );
+    let sent = socket.sent_json();
+    assert_eq!(
+        sent[0],
+        json!({"setup": {"model": "models/gemini-3.5-transcribe-live", "inputAudioTranscription": {}}})
+    );
+    assert_eq!(
+        sent[1]["realtimeInput"]["audio"]["mimeType"],
+        "audio/pcm;rate=16000"
+    );
+    assert_eq!(sent[1]["realtimeInput"]["audio"]["data"], "AAA=");
+    assert_eq!(sent[3], json!({"realtimeInput": {"audioStreamEnd": true}}));
+    let id = Some("google-segment-0".to_owned());
+    assert_eq!(parts[0], TranscriptionPart::Start { warnings: vec![] });
+    assert_eq!(
+        parts[1],
+        TranscriptionPart::Partial {
+            id: id.clone(),
+            text: "hel".into()
+        }
+    );
+    assert_eq!(
+        parts[2],
+        TranscriptionPart::Delta {
+            id: id.clone(),
+            delta: "hello".into()
+        }
+    );
+    assert_eq!(
+        parts[3],
+        TranscriptionPart::Delta {
+            id: id.clone(),
+            delta: " world".into()
+        }
+    );
+    assert_eq!(
+        parts[4],
+        TranscriptionPart::Final {
+            id,
+            text: "hello world".into()
+        }
+    );
+    match &parts[5] {
+        TranscriptionPart::Finish {
+            text,
+            language,
+            usage,
+            ..
+        } => {
+            assert_eq!(text, "hello world");
+            assert_eq!(language.as_deref(), Some("en-US"));
+            assert_eq!(usage, &Some(json!({"totalTokenCount": 9})));
+        }
+        other => panic!("expected the finish, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ggl_017_no_audio_goes_out_before_setup_complete_and_an_early_close_fails() {
+    let socket = ScriptedSocket::new(vec![(
+        1,
+        WebSocketMessage::Close {
+            code: Some(1011),
+            reason: "boom".into(),
+        },
+    )]);
+    let model = live_model("gemini-3.5-transcribe-live", socket.clone());
+    let parts = transcription_parts(&model, chunks(2)).await;
+    assert_eq!(
+        socket.sent_json().len(),
+        1,
+        "audio went out before setupComplete"
+    );
+    match parts.last().unwrap() {
+        Err(Error::Provider(error)) => assert!(
+            error.message.contains("closed unexpectedly") && error.message.contains("1011"),
+            "{}",
+            error.message
+        ),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ggl_017_a_session_finishes_three_seconds_after_the_last_transcript() {
+    let socket = ScriptedSocket::new(vec![
+        (1, text_message(json!({"setupComplete": {}}))),
+        (
+            3,
+            text_message(json!({"serverContent": {"inputTranscription": {"text": "late"}}})),
+        ),
+        (NEVER, text_message(json!({}))),
+    ]);
+    let model = live_model("gemini-3.5-transcribe-live", socket);
+    let started = tokio::time::Instant::now();
+    let parts = transcription_parts(&model, chunks(1)).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_secs(3) && elapsed < std::time::Duration::from_secs(4),
+        "{elapsed:?}"
+    );
+    assert!(
+        matches!(parts.last().unwrap(), Ok(TranscriptionPart::Finish { text, .. }) if text == "late")
+    );
+}
+
+#[tokio::test]
+async fn ggl_017_other_formats_and_non_live_models_fail() {
+    let socket = ScriptedSocket::new(vec![]);
+    let model = live_model("gemini-3.5-transcribe-live", socket.clone());
+    let result = ops::stream_transcription(
+        &model,
+        chunks(1),
+        AudioFormat::pcm(24000),
+        StreamTranscribeParams::default(),
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Validation(_))));
+    let model = live_model("gemini-3.5-transcribe", socket.clone());
+    let result = ops::stream_transcription(
+        &model,
+        chunks(1),
+        AudioFormat::pcm(16000),
+        StreamTranscribeParams::default(),
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Validation(_))));
+    assert!(socket.requests.lock().unwrap().is_empty());
+}
+
+// GGL-018
+
+fn pcm(samples: &[i16]) -> String {
+    use base64::Engine as _;
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[tokio::test]
+async fn ggl_018_translation_reads_transcripts_audio_and_finishes_on_silence() {
+    let silence = pcm(&vec![5; 24000]);
+    let socket = ScriptedSocket::new(vec![
+        (1, text_message(json!({"setupComplete": {}}))),
+        (
+            2,
+            text_message(json!({"serverContent": {"inputTranscription": {"text": "hola"}}})),
+        ),
+        (
+            2,
+            text_message(
+                json!({"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": pcm(&[9000, -9000])}}]}, "outputTranscription": {"text": "hello"}}, "usageMetadata": {"promptTokensDetails": [{"modality": "AUDIO", "tokenCount": 7}, {"modality": "TEXT", "tokenCount": 100}], "responseTokensDetails": [{"modality": "AUDIO", "tokenCount": 3}]}}),
+            ),
+        ),
+        (
+            3,
+            text_message(
+                json!({"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": silence}}]}}}),
+            ),
+        ),
+        (NEVER, text_message(json!({}))),
+    ]);
+    let model = live_model("gemini-3.5-live-translate-preview", socket.clone());
+    let params = StreamTranslateParams {
+        target_language: "en".into(),
+        source_language: Some("es".into()),
+        provider_options: [("google".to_owned(), json!({"echoTargetLanguage": true}))].into(),
+        ..Default::default()
+    };
+    let parts: Vec<TranslationPart> = ops::stream_translation(
+        &model,
+        chunks(1),
+        AudioFormat::pcm(16000),
+        params,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+    .await;
+    assert_eq!(
+        socket.sent_json()[0],
+        json!({"setup": {
+            "model": "models/gemini-3.5-live-translate-preview",
+            "generationConfig": {"responseModalities": ["AUDIO"], "translationConfig": {"targetLanguageCode": "en", "echoTargetLanguage": true}},
+            "inputAudioTranscription": {},
+            "outputAudioTranscription": {}
+        }})
+    );
+    match &parts[0] {
+        TranslationPart::Start { warnings } => {
+            assert_eq!(warnings[0].feature.as_deref(), Some("sourceLanguage"))
+        }
+        other => panic!("expected the start, got {other:?}"),
+    }
+    let id = Some("google-item-0".to_owned());
+    assert_eq!(
+        parts[1],
+        TranslationPart::SourceTranscriptDelta {
+            id: id.clone(),
+            delta: "hola".into()
+        }
+    );
+    assert!(matches!(&parts[2], TranslationPart::Audio { id: audio_id, .. } if audio_id == &id));
+    assert_eq!(
+        parts[3],
+        TranslationPart::OutputTextDelta {
+            id: id.clone(),
+            delta: "hello".into()
+        }
+    );
+    match parts.last().unwrap() {
+        TranslationPart::Finish {
+            source_text,
+            output_text,
+            usage,
+            ..
+        } => {
+            assert_eq!(
+                (source_text.as_str(), output_text.as_str()),
+                ("hola", "hello")
+            );
+            let usage = usage.as_ref().unwrap();
+            assert_eq!(
+                (
+                    usage.input_audio_tokens,
+                    usage.output_audio_tokens,
+                    usage.input_text_tokens
+                ),
+                (Some(7), Some(3), None)
+            );
+        }
+        other => panic!("expected the finish, got {other:?}"),
+    }
+}
+
+// GGL-019
+
+fn video_model(transport: Arc<Recorder>) -> Model {
+    model("veo-3.1-generate-preview", transport)
+}
+
+#[tokio::test(start_paused = true)]
+async fn ggl_019_a_job_starts_polls_and_downloads_with_the_key_header() {
+    let uri = "https://generativelanguage.googleapis.com/v1beta/files/v1:download?alt=media";
+    let transport = Recorder::new([
+        Reply::json(json!({"name": "models/veo-3.1-generate-preview/operations/op1"})),
+        Reply::json(
+            json!({"name": "models/veo-3.1-generate-preview/operations/op1", "done": false}),
+        ),
+        Reply::json(
+            json!({"name": "x", "done": true, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": uri}}]}}}),
+        ),
+        Reply::bytes(vec![0, 0, 0, 24]).header("content-type", "video/mp4"),
+    ]);
+    let model = video_model(transport.clone());
+    let prompt = VideoPrompt {
+        text: Some("a wave".into()),
+        image: Some(MediaInput::Url("https://example.com/start.png".into())),
+        frame_images: vec![FrameImage {
+            image: MediaInput::Url("gs://bucket/last.png".into()),
+            frame_type: FrameType::LastFrame,
+        }],
+        references: vec![],
+    };
+    let params = VideoParams {
+        resolution: Some("1920x1080".into()),
+        aspect_ratio: Some("16:9".into()),
+        duration: Some(8),
+        provider_options: [("google".to_owned(), json!({"personGeneration": "allow_adult", "negativePrompt": "rain", "enhancePrompt": true}))].into(),
+        ..Default::default()
+    };
+    let options = ops::VideoOptions {
+        poll_interval: std::time::Duration::from_secs(1),
+        ..Default::default()
+    };
+    let item = ops::generate_video(&model, prompt, params, options)
+        .await
+        .unwrap();
+    let requests = transport.all();
+    assert_eq!(
+        requests[0].url,
+        "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning"
+    );
+    assert_eq!(
+        transport.nth_body(0),
+        json!({
+            "instances": [{"prompt": "a wave", "lastFrame": {"gcsUri": "gs://bucket/last.png", "mimeType": "image/png"}}],
+            "parameters": {"sampleCount": 1, "aspectRatio": "16:9", "resolution": "1080p", "durationSeconds": 8, "personGeneration": "allow_adult", "negativePrompt": "rain", "enhancePrompt": true}
+        })
+    );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].url,
+        "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview/operations/op1"
+    );
+    assert_eq!(requests[3].url, uri);
+    assert_eq!(
+        header(&requests[3], "x-goog-api-key").as_deref(),
+        Some("g-key")
+    );
+    assert_eq!(item.value[0].data.as_bytes().unwrap(), &[0, 0, 0, 24]);
+    assert!(
+        item.warnings
+            .iter()
+            .any(|w| w.feature.as_deref() == Some("URL-based image input"))
+    );
+    assert!(!format!("{:?}", item.value).contains("g-key"));
+}
+
+#[tokio::test]
+async fn ggl_019_a_video_on_another_origin_downloads_without_the_key_and_failures_report_the_message()
+ {
+    let transport = Recorder::new([
+        Reply::json(
+            json!({"done": true, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": "https://cdn.example/v.mp4"}}]}}}),
+        ),
+        Reply::bytes(vec![1]),
+        Reply::json(json!({"done": true, "error": {"message": "quota"}})),
+    ]);
+    let model = video_model(transport.clone());
+    let job = VideoJob {
+        provider: "google".into(),
+        model_id: "veo-3.1-generate-preview".into(),
+        operation: json!({"operationName": "models/veo/operations/o2"}),
+    };
+    let VideoStatus::Completed(item) = ops::video_status(&model, &job, Default::default())
+        .await
+        .unwrap()
+    else {
+        panic!("not completed")
+    };
+    assert_eq!(
+        item.value[0].data.as_text(),
+        Some("https://cdn.example/v.mp4")
+    );
+    let protocol = model.provider.protocol().unwrap();
+    protocol
+        .download_video(&model, item.value[0].clone(), model.provider.as_ref())
+        .await
+        .unwrap();
+    assert!(header(&transport.nth(1), "x-goog-api-key").is_none());
+    let status = ops::video_status(&model, &job, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        VideoStatus::Failed {
+            message: "Video generation failed: quota".into()
+        }
+    );
+}
+
+// GGL-020
+
+fn file_resource(state: &str) -> Value {
+    json!({"file": {"name": "files/abc", "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc", "mimeType": "application/pdf", "sizeBytes": "20971520", "state": state, "createTime": "2026-10-23T00:00:00Z", "expirationTime": "2026-10-25T00:00:00Z"}})
+}
+
+fn google_provider(transport: Arc<Recorder>) -> Arc<dyn suprnova_ai::Provider> {
+    registry(transport).get_provider("google").unwrap()
+}
+
+#[tokio::test]
+async fn ggl_020_a_large_file_goes_up_in_8_mib_chunks() {
+    let transport = Recorder::new([
+        Reply::json(json!({})).header("x-goog-upload-url", "https://upload.example/u1"),
+        Reply::json(json!({})).header("x-goog-upload-status", "active"),
+        Reply::json(json!({})).header("x-goog-upload-status", "active"),
+        Reply::json(file_resource("ACTIVE")).header("x-goog-upload-status", "final"),
+    ]);
+    let provider = google_provider(transport.clone());
+    let data = bytes::Bytes::from(vec![7u8; 20 * 1024 * 1024]);
+    let file = UploadFile {
+        data,
+        media_type: "application/pdf".into(),
+        filename: Some("r.pdf".into()),
+    };
+    let params = UploadParams {
+        provider_options: [("google".to_owned(), json!({"displayName": "Report"}))].into(),
+    };
+    let item = ops::upload_file(provider.as_ref(), file, params, Default::default())
+        .await
+        .unwrap();
+    let requests = transport.all();
+    assert_eq!(
+        requests[0].url,
+        "https://generativelanguage.googleapis.com/upload/v1beta/files"
+    );
+    for (name, value) in [
+        ("x-goog-upload-protocol", "resumable"),
+        ("x-goog-upload-command", "start"),
+        ("x-goog-upload-header-content-length", "20971520"),
+        ("x-goog-upload-header-content-type", "application/pdf"),
+        ("x-goog-api-key", "g-key"),
+    ] {
+        assert_eq!(header(&requests[0], name).as_deref(), Some(value), "{name}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        json!({"file": {"display_name": "Report"}})
+    );
+    let chunks: Vec<(String, String, usize)> = requests[1..]
+        .iter()
+        .map(|r| {
+            (
+                header(r, "x-goog-upload-offset").unwrap(),
+                header(r, "x-goog-upload-command").unwrap(),
+                r.body.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        chunks,
+        vec![
+            ("0".into(), "upload".into(), 8 * 1024 * 1024),
+            ("8388608".into(), "upload".into(), 8 * 1024 * 1024),
+            (
+                "16777216".into(),
+                "upload, finalize".into(),
+                4 * 1024 * 1024
+            ),
+        ]
+    );
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|r| r.url == "https://upload.example/u1")
+    );
+    assert_eq!(
+        item.value.provider_reference["google"],
+        "https://generativelanguage.googleapis.com/v1beta/files/abc"
+    );
+    assert_eq!(item.value.size_bytes, Some(20 * 1024 * 1024));
+    assert_eq!(
+        item.value.expires_at.as_deref(),
+        Some("2026-10-25T00:00:00Z")
+    );
+    assert!(
+        item.warnings
+            .iter()
+            .any(|w| w.feature.as_deref() == Some("filename"))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn ggl_020_a_chunk_without_a_status_is_sent_again_and_processing_is_polled() {
+    let transport = Recorder::new([
+        Reply::json(json!({})).header("x-goog-upload-url", "https://upload.example/u1"),
+        Reply::json(json!({})),
+        Reply::json(file_resource("PROCESSING")).header("x-goog-upload-status", "final"),
+        Reply::json(file_resource("ACTIVE")["file"].clone()),
+    ]);
+    let provider = google_provider(transport.clone());
+    let file = UploadFile {
+        data: bytes::Bytes::from_static(b"%PDF"),
+        media_type: "application/pdf".into(),
+        filename: None,
+    };
+    let params = UploadParams {
+        provider_options: [("google".to_owned(), json!({"pollIntervalMs": 50}))].into(),
+    };
+    ops::upload_file(provider.as_ref(), file, params, Default::default())
+        .await
+        .unwrap();
+    let requests = transport.all();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[1].url, requests[2].url);
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(
+        requests[3].url,
+        "https://generativelanguage.googleapis.com/v1beta/files/abc"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn ggl_020_failures_fail_the_upload() {
+    let cases: Vec<Vec<Reply>> = vec![
+        vec![Reply::json(json!({}))],
+        vec![
+            Reply::json(json!({})).header("x-goog-upload-url", "https://u/1"),
+            Reply::json(json!({})).header("x-goog-upload-status", "active"),
+        ],
+        vec![
+            Reply::json(json!({})).header("x-goog-upload-url", "https://u/1"),
+            Reply::json(file_resource("FAILED")).header("x-goog-upload-status", "final"),
+        ],
+        vec![
+            Reply::json(json!({})).header("x-goog-upload-url", "https://u/1"),
+            Reply::json(json!({})),
+            Reply::json(json!({})),
+            Reply::json(json!({})),
+        ],
+    ];
+    for replies in cases {
+        let count = replies.len();
+        let transport = Recorder::new(replies);
+        let provider = google_provider(transport.clone());
+        let file = UploadFile {
+            data: bytes::Bytes::from_static(b"x"),
+            media_type: "text/plain".into(),
+            filename: None,
+        };
+        let error = ops::upload_file(
+            provider.as_ref(),
+            file,
+            UploadParams::default(),
+            ops::OperationOptions {
+                retry: suprnova_ai::RetryPolicy::none(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::Provider(_)), "{error:?}");
+        assert_eq!(
+            transport.count(),
+            count,
+            "the upload sent another number of requests"
+        );
+    }
+}
+
+// GGL-021
+
+fn text_request(id: &str, model_id: &str) -> BatchRequest {
+    BatchRequest {
+        id: id.into(),
+        model_id: model_id.into(),
+        kind: BatchRequestKind::Text {
+            messages: hi(),
+            options: StreamOptions::default(),
+        },
+    }
+}
+
+fn image_request(id: &str, model_id: &str, n: u32) -> BatchRequest {
+    BatchRequest {
+        id: id.into(),
+        model_id: model_id.into(),
+        kind: BatchRequestKind::Image {
+            prompt: ImagePrompt {
+                text: Some("a cat".into()),
+                images: vec![],
+                mask: None,
+            },
+            params: ImageParams {
+                n,
+                size: Some("1x1".into()),
+                ..Default::default()
+            },
+        },
+    }
+}
+
+fn operation(state: &str) -> Value {
+    json!({"name": "batches/b1", "metadata": {"state": state, "createTime": "2026-10-23T00:00:00Z", "batchStats": {"requestCount": "2", "successfulRequestCount": "1", "pendingRequestCount": "1"}}})
+}
+
+#[tokio::test]
+async fn ggl_021_a_small_batch_goes_inline() {
+    let transport = Recorder::new([Reply::json(operation("BATCH_STATE_PENDING"))]);
+    let provider = google_provider(transport.clone());
+    let params = BatchParams {
+        webhook_url: Some("https://hooks.example/b".into()),
+        ..Default::default()
+    };
+    let started = ops::batch::start(
+        provider.as_ref(),
+        vec![
+            text_request("t1", "gemini-2.5-flash-image"),
+            image_request("i1", "gemini-2.5-flash-image", 1),
+        ],
+        params,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:batchGenerateContent"
+    );
+    let body = transport.body();
+    let batch = &body["batch"];
+    assert!(
+        batch["displayName"]
+            .as_str()
+            .unwrap()
+            .starts_with("ai-sdk-batch-")
+    );
+    assert_eq!(
+        batch["webhookConfig"],
+        json!({"uris": ["https://hooks.example/b"]})
+    );
+    let requests = batch["inputConfig"]["requests"]["requests"]
+        .as_array()
+        .unwrap();
+    assert_eq!(requests[0]["metadata"], json!({"key": "t1"}));
+    assert_eq!(
+        requests[0]["request"]["contents"][0]["parts"][0]["text"],
+        "hi"
+    );
+    assert_eq!(requests[1]["metadata"], json!({"key": "i1"}));
+    assert_eq!(
+        requests[1]["request"]["generationConfig"]["responseModalities"],
+        json!(["IMAGE"])
+    );
+    assert_eq!(started.status.batch_id, "batches/b1");
+    assert_eq!(started.status.state, BatchState::Pending);
+    assert_eq!(started.warnings[0].request_id.as_deref(), Some("i1"));
+    assert_eq!(started.warnings[0].warning.feature.as_deref(), Some("size"));
+}
+
+#[tokio::test]
+async fn ggl_021_mixed_models_and_several_images_fail_before_a_request() {
+    for requests in [
+        vec![
+            text_request("a", "gemini-2.5-flash"),
+            text_request("b", "gemini-3-flash-preview"),
+        ],
+        vec![image_request("i", "gemini-2.5-flash-image", 2)],
+        vec![],
+    ] {
+        let transport = Recorder::new([]);
+        let error = ops::batch::start(
+            google_provider(transport.clone()).as_ref(),
+            requests,
+            BatchParams::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::Validation(_)), "{error:?}");
+        assert_eq!(transport.count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn ggl_021_a_large_batch_goes_up_as_json_lines() {
+    let big = "x".repeat(6_000_000);
+    let requests: Vec<BatchRequest> = (0..4)
+        .map(|i| BatchRequest {
+            id: format!("r{i}"),
+            model_id: "gemini-2.5-flash".into(),
+            kind: BatchRequestKind::Text {
+                messages: vec![user_message(big.as_str())],
+                options: StreamOptions::default(),
+            },
+        })
+        .collect();
+    let transport = Recorder::new([
+        Reply::json(json!({})).header("x-goog-upload-url", "https://upload.example/u2"),
+        Reply::json(json!({})).header("x-goog-upload-status", "active"),
+        Reply::json(json!({})).header("x-goog-upload-status", "active"),
+        Reply::json(
+            json!({"file": {"name": "files/in1", "expirationTime": "2026-10-25T00:00:00Z"}}),
+        )
+        .header("x-goog-upload-status", "final"),
+        Reply::json(operation("BATCH_STATE_PENDING")),
+    ]);
+    let started = ops::batch::start(
+        google_provider(transport.clone()).as_ref(),
+        requests,
+        BatchParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let all = transport.all();
+    assert_eq!(all.len(), 5);
+    assert_eq!(
+        header(&all[0], "x-goog-upload-header-content-type").as_deref(),
+        Some("application/jsonl")
+    );
+    let display = serde_json::from_slice::<Value>(&all[0].body).unwrap()["file"]["display_name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(display.starts_with("ai-sdk-batch-") && display.ends_with("-input"));
+    let uploaded: Vec<u8> = all[1..4].iter().flat_map(|r| r.body.to_vec()).collect();
+    let lines: Vec<Value> = String::from_utf8(uploaded)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[0]["key"], "r0");
+    assert!(lines[0]["request"]["contents"].is_array());
+    let create: Value = serde_json::from_slice(&all[4].body).unwrap();
+    assert_eq!(
+        create["batch"]["inputConfig"],
+        json!({"fileName": "files/in1"})
+    );
+    assert_eq!(
+        started.status.provider_metadata.unwrap()["google"],
+        json!({"inputFileId": "files/in1", "inputFileExpiresAt": "2026-10-25T00:00:00Z"})
+    );
+}
+
+// GGL-022
+
+#[tokio::test]
+async fn ggl_022_status_cancel_and_list_address_the_batch() {
+    let transport = Recorder::new([
+        Reply::json(operation("BATCH_STATE_RUNNING")),
+        Reply::json(json!({})),
+        Reply::json(
+            json!({"operations": [operation("JOB_STATE_SUCCEEDED"), operation("BATCH_STATE_EXPIRED")], "nextPageToken": "n2"}),
+        ),
+    ]);
+    let provider = google_provider(transport.clone());
+    let status = ops::batch::status(provider.as_ref(), "batches/b1", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(status.state, BatchState::Pending);
+    assert_eq!(status.raw_status.as_deref(), Some("BATCH_STATE_RUNNING"));
+    assert_eq!(
+        status.request_counts,
+        Some(BatchRequestCounts {
+            total: 2,
+            pending: 1,
+            completed: 1,
+            failed: 0
+        })
+    );
+    ops::batch::cancel(provider.as_ref(), "batches/b1", Default::default())
+        .await
+        .unwrap();
+    let page = ops::batch::list(
+        provider.as_ref(),
+        Some(5),
+        Some("c1".into()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let requests = transport.all();
+    assert_eq!(
+        (requests[0].method.as_str(), requests[0].url.as_str()),
+        (
+            "GET",
+            "https://generativelanguage.googleapis.com/v1beta/batches/b1"
+        )
+    );
+    assert_eq!(
+        (requests[1].method.as_str(), requests[1].url.as_str()),
+        (
+            "POST",
+            "https://generativelanguage.googleapis.com/v1beta/batches/b1:cancel"
+        )
+    );
+    assert_eq!(
+        requests[2].url,
+        "https://generativelanguage.googleapis.com/v1beta/batches?pageSize=5&pageToken=c1"
+    );
+    let states: Vec<BatchState> = page.batches.iter().map(|b| b.state).collect();
+    assert_eq!(states, vec![BatchState::Completed, BatchState::Failed]);
+    assert_eq!(page.next_cursor.as_deref(), Some("n2"));
+}
+
+#[tokio::test]
+async fn ggl_022_counts_that_do_not_add_up_and_missing_states_map_as_typescript_does() {
+    let mut odd = operation("BATCH_STATE_RUNNING");
+    odd["metadata"]["batchStats"]["requestCount"] = json!("5");
+    let transport = Recorder::new([
+        Reply::json(odd),
+        Reply::json(json!({"name": "batches/b2", "done": true})),
+        Reply::json(
+            json!({"name": "batches/b3", "error": {"code": 13, "message": "boom", "status": "INTERNAL"}}),
+        ),
+    ]);
+    let provider = google_provider(transport.clone());
+    assert_eq!(
+        ops::batch::status(provider.as_ref(), "batches/b1", Default::default())
+            .await
+            .unwrap()
+            .request_counts,
+        None
+    );
+    assert_eq!(
+        ops::batch::status(provider.as_ref(), "batches/b2", Default::default())
+            .await
+            .unwrap()
+            .state,
+        BatchState::Completed
+    );
+    let failed = ops::batch::status(provider.as_ref(), "batches/b3", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(failed.state, BatchState::Failed);
+    assert_eq!(
+        failed.error,
+        Some(BatchError {
+            message: "boom".into(),
+            error_type: Some("INTERNAL".into()),
+            code: Some("13".into())
+        })
+    );
+}
+
+#[tokio::test]
+async fn ggl_022_results_stream_from_the_results_file() {
+    let lines = [
+        json!({"key": "e", "error": {"code": 1, "message": "stopped", "status": "CANCELLED"}}),
+        json!({"key": "f", "error": {"code": 3, "message": "bad"}}),
+        json!({"key": "b", "response": {"promptFeedback": {"blockReason": "SAFETY"}}}),
+        json!({"key": "t", "response": {"candidates": [{"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}]}}),
+        json!({"key": "i", "response": {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": "iVBORw=="}}]}, "finishReason": "STOP"}]}}),
+    ];
+    let file: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    let mut done = operation("BATCH_STATE_SUCCEEDED");
+    done["metadata"]["output"] = json!({"responsesFile": "files/batch-out"});
+    let transport = Recorder::new([Reply::json(done), Reply::bytes(file.into_bytes())]);
+    let provider = google_provider(transport.clone());
+    let results: Vec<BatchResult> =
+        ops::batch::results(provider.as_ref(), "batches/b1", Default::default())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await;
+    assert_eq!(
+        transport.nth(1).url,
+        "https://generativelanguage.googleapis.com/download/v1beta/files/batch-out:download?alt=media"
+    );
+    assert!(
+        matches!(&results[0].outcome, BatchOutcome::Cancelled { error: Some(error) } if error.message == "stopped")
+    );
+    assert!(
+        matches!(&results[1].outcome, BatchOutcome::Failed { error, .. } if error.code.as_deref() == Some("3"))
+    );
+    assert!(
+        matches!(&results[2].outcome, BatchOutcome::Failed { error, .. } if error.code.as_deref() == Some("prompt_blocked") && error.error_type.as_deref() == Some("SAFETY"))
+    );
+    assert!(
+        matches!(&results[3].outcome, BatchOutcome::Message(message) if message.text() == "hi")
+    );
+    assert_eq!(results[4].kind, BatchResultKind::Image);
+    assert!(matches!(&results[4].outcome, BatchOutcome::Images(item) if item.value.len() == 1));
+}
+
+#[tokio::test]
+async fn ggl_022_pending_results_and_long_lines_fail() {
+    let transport = Recorder::new([Reply::json(operation("BATCH_STATE_RUNNING"))]);
+    let provider = google_provider(transport.clone());
+    assert!(matches!(
+        ops::batch::results(provider.as_ref(), "batches/b1", Default::default()).await,
+        Err(Error::Validation(_))
+    ));
+    assert_eq!(transport.count(), 1);
+    let mut done = operation("BATCH_STATE_SUCCEEDED");
+    done["metadata"]["output"] = json!({"responsesFile": "files/big"});
+    let long = vec![b'x'; 65 * 1024 * 1024];
+    let transport = Recorder::with_chunks([Reply::json(done), Reply::bytes(long)], 1024 * 1024);
+    let provider = google_provider(transport.clone());
+    let mut results = ops::batch::results(provider.as_ref(), "batches/b1", Default::default())
+        .await
+        .unwrap();
+    match results.next().await {
+        Some(Err(Error::Provider(error))) => {
+            assert!(error.message.contains("64 MiB"), "{}", error.message)
+        }
+        other => panic!("expected a line limit error, got {other:?}"),
+    }
+}
+
+// GGL-023
+
+#[tokio::test]
+async fn ggl_023_a_token_request_keeps_the_key_in_a_header() {
+    let transport = Recorder::new([Reply::json(
+        json!({"name": "auth_tokens/t1", "expireTime": "2026-10-23T05:30:00Z"}),
+    )]);
+    let model = model("gemini-3.8-live", transport.clone());
+    let session = RealtimeSessionConfig {
+        instructions: Some("be kind".into()),
+        voice: Some("Puck".into()),
+        output_modalities: vec!["text".into()],
+        tools: vec![RealtimeTool { name: "lookup".into(), description: Some("Look up".into()), parameters: json!({"type": "object"}) }],
+        input_audio_transcription: Some(Default::default()),
+        provider_options: [("google".to_owned(), json!({"defaultToolBehavior": "BLOCKING", "translationConfig": {"targetLanguageCode": "fr"}})), ("realtimeInputConfig".to_owned(), json!({"automaticActivityDetection": {"disabled": true}}))].into(),
+        ..Default::default()
+    };
+    let token = ops::realtime::create_token(
+        &model,
+        RealtimeTokenParams {
+            expires_after_seconds: Some(120),
+            session: Some(session),
+        },
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let request = transport.request();
+    assert_eq!(
+        request.url,
+        "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
+    );
+    assert_eq!(header(&request, "x-goog-api-key").as_deref(), Some("g-key"));
+    let body = transport.body();
+    assert_eq!(body["uses"], 0);
+    assert!(body["expireTime"].as_str().unwrap().ends_with('Z'));
+    assert!(body["newSessionExpireTime"].as_str().unwrap() < body["expireTime"].as_str().unwrap());
+    let setup = &body["bidiGenerateContentSetup"];
+    assert_eq!(setup["model"], "models/gemini-3.8-live");
+    assert_eq!(
+        setup["generationConfig"]["responseModalities"],
+        json!(["TEXT"])
+    );
+    assert_eq!(
+        setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"],
+        "Puck"
+    );
+    assert_eq!(
+        setup["generationConfig"]["translationConfig"],
+        json!({"targetLanguageCode": "fr"})
+    );
+    assert_eq!(
+        setup["systemInstruction"],
+        json!({"parts": [{"text": "be kind"}]})
+    );
+    assert_eq!(
+        setup["tools"][0]["functionDeclarations"][0]["behavior"],
+        "BLOCKING"
+    );
+    assert_eq!(setup["inputAudioTranscription"], json!({}));
+    assert_eq!(
+        setup["realtimeInputConfig"],
+        json!({"automaticActivityDetection": {"disabled": true}})
+    );
+    assert_eq!(token.token, "auth_tokens/t1");
+    assert_eq!(
+        token.url,
+        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
+    );
+    assert_eq!(token.expires_at, Some(1_792_733_400));
+    assert!(google::realtime_browser_url(&token).ends_with("?access_token=auth_tokens%2Ft1"));
+    let thinking = ops::realtime::session(
+        &model_of("gemini-3.8-live-extended-thinking"),
+        &RealtimeSessionConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        thinking["generationConfig"]["thinkingConfig"],
+        json!({"thinkingLevel": "low"})
+    );
+}
+
+fn token() -> RealtimeToken {
+    RealtimeToken { token: "auth_tokens/t1".into(), url: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained".into(), expires_at: None }
+}
+
+#[tokio::test]
+async fn ggl_023_a_server_connection_sends_the_token_in_a_header_and_waits_for_setup() {
+    let socket = ScriptedSocket::new(vec![
+        (1, text_message(json!({"setupComplete": {}}))),
+        (
+            2,
+            text_message(json!({"serverContent": {"modelTurn": {"parts": [{"text": "hi"}]}}})),
+        ),
+    ]);
+    let model = live_model("gemini-3.8-live", socket.clone());
+    let mut connection = ops::realtime::connect(&model, &token(), RealtimeSessionConfig::default())
+        .await
+        .unwrap();
+    let request = socket.request();
+    assert!(!request.url.contains("access_token"));
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(n, v)| n.eq_ignore_ascii_case("authorization") && v == "Token auth_tokens/t1")
+    );
+    assert!(socket.sent_json()[0].get("setup").is_some());
+    let first = connection.next().await.unwrap().unwrap();
+    assert!(matches!(
+        first.kind,
+        RealtimeServerEventKind::SessionCreated { .. }
+    ));
+    connection
+        .send(RealtimeClientEvent::ConversationItemCreate(
+            RealtimeItem::Text("hello".into()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        socket.sent_json()[1],
+        json!({"realtimeInput": {"text": "hello"}})
+    );
+    let next = connection.next().await.unwrap().unwrap();
+    assert!(
+        matches!(next.kind, RealtimeServerEventKind::TextDelta { ref delta, .. } if delta == "hi")
+    );
+
+    let socket = ScriptedSocket::new(vec![(1, text_message(json!({"goAway": {}})))]);
+    let model = live_model("gemini-3.8-live", socket.clone());
+    let error = ops::realtime::connect(&model, &token(), RealtimeSessionConfig::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    assert_eq!(socket.sent_json().len(), 1);
+}
+
+// GGL-024
+
+#[test]
+fn ggl_024_client_events_become_live_messages() {
+    let model = model_of("gemini-3.8-live");
+    let mut codec = ops::realtime::codec(&model).unwrap();
+    let mut encode = |event| {
+        codec
+            .encode(&event)
+            .unwrap()
+            .map(|text| serde_json::from_str::<Value>(&text).unwrap())
+    };
+    let update = RealtimeSessionConfig {
+        input_audio_format: Some(AudioFormat::pcm(24000)),
+        ..Default::default()
+    };
+    assert!(
+        encode(RealtimeClientEvent::SessionUpdate(update))
+            .unwrap()
+            .get("setup")
+            .is_some()
+    );
+    assert_eq!(
+        encode(RealtimeClientEvent::InputAudioAppend("AAA=".into())),
+        Some(
+            json!({"realtimeInput": {"audio": {"data": "AAA=", "mimeType": "audio/pcm;rate=24000"}}})
+        )
+    );
+    assert_eq!(
+        encode(RealtimeClientEvent::InputAudioCommit),
+        Some(json!({"realtimeInput": {"audioStreamEnd": true}}))
+    );
+    assert_eq!(
+        encode(RealtimeClientEvent::ConversationItemCreate(
+            RealtimeItem::Text("hi".into())
+        )),
+        Some(json!({"realtimeInput": {"text": "hi"}}))
+    );
+    for (output, response) in [
+        (r#"{"a":1}"#, json!({"a": 1})),
+        ("[1,2]", json!({"output": [1, 2]})),
+        ("not json", json!({"output": "not json"})),
+    ] {
+        assert_eq!(
+            encode(RealtimeClientEvent::ConversationItemCreate(
+                RealtimeItem::FunctionCallOutput {
+                    call_id: "c1".into(),
+                    name: Some("lookup".into()),
+                    output: output.into()
+                }
+            )),
+            Some(
+                json!({"toolResponse": {"functionResponses": [{"id": "c1", "name": "lookup", "response": response}]}})
+            )
+        );
+    }
+    for event in [
+        RealtimeClientEvent::InputAudioClear,
+        RealtimeClientEvent::ResponseCreate { options: None },
+        RealtimeClientEvent::ResponseCancel,
+        RealtimeClientEvent::ConversationItemTruncate {
+            item_id: "i".into(),
+            content_index: 0,
+            audio_end_ms: 1,
+        },
+        RealtimeClientEvent::ConversationItemCreate(RealtimeItem::Audio("AAA=".into())),
+    ] {
+        assert_eq!(encode(event), None);
+    }
+}
+
+// GGL-025
+
+#[test]
+fn ggl_025_live_messages_become_server_events() {
+    let model = model_of("gemini-3.8-live");
+    let mut codec = ops::realtime::codec(&model).unwrap();
+    let mut decode = |value: Value| {
+        codec
+            .decode(&value.to_string())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect::<Vec<_>>()
+    };
+    use RealtimeServerEventKind as K;
+    assert!(matches!(
+        decode(json!({"setupComplete": {}}))[..],
+        [K::SessionCreated { .. }]
+    ));
+    let call = decode(
+        json!({"toolCall": {"functionCalls": [{"id": "c1", "name": "lookup", "args": {"q": 1}}]}}),
+    );
+    assert_eq!(
+        call,
+        vec![
+            K::FunctionCallArgumentsDelta {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                call_id: "c1".into(),
+                delta: r#"{"q":1}"#.into()
+            },
+            K::FunctionCallArgumentsDone {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                call_id: "c1".into(),
+                name: "lookup".into(),
+                arguments: r#"{"q":1}"#.into()
+            },
+        ]
+    );
+    assert_eq!(
+        decode(
+            json!({"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": "AAA="}}, {"text": "hi"}]}, "outputTranscription": {"text": "hi"}}})
+        ),
+        vec![
+            K::AudioDelta {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                delta: "AAA=".into()
+            },
+            K::TextDelta {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                delta: "hi".into()
+            },
+            K::AudioTranscriptDelta {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                delta: "hi".into()
+            },
+        ]
+    );
+    assert_eq!(
+        decode(json!({"serverContent": {"inputTranscription": {"text": "the quick"}}})),
+        vec![K::InputTranscriptionCompleted {
+            item_id: "google-input-0".into(),
+            transcript: "the quick".into()
+        }]
+    );
+    assert_eq!(
+        decode(
+            json!({"serverContent": {"inputTranscription": {"text": " fox", "finished": true}}})
+        ),
+        vec![K::InputTranscriptionCompleted {
+            item_id: "google-input-0".into(),
+            transcript: "the quick fox".into()
+        }]
+    );
+    assert_eq!(
+        decode(json!({"serverContent": {"turnComplete": true}})),
+        vec![
+            K::AudioDone {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into()
+            },
+            K::TextDone {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                text: None
+            },
+            K::AudioTranscriptDone {
+                response_id: "google-resp-0".into(),
+                item_id: "google-item-0".into(),
+                transcript: None
+            },
+            K::ResponseDone {
+                response_id: "google-resp-0".into(),
+                status: "completed".into()
+            },
+        ]
+    );
+    assert_eq!(
+        decode(json!({"serverContent": {"interrupted": true}})),
+        vec![K::SpeechStarted { item_id: None }]
+    );
+    assert_eq!(
+        decode(json!({"serverContent": {"inputTranscription": {"text": "next"}}})),
+        vec![K::InputTranscriptionCompleted {
+            item_id: "google-input-1".into(),
+            transcript: "next".into()
+        }]
+    );
+    assert_eq!(
+        decode(json!({"serverContent": {"modelTurn": {"parts": [{"text": "two"}]}}})),
+        vec![K::TextDelta {
+            response_id: "google-resp-1".into(),
+            item_id: "google-item-1".into(),
+            delta: "two".into()
+        }]
+    );
+    for name in ["toolCallCancellation", "goAway", "sessionResumptionUpdate"] {
+        assert_eq!(
+            decode(json!({name: {}})),
+            vec![K::Custom {
+                raw_type: name.into()
+            }]
+        );
+    }
+    assert_eq!(
+        decode(
+            json!({"serverContent": {"generationComplete": true, "interactionStatus": "IDLE", "waitingForInput": true}})
+        ),
+        vec![
+            K::Custom {
+                raw_type: "generationComplete".into()
+            },
+            K::Custom {
+                raw_type: "interactionStatus".into()
+            },
+            K::Custom {
+                raw_type: "waitingForInput".into()
+            },
+        ]
+    );
+}
