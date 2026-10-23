@@ -2868,3 +2868,152 @@ fn oai_005_chat_settings_the_model_does_not_take_are_left_out_and_logged() {
     );
     assert_eq!(body["temperature"], 0.5, "{body}");
 }
+
+// OAI-015
+
+fn completions_model(
+    transport: Arc<Recorder>,
+    protocol: suprnova_ai::providers::openai::OpenAICompletionsProtocol,
+    name: Option<&str>,
+) -> Model {
+    let provider = match name {
+        None => OpenAICompatibleProvider::new(config(), transport),
+        Some(name) => {
+            let metadata: suprnova_ai::providers::ModelsDevProvider = serde_json::from_value(
+                json!({"id": name, "name": name, "api": "https://local.test/v1", "env": [], "npm": "@ai-sdk/openai-compatible", "models": {}}),
+            )
+            .unwrap();
+            OpenAICompatibleProvider::from_modelsdev_provider(
+                &metadata,
+                config_without_url(),
+                transport,
+            )
+            .unwrap()
+        }
+    };
+    Model::new("gpt-3.5-turbo-instruct", Arc::new(provider)).with_protocol(Arc::new(protocol))
+}
+fn config_without_url() -> ProviderConfig {
+    ProviderConfig {
+        api_key_value: Some("sk-test".into()),
+        ..Default::default()
+    }
+}
+fn completion_stream(texts: &[&str], finish: &str) -> (u16, Vec<u8>) {
+    let mut chunks: Vec<Value> = texts
+        .iter()
+        .map(|t| json!({"id": "cmpl_1", "object": "text_completion", "model": "gpt-3.5-turbo-instruct", "choices": [{"index": 0, "text": t, "logprobs": null, "finish_reason": null}]}))
+        .collect();
+    chunks.push(json!({"id": "cmpl_1", "object": "text_completion", "model": "gpt-3.5-turbo-instruct", "choices": [{"index": 0, "text": "", "logprobs": null, "finish_reason": finish}]}));
+    chunks.push(json!({"id": "cmpl_1", "object": "text_completion", "model": "gpt-3.5-turbo-instruct", "choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}));
+    let mut text: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    text.push_str("data: [DONE]\n\n");
+    (200, text.into_bytes())
+}
+
+#[tokio::test]
+async fn oai_015_a_history_becomes_one_prompt_with_the_options() {
+    use suprnova_ai::providers::openai::OpenAICompletionsProtocol;
+    let transport = Recorder::new([completion_stream(&["a", "b"], "length")]);
+    let model = completions_model(transport.clone(), OpenAICompletionsProtocol::new(), None);
+    let history = vec![
+        system("rules"),
+        user("hi"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![Part::Text(TextPart::new("hello"))],
+        ),
+        user("more"),
+    ];
+    let options = openai(
+        json!({"echo": true, "logitBias": {"50256": -100}, "suffix": "!", "user": "u", "logprobs": true}),
+    );
+    let mut handle = suprnova_ai::stream(&model, history, options);
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/completions");
+    let body = transport.body(0);
+    assert_eq!(
+        body["prompt"],
+        "rules\n\nuser:\nhi\n\nassistant:\nhello\n\nuser:\nmore\n\nassistant:\n"
+    );
+    assert_eq!(body["stop"], json!(["\nuser:"]));
+    assert_eq!(body["stream_options"], json!({"include_usage": true}));
+    for (key, value) in [
+        ("echo", json!(true)),
+        ("logit_bias", json!({"50256": -100})),
+        ("suffix", json!("!")),
+        ("user", json!("u")),
+        ("logprobs", json!(0)),
+    ] {
+        assert_eq!(body[key], value, "{key}: {body}");
+    }
+    assert_eq!(handle.message().text(), "ab");
+    assert_eq!(handle.finish_reason(), Some("length"));
+    let usage = handle.message().usage.clone().unwrap();
+    assert_eq!((usage.input_tokens, usage.output_tokens), (3, 2));
+}
+
+#[tokio::test]
+async fn oai_015_tools_and_tool_history_fail_before_a_request() {
+    use suprnova_ai::providers::openai::OpenAICompletionsProtocol;
+    let cases = [
+        (vec![user("hi")], with_tools(vec![function_tool("a")])),
+        (vec![user("hi"), system("late")], StreamOptions::default()),
+        (history(raw_call()), StreamOptions::default()),
+        (vec![user("hi")], openai(json!({"unknown": 1}))),
+    ];
+    for (messages, options) in cases {
+        let transport = Recorder::new([completion_stream(&["a"], "stop")]);
+        let model = completions_model(transport.clone(), OpenAICompletionsProtocol::new(), None);
+        let mut handle = suprnova_ai::stream(&model, messages, options);
+        let mut error = None;
+        while let Some(event) = handle.next().await {
+            if let Err(e) = event {
+                error = Some(e);
+            }
+        }
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::Validation(_))),
+            "{error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn oai_015_a_compatible_server_takes_its_own_options() {
+    use suprnova_ai::providers::openai::OpenAICompletionsProtocol;
+    for include_usage in [false, true] {
+        let transport = Recorder::new([completion_stream(&["a"], "stop")]);
+        let model = completions_model(
+            transport.clone(),
+            OpenAICompletionsProtocol::compatible(include_usage),
+            Some("my-server"),
+        );
+        let options = StreamOptions {
+            params: Some(
+                InferenceRequestParams::default()
+                    .with_provider_param(
+                        "my-server",
+                        json!({"suffix": "!", "logprobs": true, "top_a": 0.5}),
+                    )
+                    .with_provider_param("myServer", json!({"user": "u"})),
+            ),
+            ..Default::default()
+        };
+        run(&model, options).await.unwrap();
+        let body = transport.body(0);
+        assert_eq!(url(&transport, 0), "https://local.test/v1/completions");
+        assert_eq!(body["suffix"], "!");
+        assert_eq!(body["user"], "u");
+        assert_eq!(body["top_a"], 0.5);
+        assert_eq!(body.get("logprobs"), None, "{body}");
+        assert_eq!(
+            body.get("stream_options").is_some(),
+            include_usage,
+            "{body}"
+        );
+    }
+}
