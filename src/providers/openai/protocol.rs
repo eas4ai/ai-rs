@@ -1,7 +1,7 @@
 use super::{
     chat, dialect, embedding, images, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
-    responses, socket, speech, streaming, transcription,
+    realtime, responses, socket, speech, streaming, transcription,
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
@@ -10,12 +10,13 @@ use crate::{
         EventStream, http,
         operations::{
             AudioChunks, AudioFormat, AudioParams, AudioPrompt, CallLimits, EmbedParams,
-            ImageParams, ImagePrompt, Item, StreamTranscribeParams, StreamTranslateParams,
+            ImageParams, ImagePrompt, Item, RealtimeCodec, RealtimeSessionConfig, RealtimeStartup,
+            RealtimeToken, RealtimeTokenParams, StreamTranscribeParams, StreamTranslateParams,
             TranscribeInput, TranscribeParams, Transcription, TranscriptionStream,
-            TranslationStream,
+            TranslationStream, WebRtcSession,
         },
     },
-    transport::HttpRequest,
+    transport::{HttpRequest, WebSocketRequest},
     types::{Message, ToolChoice, messages::FilePart},
 };
 use async_trait::async_trait;
@@ -26,7 +27,8 @@ use std::sync::Arc;
 /// The `ProviderProtocol` of one of OpenAI's language model protocols: its
 /// class id, its stream on `wire` with the downloads `|this|` gives, and the
 /// operations they share: embeddings (OAI-016), images (OAI-017), speech
-/// (OAI-018), transcription (OAI-019) and streaming audio (OAI-020).
+/// (OAI-018), transcription (OAI-019), streaming audio (OAI-020) and
+/// realtime and Live sessions (OAI-024).
 macro_rules! openai_protocol {
     ($ty:ty, $class:expr, $wire:expr, |$this:ident| $downloads:expr) => {
         #[async_trait]
@@ -112,6 +114,59 @@ macro_rules! openai_protocol {
                 provider: &dyn Provider,
             ) -> Result<TranslationStream, Error> {
                 socket::stream_translation(model, audio, format, params, provider).await
+            }
+            async fn create_realtime_token(
+                &self,
+                model: &Model,
+                params: RealtimeTokenParams,
+                provider: &dyn Provider,
+            ) -> Result<RealtimeToken, Error> {
+                realtime::create_token(model, params, provider).await
+            }
+            fn realtime_session(
+                &self,
+                model: &Model,
+                config: &RealtimeSessionConfig,
+            ) -> Result<Value, Error> {
+                if realtime::live(&model.id) {
+                    realtime::live_session(config, &model.id, false)
+                } else {
+                    realtime::session(config, &model.id)
+                }
+            }
+            fn realtime_codec(&self, model: &Model) -> Result<Box<dyn RealtimeCodec>, Error> {
+                Ok(if realtime::live(&model.id) {
+                    Box::new(realtime::LiveCodec {
+                        model: model.id.clone(),
+                    })
+                } else {
+                    Box::new(realtime::Codec {
+                        model: model.id.clone(),
+                    })
+                })
+            }
+            fn realtime_connection(
+                &self,
+                model: &Model,
+                token: &RealtimeToken,
+            ) -> Result<(WebSocketRequest, bool), Error> {
+                realtime::token_connection(model, token)
+            }
+            fn realtime_server_connection(
+                &self,
+                model: &Model,
+                provider: &dyn Provider,
+            ) -> Result<(WebSocketRequest, RealtimeStartup), Error> {
+                realtime::server_connection(model, provider)
+            }
+            async fn create_webrtc_session(
+                &self,
+                model: &Model,
+                offer_sdp: String,
+                config: RealtimeSessionConfig,
+                provider: &dyn Provider,
+            ) -> Result<WebRtcSession, Error> {
+                realtime::webrtc_session(model, offer_sdp, config, provider).await
             }
         }
     };

@@ -42,6 +42,7 @@ pub mod params;
 pub(crate) mod profile;
 pub mod protocol;
 mod provider;
+mod realtime;
 mod responses;
 mod skills;
 mod socket;
