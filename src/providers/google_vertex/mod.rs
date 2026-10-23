@@ -218,7 +218,11 @@ impl VertexProvider {
 
     /// Sign in with google-cloud-auth credentials, such as application
     /// default credentials; every header they give goes out, the quota
-    /// project's included.
+    /// project's included. Service-account credentials sign with the
+    /// process rustls crypto provider: install one first, such as
+    /// `rustls::crypto::ring::default_provider().install_default()`, because
+    /// without one google-cloud-auth panics when it signs, unless another
+    /// crate in the build turns on its `default-rustls-provider` feature.
     #[cfg(feature = "google-auth")]
     #[must_use]
     pub fn with_credentials(
