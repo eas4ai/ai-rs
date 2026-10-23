@@ -211,10 +211,26 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   metadata for a Chat Completions host of `providers::hosts`, by package or id,
   that host's rules.
 - `ops` adds Python's `ai.ops` front ends and the TypeScript core's video jobs,
-  uploads, batches, streaming transcription and translation, realtime sessions
-  and evaluation. Every operation that returns one result retries a retryable
+  uploads, file info, downloads and deletes, skill uploads, batches, streaming
+  transcription and translation, realtime sessions, server connections and
+  WebRTC sessions, and evaluation. Every operation that returns one result retries a retryable
   error twice, as the TypeScript core does; a streaming operation retries only
   before its first part and before it reads any audio.
+- `providers::openai` ports the TypeScript `@ai-sdk/openai` 4.0.99 package,
+  with every model kind; Python has Responses and Chat Completions only.
+  Provider options use the TypeScript names and fail with `Error::Validation`
+  when unknown. Settings OpenAI never takes, such as a seed on Responses, fail
+  with `Error::Validation`, where TypeScript drops them with a warning.
+  Settings OpenAI takes for other models only are left out and logged as a
+  `tracing` debug event with target `suprnova_ai::openai`, which names the
+  setting and the model. A `text/*` file goes as `input_text` unless the
+  option `passThroughUnsupportedFiles` sends it as a file. An MCP approval
+  request is a pending `ToolApproval` hook. Tools the application runs, such
+  as `local_shell`, `shell` with a local environment, `apply_patch`,
+  `computer` and custom tools, are tool calls an agent runs through
+  `AgentTool::with_provider_declaration`. Web search, file search and citation
+  sources are in the final message metadata under `openai.sources`. A core
+  cache mode fails: use the option `promptCacheOptions`.
 - `providers::google` and `providers::google_vertex` port the TypeScript
   Google packages, which Python lacks, with every model kind. Settings those
   packages drop with a warning fail with `Error::Validation`; operations return
@@ -302,8 +318,8 @@ rules follow the source.
 | `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-006: step checks, unknown tools, tool concurrency, run usage, stop reasons, interrupted history |
 | `docs/spec/google.md` (no Python source) | `tests/spec_google.rs` | GGL-001 to GGL-032: the Gemini API's language model, options, tools, history, responses, errors, embeddings, images, speech, transcription, live transcription and translation, Veo, files, batches, realtime, Interactions, evaluation and size limits |
 | `docs/spec/vertex.md` (no Python source) | `tests/spec_vertex.rs` | VTX-001 to VTX-015: Vertex AI endpoints, Express Mode, auth, the Gemini differences, streamed arguments, tool result downloads, embeddings, images, video, Chirp, Cloud Speech-to-Text, Gemini transcription, Interactions and the Anthropic, MaaS and xAI partner models |
-| `docs/spec/operations.md` (no Python source) | `tests/spec_operations.rs` | OPS-001 to OPS-011: front-end pass-through and retries, embedding runs, image and video batches, video jobs, uploads, batches, streaming transcription and translation, realtime connections, the WebSocket transport and the evaluation adapter |
-| `docs/spec/openai.md` (no Python source) | `tests/spec_openai.rs` | OAI-001 and OAI-002: tool calls, text and reasoning in Responses history under every `store` setting, namespaces, parallel calls, reasoning models and encrypted reasoning |
+| `docs/spec/operations.md` (no Python source) | `tests/spec_operations.rs` | OPS-001 to OPS-014: front-end pass-through and retries, embedding runs, image and video batches, video jobs, uploads, batches, streaming transcription and translation, realtime connections, the WebSocket transport, the evaluation adapter, file info, downloads and deletes, skill uploads, and server and WebRTC realtime sessions |
+| `docs/spec/openai.md` (no Python source) | `tests/spec_openai.rs` | OAI-001 to OAI-027: Responses history under every `store` setting, reasoning models, endpoints, headers and errors, Responses and Chat Completions options, model-dependent settings, includes, files, tools, application-run tools, stream items, usage, Completions, embeddings, images, speech, transcription and its streaming form, translation, files, skills, batches, realtime and Live sessions, decisions, prompt caching and JSON schema normalization |
 | `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-025: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort, the DeepSeek, Moonshot AI and Mistral dialects, tool calls without an index, stream error kinds, the xAI and Hugging Face Responses rules, Responses errors and terminal events |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
@@ -325,8 +341,8 @@ Rust streaming tests because they cannot be stored in JSON fixtures.
 
 ## Later modules
 
-Implemented after the core cut: `providers::openai` (Responses and Chat Completions
-protocols, built-in tools, streaming, errors), `providers::anthropic` (messages,
+Implemented after the core cut: `providers::openai` (every model kind of the
+TypeScript OpenAI package), `providers::anthropic` (messages,
 tools, reasoning, streaming, errors), `providers::hosts` (hosted providers on those
 two protocols), `providers::google` and `providers::google_vertex` (every model kind of the
 TypeScript Google packages), `ops` (operation front ends), `agents` (Agent,

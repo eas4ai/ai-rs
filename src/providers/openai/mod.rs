@@ -1,7 +1,10 @@
-//! OpenAI Responses and OpenAI-compatible Chat Completions over `HttpTransport`.
+//! OpenAI's APIs, as the TypeScript `@ai-sdk/openai` 4.0.99 package sends
+//! them, and OpenAI-compatible Chat Completions over `HttpTransport`.
 //!
 //! Construct a provider with explicit configuration and a shared transport. Register
 //! handles and snapshot factories explicitly; no process environment is read.
+//! The `env` values `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` set the
+//! `OpenAI-Organization` and `OpenAI-Project` headers.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -27,6 +30,26 @@
 //! these protocols implement `Provider::shared_transport` for owned streams.
 //! `params::OpenAIParams::apply` stores options under the stable `openai` key.
 //! Built-in tool arguments use snake_case JSON objects, as in the Python wire format.
+//!
+//! The language models are `OpenAIResponsesProtocol` (the default),
+//! `OpenAIChatCompletionsProtocol` and `OpenAICompletionsProtocol`; set
+//! one with `Model::with_protocol`. `OpenAIDecisionsProtocol` evaluates
+//! questions with the Decisions API, and `OpenAIEmbeddingProtocol` and
+//! `OpenAICompletionsProtocol` also serve OpenAI-compatible servers. The
+//! `ops` front ends reach the other model kinds: embeddings, images, speech,
+//! transcription and its streaming form, speech translation, files, skills,
+//! batches, and realtime and Live sessions. Files, skills and batches need
+//! OpenAI's own API. Provider options use the TypeScript option names, and an
+//! unknown one fails with `Error::Validation`. A setting that OpenAI takes for
+//! other models only is left out and logged as a `tracing` debug event with
+//! target `suprnova_ai::openai`.
+//!
+//! `OpenAICompatibleProvider::with_download_transport` fetches the media URLs
+//! that OpenAI does not fetch, and `with_websocket_transport` opens the
+//! sockets of streaming audio and realtime sessions. The tools OpenAI leaves
+//! to the application (`local_shell`, `shell` with a local environment,
+//! `apply_patch`, `computer` and `custom`) arrive as tool calls; give an
+//! agent one with `AgentTool::with_provider_declaration`.
 mod batch;
 mod capabilities;
 mod chat;

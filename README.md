@@ -7,8 +7,8 @@ lists. It is licensed under the Apache License, Version 2.0; `LICENSE` holds
 the license and `NOTICE` the credits.
 
 The crate provides messages, events, tool schemas, stream aggregation, provider
-contracts, streaming HTTP transport, the OpenAI-compatible and Anthropic provider
-adapters (`providers::openai`, `providers::anthropic`), hosted providers on those
+contracts, streaming HTTP transport, OpenAI's APIs and the OpenAI-compatible and
+Anthropic provider adapters (`providers::openai`, `providers::anthropic`), hosted providers on those
 protocols (`providers::hosts`), Google's Gemini API and Vertex AI
 (`providers::google`, `providers::google_vertex`), the model operations beyond
 chat (`ops`), the agent loop with tools,
@@ -108,6 +108,24 @@ that needs `store` false: the crate then asks a reasoning model for its reasonin
 as encrypted content and sends history in full. Tool calls always go back in
 full, so each tool result pairs with its call.
 
+`providers::openai` has every model kind of the TypeScript `@ai-sdk/openai`
+4.0.99 package: the Responses, Chat Completions and Completions language
+models (`OpenAIResponsesProtocol`, `OpenAIChatCompletionsProtocol` and
+`OpenAICompletionsProtocol`), embeddings, images, speech, transcription and
+its streaming form, speech translation, files, skills, batches, realtime and
+Live sessions, and decisions (`OpenAIDecisionsProtocol`). Provider options are
+the `openai` provider parameter, with the TypeScript option names; an unknown
+option fails with `Error::Validation`. A setting that OpenAI takes for some
+models but not for the call's model, such as a temperature on a reasoning
+model, is left out and logged as a `tracing` debug event with target
+`suprnova_ai::openai`. The `env` values `OPENAI_ORG_ID` and
+`OPENAI_PROJECT_ID` set the organization and project headers. Build the
+provider with `with_download_transport` to send the image, audio and PDF URLs
+that OpenAI does not fetch, and with `with_websocket_transport` for streaming
+transcription, translation and realtime sessions.
+`AgentTool::with_provider_declaration` lets an agent run the tools that OpenAI
+leaves to the application, such as `local_shell` and `apply_patch`.
+
 `providers::hosts` has Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral,
 Moonshot AI, Together AI and Z.ai on Chat Completions, xAI and Hugging Face on
 the Responses API, and MiniMax on the Anthropic Messages protocol. Register one with its module's `register`, for
@@ -155,8 +173,9 @@ a model or an agent on the Interactions API; set one with
 `ops` holds the operations beyond chat, with the names of the Python
 `ai.ops` module: `embed`, `generate_image`, `generate_video`, `generate_audio`,
 `transcribe`, `rerank` and `experimental::evaluate`, and the TypeScript core's
-`start_video` and `video_status`, `upload_file`, `batch`, `stream_transcription`,
-`stream_translation` and `realtime`. Each retries a retryable error twice by
+`start_video` and `video_status`, `upload_file`, `file_info`,
+`download_file`, `delete_file`, `upload_skill`, `batch`,
+`stream_transcription`, `stream_translation` and `realtime`. Each retries a retryable error twice by
 default, as model calls do. Live and realtime sessions need a WebSocket
 transport: implement `transport::WebSocketTransport`, or enable the
 `websocket` feature for `transport::TungsteniteTransport`.
