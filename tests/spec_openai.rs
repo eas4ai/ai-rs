@@ -1325,3 +1325,160 @@ fn oai_006_include_values_follow_the_tools_and_options() {
     );
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
 }
+
+// OAI-007
+
+/// A file part of this media type holding `data`.
+fn file_of(data: suprnova_ai::types::messages::FileData, media_type: &str) -> Part {
+    let mut file =
+        suprnova_ai::types::messages::FilePart::from_bytes(vec![0], Some(media_type), None)
+            .unwrap();
+    file.data = data;
+    Part::File(file)
+}
+fn bytes(data: &[u8], media_type: &str) -> Part {
+    file_of(
+        suprnova_ai::types::messages::FileData::Bytes(data.to_vec()),
+        media_type,
+    )
+}
+fn text_data(text: &str, media_type: &str) -> Part {
+    file_of(
+        suprnova_ai::types::messages::FileData::Text(text.into()),
+        media_type,
+    )
+}
+fn with_detail(mut part: Part, detail: &str) -> Part {
+    if let Part::File(file) = &mut part {
+        file.provider_metadata =
+            Some([("openai".to_owned(), json!({"imageDetail": detail}))].into());
+    }
+    part
+}
+/// The content item a user message of `"see"` then `part` sends.
+fn sent_file(
+    responses: bool,
+    part: Part,
+    options: &StreamOptions,
+) -> Result<Value, suprnova_ai::Error> {
+    let message = Message::new(
+        MessageRole::User,
+        vec![Part::Text(TextPart::new("see")), part],
+    );
+    let request = build_request("gpt-4.1", &config(), vec![message], options, responses)?;
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    let key = if responses { "input" } else { "messages" };
+    Ok(body[key][0]["content"][1].clone())
+}
+
+#[test]
+fn oai_007_responses_files_go_as_typescript_sends_them() {
+    let none = StreamOptions::default();
+    let send = |part: Part| sent_file(true, part, &none).unwrap();
+    assert_eq!(
+        send(text_data("https://img.test/a.png", "image/png")),
+        json!({"type": "input_image", "image_url": "https://img.test/a.png"})
+    );
+    assert_eq!(
+        send(with_detail(bytes(&[1, 2, 3], "image/png"), "low")),
+        json!({"type": "input_image", "image_url": "data:image/png;base64,AQID", "detail": "low"})
+    );
+    assert_eq!(
+        send(text_data("file-abc", "application/pdf")),
+        json!({"type": "input_file", "file_id": "file-abc"})
+    );
+    assert_eq!(
+        send(with_detail(text_data("file-img", "image/png"), "high")),
+        json!({"type": "input_image", "file_id": "file-img", "detail": "high"})
+    );
+    assert_eq!(
+        send(text_data("https://docs.test/a.pdf", "application/pdf")),
+        json!({"type": "input_file", "file_url": "https://docs.test/a.pdf"})
+    );
+    assert_eq!(
+        send(bytes(&[1, 2, 3], "application/pdf")),
+        json!({"type": "input_file", "filename": "part-1.pdf", "file_data": "data:application/pdf;base64,AQID"})
+    );
+}
+
+#[test]
+fn oai_007_other_files_need_the_pass_through_option_on_responses() {
+    // A text file goes as text without the option (Shawn's OAI-007 ruling).
+    assert_eq!(
+        sent_file(true, bytes(b"a,b", "text/csv"), &StreamOptions::default()).unwrap(),
+        json!({"type": "input_text", "text": "a,b"})
+    );
+    let error = sent_file(
+        true,
+        bytes(&[1, 2, 3], "audio/flac"),
+        &StreamOptions::default(),
+    )
+    .expect_err("audio/flac without the option");
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+    let pass = openai(json!({"passThroughUnsupportedFiles": true}));
+    assert_eq!(
+        sent_file(true, bytes(b"a,b", "text/csv"), &pass).unwrap(),
+        json!({"type": "input_file", "filename": "part-1", "file_data": "data:text/csv;base64,YSxi"})
+    );
+    assert_eq!(
+        sent_file(
+            true,
+            text_data("https://data.test/t.csv", "text/csv"),
+            &pass
+        )
+        .unwrap(),
+        json!({"type": "input_file", "file_url": "https://data.test/t.csv"})
+    );
+}
+
+#[tokio::test]
+async fn oai_007_chat_completions_files_go_as_typescript_sends_them() {
+    let none = StreamOptions::default();
+    let send = |part: Part| sent_file(false, part, &none).unwrap();
+    assert_eq!(
+        send(text_data("file-abc", "application/pdf")),
+        json!({"type": "file", "file": {"file_id": "file-abc"}})
+    );
+    assert_eq!(
+        send(bytes(&[1, 2, 3], "audio/wav")),
+        json!({"type": "input_audio", "input_audio": {"data": "AQID", "format": "wav"}})
+    );
+    assert_eq!(
+        send(bytes(&[1, 2, 3], "audio/mpeg")),
+        json!({"type": "input_audio", "input_audio": {"data": "AQID", "format": "mp3"}})
+    );
+    assert_eq!(
+        send(bytes(&[1, 2, 3], "application/pdf")),
+        json!({"type": "file", "file": {"filename": "part-1.pdf", "file_data": "data:application/pdf;base64,AQID"}})
+    );
+    assert_eq!(
+        send(with_detail(bytes(&[1, 2, 3], "image/png"), "high")),
+        json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AQID", "detail": "high"}})
+    );
+    for part in [
+        bytes(&[1, 2, 3], "audio/flac"),
+        text_data("https://audio.test/a.mp3", "audio/mpeg"),
+        text_data("https://docs.test/a.pdf", "application/pdf"),
+    ] {
+        let transport = Recorder::new([chat_reply()]);
+        let provider = OpenAICompatibleProvider::new(config(), transport.clone())
+            .with_protocol(Arc::new(OpenAIChatCompletionsProtocol));
+        let model = Model::new("gpt-4.1", Arc::new(provider));
+        let message = Message::new(MessageRole::User, vec![part]);
+        let mut handle = suprnova_ai::stream(&model, vec![message], StreamOptions::default());
+        let mut error = None;
+        while let Some(event) = handle.next().await {
+            if let Err(e) = event {
+                error = Some(e);
+            }
+        }
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::Validation(_))),
+            "{error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+}
