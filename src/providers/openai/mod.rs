@@ -41,6 +41,7 @@ pub(crate) mod profile;
 pub mod protocol;
 mod provider;
 mod responses;
+mod speech;
 mod streaming;
 pub mod tools;
 pub use completions::OpenAICompletionsProtocol;
