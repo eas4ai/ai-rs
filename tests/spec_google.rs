@@ -2053,6 +2053,16 @@ fn video_model(transport: Arc<Recorder>) -> Model {
     model("veo-3.1-generate-preview", transport)
 }
 
+fn video_model_with_downloads(transport: Arc<Recorder>, downloads: Arc<Recorder>) -> Model {
+    Model::new(
+        "veo-3.1-generate-preview",
+        Arc::new(
+            google::provider(key(), transport)
+                .with_download_transport(Arc::new(Downloads(downloads))),
+        ),
+    )
+}
+
 #[tokio::test(start_paused = true)]
 async fn ggl_019_a_job_starts_polls_and_downloads_with_the_key_header() {
     let uri = "https://generativelanguage.googleapis.com/v1beta/files/v1:download?alt=media";
@@ -2131,8 +2141,9 @@ async fn ggl_019_a_download_follows_redirects_and_keeps_the_key_on_its_origin() 
         ),
         Reply::status(302, json!({}))
             .header("location", "https://storage.example.com/v.mp4?sig=s1"),
-        Reply::bytes(vec![0, 0, 0, 24]).header("content-type", "video/mp4"),
     ]);
+    let downloads =
+        Recorder::new([Reply::bytes(vec![0, 0, 0, 24]).header("content-type", "video/mp4")]);
     let prompt = VideoPrompt {
         text: Some("a wave".into()),
         ..Default::default()
@@ -2142,7 +2153,7 @@ async fn ggl_019_a_download_follows_redirects_and_keeps_the_key_on_its_origin() 
         ..Default::default()
     };
     let item = ops::generate_video(
-        &video_model(transport.clone()),
+        &video_model_with_downloads(transport.clone(), downloads.clone()),
         prompt,
         VideoParams::default(),
         options,
@@ -2150,20 +2161,24 @@ async fn ggl_019_a_download_follows_redirects_and_keeps_the_key_on_its_origin() 
     .await
     .unwrap();
     let requests = transport.all();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[2].url, uri);
     assert_eq!(
         header(&requests[2], "x-goog-api-key").as_deref(),
         Some("g-key")
     );
-    assert_eq!(requests[3].url, "https://storage.example.com/v.mp4?sig=s1");
-    assert_eq!(header(&requests[3], "x-goog-api-key"), None);
+    let fetched = downloads.all();
+    assert_eq!(fetched.len(), 1);
+    assert_eq!(fetched[0].url, "https://storage.example.com/v.mp4?sig=s1");
+    assert_eq!(header(&fetched[0], "x-goog-api-key"), None);
     assert_eq!(item.value[0].data.as_bytes().unwrap(), &[0, 0, 0, 24]);
+    assert_eq!(item.value[0].media_type, "video/mp4");
 
     let transport = Recorder::new([
         Reply::status(302, json!({})).header("location", "http://storage.example.com/v.mp4")
     ]);
-    let model = video_model(transport.clone());
+    let downloads = Recorder::new([]);
+    let model = video_model_with_downloads(transport.clone(), downloads.clone());
     let video = FilePart::from_url(uri, Some("video/mp4")).unwrap();
     let error = model
         .provider
@@ -2174,9 +2189,51 @@ async fn ggl_019_a_download_follows_redirects_and_keeps_the_key_on_its_origin() 
         .unwrap_err();
     assert!(matches!(error, Error::Provider(_)), "{error:?}");
     assert_eq!(
-        transport.count(),
+        transport.count() + downloads.count(),
         1,
         "a redirect from https to http was followed"
+    );
+}
+
+#[tokio::test]
+async fn ggl_019_a_redirect_off_the_origin_reaches_only_public_addresses() {
+    let uri = "https://generativelanguage.googleapis.com/v1beta/files/v1:download?alt=media";
+    let video = FilePart::from_url(uri, Some("video/mp4")).unwrap();
+    let transport = Recorder::new([Reply::status(302, json!({}))
+        .header("location", "https://169.254.169.254/computeMetadata/v1/")]);
+    let downloads = Recorder::new([Reply::bytes(vec![1])]);
+    let model = video_model_with_downloads(transport.clone(), downloads.clone());
+    let error = model
+        .provider
+        .protocol()
+        .unwrap()
+        .download_video(&model, video.clone(), model.provider.as_ref())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    assert_eq!(transport.count(), 1);
+    assert_eq!(
+        downloads.count(),
+        0,
+        "a redirect to a link-local address was requested"
+    );
+
+    let transport = Recorder::new([
+        Reply::status(302, json!({})).header("location", "https://storage.example.com/v.mp4")
+    ]);
+    let model = video_model(transport.clone());
+    let error = model
+        .provider
+        .protocol()
+        .unwrap()
+        .download_video(&model, video, model.provider.as_ref())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(
+        transport.count(),
+        1,
+        "a hop off the origin went through the provider transport"
     );
 }
 
@@ -2187,10 +2244,10 @@ async fn ggl_019_a_video_on_another_origin_downloads_without_the_key_and_failure
         Reply::json(
             json!({"done": true, "response": {"generateVideoResponse": {"generatedSamples": [{"video": {"uri": "https://cdn.example/v.mp4"}}]}}}),
         ),
-        Reply::bytes(vec![1]),
         Reply::json(json!({"done": true, "error": {"message": "quota"}})),
     ]);
-    let model = video_model(transport.clone());
+    let downloads = Recorder::new([Reply::bytes(vec![1])]);
+    let model = video_model_with_downloads(transport.clone(), downloads.clone());
     let job = VideoJob {
         provider: "google".into(),
         model_id: "veo-3.1-generate-preview".into(),
@@ -2207,11 +2264,14 @@ async fn ggl_019_a_video_on_another_origin_downloads_without_the_key_and_failure
         Some("https://cdn.example/v.mp4")
     );
     let protocol = model.provider.protocol().unwrap();
-    protocol
+    let video = protocol
         .download_video(&model, item.value[0].clone(), model.provider.as_ref())
         .await
         .unwrap();
-    assert!(header(&transport.nth(1), "x-goog-api-key").is_none());
+    assert_eq!(video.data.as_bytes().unwrap(), &[1]);
+    assert_eq!(downloads.nth(0).url, "https://cdn.example/v.mp4");
+    assert!(header(&downloads.nth(0), "x-goog-api-key").is_none());
+    assert_eq!(transport.count(), 1);
     let status = ops::video_status(&model, &job, Default::default())
         .await
         .unwrap();

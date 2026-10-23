@@ -120,7 +120,9 @@ AI, with every model kind of the TypeScript `@ai-sdk/google` and
 `google::register` (handles `google` and `@ai-sdk/google`) and
 `google_vertex::register_provider` (`google-vertex` and
 `@ai-sdk/google-vertex`). The Gemini API key goes out as `x-goog-api-key`,
-also on Live API sockets, and never in a URL. Vertex AI takes its project and
+also on Live API sockets, and never in a URL. Build the Gemini provider with
+`with_download_transport` to send the file URLs Gemini does not fetch and to
+fetch a Veo video from another origin than the base URL's. Vertex AI takes its project and
 location from the `env` values `GOOGLE_VERTEX_PROJECT` and
 `GOOGLE_VERTEX_LOCATION`, and signs in with an Express Mode key
 (`GOOGLE_VERTEX_API_KEY`), an `AccessTokenSource`, or, with the `google-auth`

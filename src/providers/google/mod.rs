@@ -363,7 +363,7 @@ impl ProviderProtocol for GeminiProtocol {
         provider: &dyn Provider,
     ) -> Result<crate::types::messages::FilePart, Error> {
         let call = self.call(model, provider)?;
-        video::download(&call.endpoint, video_part).await
+        video::download(&call.endpoint, call.downloads.as_deref(), video_part).await
     }
 
     async fn create_realtime_token(
@@ -438,8 +438,10 @@ impl fmt::Debug for GoogleProvider {
 
 impl GoogleProvider {
     /// Download the user file URLs that Gemini does not fetch before each
-    /// request. Without one, such a URL fails with `Error::Validation`.
-    /// Download transports must honor the core DNS-pinning contract.
+    /// request, and a Veo video URL, or a redirect, to another origin than
+    /// the base URL's. Without one, such a URL fails with
+    /// `Error::Validation`. Download transports must honor the core
+    /// DNS-pinning contract.
     #[must_use]
     pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
         self.downloads = Some(downloads);

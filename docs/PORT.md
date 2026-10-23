@@ -205,7 +205,9 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   strict function tool.
 - No Google key goes in a URL: Live API sockets send it as `x-goog-api-key`, a
   realtime server connection sends its token as `Authorization: Token`, and a
-  Veo download sends the key only to the base URL's origin. The Vertex auth
+  Veo download sends the key only to the base URL's origin. A Veo URL or
+  redirect to another origin goes through the download transport, which
+  checks each address, or fails without one. The Vertex auth
   headers go only to the base URL's host and `googleapis.com` hosts.
 - Every Interactions request sends `Api-Revision: 2026-05-20` unless the
   configured headers set one, as Google's Go SDK does. An agent or background
