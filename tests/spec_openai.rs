@@ -3334,3 +3334,91 @@ async fn oai_017_settings_openai_does_not_take_fail_before_a_request() {
         assert!(transport.requests.lock().unwrap().is_empty(), "{id}");
     }
 }
+
+// OAI-018
+
+fn speech_prompt(text: &str) -> suprnova_ai::providers::operations::AudioPrompt {
+    suprnova_ai::providers::operations::AudioPrompt {
+        text: text.into(),
+        instructions: None,
+    }
+}
+
+#[tokio::test]
+async fn oai_018_speech_goes_out_as_typescript_sends_it() {
+    use suprnova_ai::providers::operations::AudioParams;
+    let transport = Recorder::new([(200, vec![1, 2, 3]), (200, vec![4])]);
+    let model = image_model("gpt-4o-mini-tts", transport.clone());
+    let item = suprnova_ai::ops::generate_audio(
+        &model,
+        speech_prompt("hello"),
+        AudioParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url(&transport, 0), "https://api.openai.com/v1/audio/speech");
+    assert_eq!(
+        transport.body(0),
+        json!({"model": "gpt-4o-mini-tts", "input": "hello", "voice": "alloy", "response_format": "mp3"})
+    );
+    assert_eq!(item.value[0].media_type, "audio/mpeg");
+    assert_eq!(
+        item.value[0].data,
+        suprnova_ai::types::messages::FileData::Bytes(vec![1, 2, 3])
+    );
+    let mut prompt = speech_prompt("hi");
+    prompt.instructions = Some("calm".into());
+    let item = suprnova_ai::ops::generate_audio(
+        &model,
+        prompt,
+        AudioParams {
+            voice: Some("nova".into()),
+            output_format: Some("wav".into()),
+            speed: Some(1.5),
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.body(1),
+        json!({"model": "gpt-4o-mini-tts", "input": "hi", "voice": "nova", "response_format": "wav", "speed": 1.5, "instructions": "calm"})
+    );
+    assert_eq!(item.value[0].media_type, "audio/wav");
+}
+
+#[tokio::test]
+async fn oai_018_another_format_or_a_language_fails_before_a_request() {
+    use suprnova_ai::providers::operations::AudioParams;
+    for params in [
+        AudioParams {
+            output_format: Some("ogg".into()),
+            ..Default::default()
+        },
+        AudioParams {
+            language: Some("fr".into()),
+            ..Default::default()
+        },
+        AudioParams {
+            provider_options: [("openai".to_owned(), json!({"speed": 9}))].into(),
+            ..Default::default()
+        },
+    ] {
+        let transport = Recorder::new([(200, vec![1])]);
+        let error = suprnova_ai::ops::generate_audio(
+            &image_model("tts-1", transport.clone()),
+            speech_prompt("x"),
+            params,
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{error:?}"
+        );
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+}
