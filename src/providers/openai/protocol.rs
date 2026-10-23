@@ -1,7 +1,7 @@
 use super::{
     chat, dialect, embedding, images, messages, params,
     profile::{self, ChatProfile, Dialect, ResponsesDialect, ResponsesProfile},
-    responses, speech, streaming,
+    responses, speech, streaming, transcription,
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
@@ -10,6 +10,7 @@ use crate::{
         EventStream, http,
         operations::{
             AudioParams, AudioPrompt, CallLimits, EmbedParams, ImageParams, ImagePrompt, Item,
+            TranscribeInput, TranscribeParams, Transcription,
         },
     },
     transport::HttpRequest,
@@ -22,8 +23,8 @@ use std::sync::Arc;
 
 /// The `ProviderProtocol` of one of OpenAI's language model protocols: its
 /// class id, its stream on `wire` with the downloads `|this|` gives, and the
-/// operations they share: embeddings (OAI-016), images (OAI-017) and
-/// speech (OAI-018).
+/// operations they share: embeddings (OAI-016), images (OAI-017), speech
+/// (OAI-018) and transcription (OAI-019).
 macro_rules! openai_protocol {
     ($ty:ty, $class:expr, $wire:expr, |$this:ident| $downloads:expr) => {
         #[async_trait]
@@ -80,6 +81,15 @@ macro_rules! openai_protocol {
                 provider: &dyn Provider,
             ) -> Result<Item<Vec<FilePart>>, Error> {
                 speech::generate(model, prompt, params, provider).await
+            }
+            async fn transcribe(
+                &self,
+                model: &Model,
+                audio: TranscribeInput,
+                params: TranscribeParams,
+                provider: &dyn Provider,
+            ) -> Result<Item<Transcription>, Error> {
+                transcription::transcribe(model, audio, params, provider).await
             }
         }
     };
