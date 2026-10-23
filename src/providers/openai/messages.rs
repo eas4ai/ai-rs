@@ -752,7 +752,11 @@ fn openai_assistant(
                     );
                     continue;
                 }
-                if let Some(raw) = raw {
+                // A call, its result and an image file carry the same raw
+                // item; OpenAI takes each item once.
+                if let Some(raw) = raw
+                    && id.is_none_or(|id| sent.insert(id.to_owned()))
+                {
                     out.push(raw.clone());
                 }
             }
@@ -1446,13 +1450,17 @@ pub(super) fn convert(
         }
     }
     if openai_responses {
-        // OpenAI rejects an item it is given twice.
-        let mut referenced = BTreeSet::new();
+        // OpenAI rejects an item it is given twice, by reference or in full.
+        let (mut referenced, mut given) = (BTreeSet::new(), BTreeSet::new());
         out.retain(|item| {
-            item["type"] != "item_reference"
-                || item["id"]
-                    .as_str()
-                    .is_none_or(|id| referenced.insert(id.to_owned()))
+            let Some(id) = item["id"].as_str() else {
+                return true;
+            };
+            if item["type"] == "item_reference" {
+                referenced.insert(id.to_owned())
+            } else {
+                given.insert(id.to_owned())
+            }
         });
     }
     Ok(out)
