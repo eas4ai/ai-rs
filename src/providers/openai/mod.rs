@@ -29,6 +29,7 @@
 //! Built-in tool arguments use snake_case JSON objects, as in the Python wire format.
 mod capabilities;
 mod chat;
+mod completions;
 mod dialect;
 pub mod errors;
 mod messages;
@@ -40,6 +41,7 @@ mod provider;
 mod responses;
 mod streaming;
 pub mod tools;
+pub use completions::OpenAICompletionsProtocol;
 pub use params::OpenAIParams;
 // Kept for callers of the old name-based choice; it is deprecated.
 #[allow(deprecated)]
