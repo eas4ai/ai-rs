@@ -316,6 +316,8 @@ pub(crate) fn wire_request(
             system_role: call.system_role(),
             update_blocked: call.update_blocked(&body),
             pass_through_files: call.options.pass_through_unsupported_files == Some(true),
+            conversation: call.options.conversation.is_some(),
+            previous_response: call.options.previous_response_id.is_some(),
         },
         None => messages::History::plain(model, use_references),
     };

@@ -14,7 +14,7 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn media_ref(data: &FileData) -> MediaDataRef<'_> {
     match data {
@@ -375,13 +375,19 @@ fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
         _ => Ok(json!(serde_json::to_string(value)?)),
     }
 }
-fn repair(messages: Vec<Message>) -> Result<Vec<Message>, Error> {
+/// The history without internal messages and hooks, with each unanswered
+/// tool call given an error result. `approvals` keeps the hooks of MCP
+/// approval requests, which OpenAI's Responses API answers (OAI-008).
+fn repair(messages: Vec<Message>, approvals: bool) -> Result<Vec<Message>, Error> {
     let mut cleaned = vec![];
     for mut msg in messages {
         if msg.role == MessageRole::Internal {
             continue;
         }
-        msg.parts.retain(|p| !matches!(p, Part::Hook(_)));
+        msg.parts.retain(|p| match p {
+            Part::Hook(hook) => approvals && hook.metadata.contains_key("openai"),
+            _ => true,
+        });
         if msg.parts.is_empty() {
             continue;
         }
@@ -549,18 +555,39 @@ fn huggingface_assistant(msg: &Message, out: &mut Vec<Value>) {
 /// that item. Without them, text goes out without its id and reasoning only
 /// with its encrypted content (OAI-002). Text that goes out in full is one
 /// assistant message per part, with the `phase` of its item.
-fn openai_assistant(msg: &Message, reasoning_model: bool, references: bool, out: &mut Vec<Value>) {
+/// An assistant turn as OpenAI's Responses API takes it in history
+/// (`convert-to-openai-responses-input.ts`, OAI-001, OAI-002 and OAI-008).
+fn openai_assistant(
+    msg: &Message,
+    history: &History<'_>,
+    parallel: &mut Parallel,
+    out: &mut Vec<Value>,
+) {
+    let references = history.references;
+    let reasoning_model = history.reasoning;
     let mut sent = BTreeSet::new();
     // Reasoning items rebuilt from their parts, which take later summaries.
     let mut built = BTreeSet::new();
     let mut after_reasoning = false;
     for p in &msg.parts {
         let md = metadata(p, "openai");
-        if let Part::ToolCall(c) = p {
-            out.push(function_call(c, md));
+        let id = item_id(md);
+        // A conversation already holds every item OpenAI stored for it.
+        if history.conversation && id.is_some() {
             continue;
         }
-        let id = item_id(md);
+        if let Part::ToolCall(c) = p {
+            match parallel.call(c) {
+                Some(Some(wrapper)) if !history.conversation => out.push(wrapper),
+                Some(_) => {}
+                None => out.push(function_call(c, md)),
+            }
+            continue;
+        }
+        if let Part::Hook(hook) = p {
+            approval_response(hook, history, parallel, out);
+            continue;
+        }
         let raw = md
             .and_then(|m| m.get("raw_item"))
             .filter(|raw| raw.is_object());
@@ -589,6 +616,10 @@ fn openai_assistant(msg: &Message, reasoning_model: bool, references: bool, out:
             }
             Part::Reasoning(r) => {
                 after_reasoning |= id.is_some();
+                // A previous response already holds its reasoning.
+                if history.previous_response && id.is_some() {
+                    continue;
+                }
                 if references && let Some(id) = id {
                     if sent.insert(id.to_owned()) {
                         out.push(json!({"type":"item_reference","id":id}));
@@ -637,6 +668,8 @@ fn openai_assistant(msg: &Message, reasoning_model: bool, references: bool, out:
                 }
                 out.push(item);
             }
+            // A conversation holds the results of OpenAI's own tools.
+            Part::BuiltinToolReturn(_) if history.conversation => {}
             _ => {
                 if references && let Some(id) = id {
                     if sent.insert(id.to_owned()) {
@@ -644,11 +677,188 @@ fn openai_assistant(msg: &Message, reasoning_model: bool, references: bool, out:
                     }
                     continue;
                 }
+                if let Part::BuiltinToolCall(call) = p
+                    && call.tool_name == "compaction"
+                    && let Some(id) = id
+                {
+                    let encrypted = md.and_then(|m| m.get("encrypted_content"));
+                    out.push(
+                        json!({"type": "compaction", "id": id, "encrypted_content": encrypted}),
+                    );
+                    continue;
+                }
                 if let Some(raw) = raw {
                     out.push(raw.clone());
                 }
             }
         }
+    }
+}
+
+/// The `additional_tools` item a tool result's `additionalTools` metadata
+/// asks for: function definitions OpenAI loads after the result
+/// (`openaiResponsesToolResultOptionsSchema`).
+fn additional_tools(tools: &Value) -> Result<Value, Error> {
+    let bad = || {
+        invalid(
+            "openai additionalTools must be function definitions with a type, name and parameters, and an optional description and strict",
+        )
+    };
+    let list = tools.as_array().ok_or_else(bad)?;
+    for tool in list {
+        let tool = tool.as_object().ok_or_else(bad)?;
+        let valid = tool.get("type").is_some_and(|t| t == "function")
+            && tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !name.is_empty())
+            && tool.get("parameters").is_some_and(Value::is_object)
+            && tool.get("description").is_none_or(Value::is_string)
+            && tool.get("strict").is_none_or(Value::is_boolean)
+            && tool.keys().all(|key| {
+                ["type", "name", "description", "parameters", "strict"].contains(&key.as_str())
+            });
+        if !valid {
+            return Err(bad());
+        }
+    }
+    Ok(json!({"type": "additional_tools", "role": "developer", "tools": list}))
+}
+
+/// A resolved `ToolApproval` hook of an MCP approval request, whose `openai`
+/// metadata names the request: an `mcp_approval_response`, once per request,
+/// after a reference to the stored request.
+fn approval_response(
+    hook: &HookPart,
+    history: &History<'_>,
+    parallel: &mut Parallel,
+    out: &mut Vec<Value>,
+) {
+    let Some(request) = hook
+        .metadata
+        .get("openai")
+        .and_then(|md| md.get("approval_request_id"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if hook.hook_type != "ToolApproval"
+        || hook.status != HookStatus::Resolved
+        || !parallel.approvals.insert(request.to_owned())
+    {
+        return;
+    }
+    let approve = hook
+        .resolution
+        .as_ref()
+        .and_then(|r| r.get("granted"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if history.references && !history.conversation && !history.previous_response {
+        out.push(json!({"type": "item_reference", "id": request}));
+    }
+    out.push(json!({
+        "type": "mcp_approval_response",
+        "approval_request_id": request,
+        "approve": approve,
+    }));
+}
+
+/// The `function_call` named `parallel` that OpenAI answered with, which
+/// the reader expands into one call per tool use (OAI-011). With a
+/// conversation or a previous response, OpenAI holds the wrapper, so a group
+/// whose calls all have results goes back as the one wrapper call and one
+/// output (OAI-008). Also the MCP approvals already answered.
+#[derive(Default)]
+struct Parallel {
+    /// Each expanded call's wrapper id, for the complete groups.
+    member: BTreeMap<String, String>,
+    /// Each complete group: the wrapper call and its results in order.
+    groups: BTreeMap<String, (Value, Vec<String>)>,
+    /// The results of the expanded calls of complete groups.
+    results: BTreeMap<String, ToolResultPart>,
+    emitted_calls: BTreeSet<String>,
+    emitted_results: BTreeSet<String>,
+    approvals: BTreeSet<String>,
+}
+
+impl Parallel {
+    fn collect(messages: &[Message], history: &History<'_>) -> Self {
+        let mut this = Self::default();
+        if !history.conversation && !history.previous_response {
+            return this;
+        }
+        // By wrapper id: its metadata, and each use's call id by index.
+        let mut found: BTreeMap<String, (Value, BTreeMap<u64, String>, bool)> = BTreeMap::new();
+        let results: BTreeSet<&str> = messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|p| match p {
+                Part::ToolResult(r) => Some(r.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for part in messages.iter().flat_map(|m| &m.parts) {
+            let Part::ToolCall(call) = part else {
+                continue;
+            };
+            let Some(group) = metadata(part, "openai").and_then(|m| m.get("parallel_tool_call"))
+            else {
+                continue;
+            };
+            let (Some(wrapper), Some(index)) = (
+                group.get("tool_call_id").and_then(Value::as_str),
+                group.get("index").and_then(Value::as_u64),
+            ) else {
+                continue;
+            };
+            let mut shared = group.clone();
+            shared.as_object_mut().map(|g| g.remove("index"));
+            let entry = found
+                .entry(wrapper.to_owned())
+                .or_insert_with(|| (shared.clone(), BTreeMap::new(), false));
+            if entry.0 != shared || entry.1.contains_key(&index) {
+                entry.2 = true;
+            }
+            entry.1.insert(index, call.tool_call_id.clone());
+        }
+        for (wrapper, (group, uses, invalid)) in found {
+            let count = group.get("count").and_then(Value::as_u64);
+            let complete = !invalid
+                && count == Some(uses.len() as u64)
+                && uses.keys().copied().eq(0..uses.len() as u64)
+                && uses.values().all(|id| results.contains(id.as_str()));
+            if !complete {
+                continue;
+            }
+            let call = json!({
+                "type": "function_call",
+                "call_id": wrapper,
+                "name": group.get("tool_name"),
+                "arguments": group.get("input"),
+            });
+            let ids: Vec<String> = uses.into_values().collect();
+            for id in &ids {
+                this.member.insert(id.clone(), wrapper.clone());
+            }
+            this.groups.insert(wrapper, (call, ids));
+        }
+        for part in messages.iter().flat_map(|m| &m.parts) {
+            if let Part::ToolResult(r) = part
+                && this.member.contains_key(&r.tool_call_id)
+            {
+                this.results.insert(r.tool_call_id.clone(), r.clone());
+            }
+        }
+        this
+    }
+
+    /// For an expanded call of a complete group, its wrapper call the first
+    /// time and `None` after; `None` outside such a group.
+    fn call(&mut self, call: &ToolCallPart) -> Option<Option<Value>> {
+        let wrapper = self.member.get(&call.tool_call_id)?;
+        let first = self.emitted_calls.insert(wrapper.clone());
+        Some(first.then(|| self.groups[wrapper].0.clone()))
     }
 }
 /// A tool call the application runs, as OpenAI's Responses API takes it in
@@ -685,6 +895,10 @@ pub(super) struct History<'a> {
     pub update_blocked: Option<&'a str>,
     /// `passThroughUnsupportedFiles`: send other files as `input_file`.
     pub pass_through_files: bool,
+    /// The call continues a conversation (option `conversation`).
+    pub conversation: bool,
+    /// The call continues a previous response (`previousResponseId`).
+    pub previous_response: bool,
 }
 
 impl<'a> History<'a> {
@@ -697,6 +911,8 @@ impl<'a> History<'a> {
             system_role: Some("system"),
             update_blocked: None,
             pass_through_files: false,
+            conversation: false,
+            previous_response: false,
         }
     }
 }
@@ -747,7 +963,8 @@ pub(super) fn convert(
         Wire::Responses(_) => "reasoning",
     };
     let dialect = dialect_of(wire);
-    let messages = repair(messages)?;
+    let messages = repair(messages, openai_responses)?;
+    let mut parallel = Parallel::collect(&messages, &history);
     let last = messages.len().saturating_sub(1);
     let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
     let mut out = vec![];
@@ -838,11 +1055,31 @@ pub(super) fn convert(
             {
                 huggingface_assistant(&msg, &mut out);
             }
-            MessageRole::Assistant => {
-                openai_assistant(&msg, history.reasoning, history.references, &mut out)
-            }
+            MessageRole::Assistant => openai_assistant(&msg, &history, &mut parallel, &mut out),
             MessageRole::Tool => {
                 for p in &msg.parts {
+                    if let Part::Hook(hook) = p {
+                        approval_response(hook, &history, &mut parallel, &mut out);
+                        continue;
+                    }
+                    if let Part::ToolResult(r) = p
+                        && openai_responses
+                        && let Some(wrapper) = parallel.member.get(&r.tool_call_id).cloned()
+                    {
+                        if parallel.emitted_results.insert(wrapper.clone()) {
+                            let mut outputs = vec![];
+                            for id in &parallel.groups[&wrapper].1 {
+                                let value =
+                                    tool_result(parallel.results[id].get_model_input(), wire)?;
+                                outputs.push(match value {
+                                    Value::String(text) => text,
+                                    other => other.to_string(),
+                                });
+                            }
+                            out.push(json!({"type": "function_call_output", "call_id": wrapper, "output": outputs.join("\n")}));
+                        }
+                        continue;
+                    }
                     if let Part::ToolResult(r) = p {
                         let value = tool_result(r.get_model_input(), wire)?;
                         let mut entry = if responses {
@@ -854,11 +1091,27 @@ pub(super) fn convert(
                             entry["name"] = json!(r.tool_name);
                         }
                         out.push(entry);
+                        if openai_responses
+                            && let Some(tools) =
+                                metadata(p, "openai").and_then(|m| m.get("additionalTools"))
+                        {
+                            out.push(additional_tools(tools)?);
+                        }
                     }
                 }
             }
             MessageRole::Internal => {}
         }
+    }
+    if openai_responses {
+        // OpenAI rejects an item it is given twice.
+        let mut referenced = BTreeSet::new();
+        out.retain(|item| {
+            item["type"] != "item_reference"
+                || item["id"]
+                    .as_str()
+                    .is_none_or(|id| referenced.insert(id.to_owned()))
+        });
     }
     Ok(out)
 }
