@@ -2507,6 +2507,42 @@ async fn ggl_021_mixed_models_and_several_images_fail_before_a_request() {
 }
 
 #[tokio::test]
+async fn ggl_021_every_request_is_checked_before_any_download() {
+    let downloads =
+        Recorder::new([Reply::bytes(vec![1, 2, 3]).header("content-type", "image/png")]);
+    let transport = Recorder::new([Reply::json(operation("BATCH_STATE_PENDING"))]);
+    let provider = google::provider(key(), transport.clone())
+        .with_download_transport(Arc::new(Downloads(downloads.clone())));
+    let picture = FilePart::from_url("https://example.com/cat.png", Some("image/png")).unwrap();
+    let requests = vec![
+        BatchRequest {
+            id: "t1".into(),
+            model_id: "gemini-2.5-flash-image".into(),
+            kind: BatchRequestKind::Text {
+                messages: vec![Message::new(MessageRole::User, vec![Part::File(picture)])],
+                options: StreamOptions::default(),
+            },
+        },
+        image_request("i1", "gemini-2.5-flash-image", 2),
+    ];
+    let error = ops::batch::start(
+        &provider,
+        requests,
+        BatchParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(
+        downloads.count(),
+        0,
+        "a batch that fails validation downloaded a file"
+    );
+    assert_eq!(transport.count(), 0);
+}
+
+#[tokio::test]
 async fn ggl_021_a_large_batch_goes_up_as_json_lines() {
     let big = "x".repeat(6_000_000);
     let requests: Vec<BatchRequest> = (0..4)

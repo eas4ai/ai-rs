@@ -32,6 +32,7 @@ use super::{
 };
 use crate::{
     Error,
+    models::StreamOptions,
     models::files::DownloadTransport,
     providers::{http, operations::*},
     transport::Body,
@@ -49,21 +50,22 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::Validation(message.into())
 }
 
-/// One request's generate content body and warnings.
-async fn prepare(
-    endpoint: &Endpoint,
-    downloads: Option<&dyn DownloadTransport>,
-    request_entry: &BatchRequest,
-) -> Result<(Map<String, Value>, Vec<Warning>), Error> {
-    let target = Target {
+fn target<'a>(endpoint: &'a Endpoint, request_entry: &'a BatchRequest) -> Target<'a> {
+    Target {
         model_id: &request_entry.model_id,
         flavor: Flavor::Gemini,
         base_url: &endpoint.base,
         batch: true,
-    };
-    let (history, options, warnings): (Vec<Message>, _, Vec<Warning>) = match &request_entry.kind {
+    }
+}
+
+/// One request's messages, options and warnings.
+fn parts(
+    request_entry: &BatchRequest,
+) -> Result<(Vec<Message>, StreamOptions, Vec<Warning>), Error> {
+    match &request_entry.kind {
         BatchRequestKind::Text { messages, options } => {
-            (messages.clone(), options.clone(), Vec::new())
+            Ok((messages.clone(), options.clone(), Vec::new()))
         }
         BatchRequestKind::Image { prompt, params } => {
             if prompt.mask.is_some() {
@@ -75,17 +77,34 @@ async fn prepare(
                 return Err(invalid("Google batches take one image per image request"));
             }
             let built = image::request(Flavor::Gemini, &request_entry.model_id, prompt, params)?;
-            (built.messages, built.options, built.warnings)
+            Ok((built.messages, built.options, built.warnings))
         }
-    };
-    if messages::has_downloads(&history, target) {
-        request::build(
-            target,
-            &messages::without_downloads(&history, target),
-            &options,
-            false,
-        )?;
     }
+}
+
+/// Every check a request must pass, run with stand-ins for the files it
+/// would download. The body is dropped so a large batch holds one body at a
+/// time.
+fn check(endpoint: &Endpoint, request_entry: &BatchRequest) -> Result<(), Error> {
+    let target = target(endpoint, request_entry);
+    let (history, options, _) = parts(request_entry)?;
+    request::build(
+        target,
+        &messages::without_downloads(&history, target),
+        &options,
+        false,
+    )?;
+    Ok(())
+}
+
+/// One checked request's generate content body and warnings.
+async fn prepare(
+    endpoint: &Endpoint,
+    downloads: Option<&dyn DownloadTransport>,
+    request_entry: &BatchRequest,
+) -> Result<(Map<String, Value>, Vec<Warning>), Error> {
+    let target = target(endpoint, request_entry);
+    let (history, options, warnings) = parts(request_entry)?;
     let history = messages::download_files(history, target, downloads).await?;
     let prepared = request::build(target, &history, &options, false)?;
     Ok((prepared.body, warnings))
@@ -121,6 +140,9 @@ pub(crate) async fn start(
     let mut inline_bytes = empty;
     let mut inline: Vec<Value> = Vec::new();
     let mut lines: Option<Vec<u8>> = None;
+    for entry in requests {
+        check(endpoint, entry)?;
+    }
     let mut warnings = Vec::new();
     for entry in requests {
         let (body, request_warnings) = prepare(endpoint, downloads.as_deref(), entry).await?;
