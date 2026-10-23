@@ -72,8 +72,8 @@ fn usage(value: &Value, responses: bool) -> Option<Usage> {
         output_tokens: value[output].as_u64().unwrap_or(0),
         reasoning_tokens: value[outd]["reasoning_tokens"].as_u64(),
         cache_read_tokens: value[ind]["cached_tokens"].as_u64(),
+        cache_write_tokens: value[ind]["cache_write_tokens"].as_u64(),
         raw: Some(value.clone()),
-        ..Default::default()
     })
 }
 #[derive(Default)]
@@ -153,6 +153,9 @@ struct Parser {
     file_results: bool,
     /// A terminal response event arrived.
     terminal: bool,
+    /// The logprobs of the text deltas, which OpenAI sends when the call
+    /// asks for them (OAI-013).
+    logprobs: Vec<Value>,
 }
 /// `hold_reasoning` keeps each reasoning block open until its item ends, so
 /// that every block carries the item's final encrypted content; an unstored
@@ -219,6 +222,7 @@ pub(super) fn parse(
         web_sources: false,
         file_results: false,
         terminal: false,
+        logprobs: Vec::new(),
     };
     stream::try_unfold(state, |mut p| async move {
         loop {
@@ -613,6 +617,17 @@ impl Parser {
                         r["incomplete_details"]["reason"].clone(),
                     );
                 }
+                if self.openai_responses() {
+                    if r["service_tier"].is_string() {
+                        md.insert("service_tier".into(), r["service_tier"].clone());
+                    }
+                    if r["reasoning"]["context"].is_string() {
+                        md.insert(
+                            "reasoning_context".into(),
+                            r["reasoning"]["context"].clone(),
+                        );
+                    }
+                }
                 self.metadata = metadata(self.metadata_key, md.into());
                 if kind != "response.created" {
                     if let Some(mut u) = usage(&r["usage"], true) {
@@ -674,6 +689,9 @@ impl Parser {
                         block_id: id.into(),
                         chunk: text.into(),
                     }));
+                }
+                if self.openai_responses() && data["logprobs"].is_array() {
+                    self.logprobs.push(data["logprobs"].clone());
                 }
             }
             "response.function_call_arguments.delta"
@@ -1245,15 +1263,19 @@ impl Parser {
                 self.add_source(annotation_source(&citation));
             }
         }
-        if self.sources.is_empty() {
-            return;
+        for (key, values) in [
+            ("sources", std::mem::take(&mut self.sources)),
+            ("logprobs", std::mem::take(&mut self.logprobs)),
+        ] {
+            if values.is_empty() {
+                continue;
+            }
+            let md = self.metadata.get_or_insert_with(Default::default);
+            let openai = md
+                .entry(self.metadata_key.to_owned())
+                .or_insert_with(|| json!({}));
+            openai[key] = json!(values);
         }
-        let sources = json!(std::mem::take(&mut self.sources));
-        let md = self.metadata.get_or_insert_with(Default::default);
-        let openai = md
-            .entry(self.metadata_key.to_owned())
-            .or_insert_with(|| json!({}));
-        openai["sources"] = sources;
     }
     /// Whether the application runs this item's call (OAI-010).
     fn runs_on_host(&self, item: &Value) -> bool {
