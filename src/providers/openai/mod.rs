@@ -44,6 +44,7 @@ mod responses;
 mod speech;
 mod streaming;
 pub mod tools;
+mod transcription;
 pub use completions::OpenAICompletionsProtocol;
 pub use embedding::OpenAIEmbeddingProtocol;
 pub use params::OpenAIParams;
