@@ -899,6 +899,9 @@ pub(super) struct History<'a> {
     pub conversation: bool,
     /// The call continues a previous response (`previousResponseId`).
     pub previous_response: bool,
+    /// The tools whose text results go JSON-quoted, because they declare
+    /// an `output_schema` (OAI-009).
+    pub quoted_results: &'a [String],
 }
 
 impl<'a> History<'a> {
@@ -913,6 +916,7 @@ impl<'a> History<'a> {
             pass_through_files: false,
             conversation: false,
             previous_response: false,
+            quoted_results: &[],
         }
     }
 }
@@ -1081,7 +1085,14 @@ pub(super) fn convert(
                         continue;
                     }
                     if let Part::ToolResult(r) = p {
-                        let value = tool_result(r.get_model_input(), wire)?;
+                        let value = match r.get_model_input() {
+                            ToolResultValue::Json(Value::String(text))
+                                if history.quoted_results.contains(&r.tool_name) =>
+                            {
+                                json!(serde_json::to_string(text)?)
+                            }
+                            input => tool_result(input, wire)?,
+                        };
                         let mut entry = if responses {
                             json!({"type":"function_call_output","call_id":r.tool_call_id,"output":value})
                         } else {

@@ -308,6 +308,10 @@ pub(crate) fn wire_request(
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
     body.insert("stream".into(), json!(true));
+    let quoted_results = match &call {
+        Some(_) => super::tools::output_schema_tools(&options.tools)?,
+        None => vec![],
+    };
     let history = match &call {
         Some(call) => messages::History {
             model,
@@ -318,6 +322,7 @@ pub(crate) fn wire_request(
             pass_through_files: call.options.pass_through_unsupported_files == Some(true),
             conversation: call.options.conversation.is_some(),
             previous_response: call.options.previous_response_id.is_some(),
+            quoted_results: &quoted_results,
         },
         None => messages::History::plain(model, use_references),
     };
@@ -368,17 +373,26 @@ pub(crate) fn wire_request(
     if send_tools && !options.tools.is_empty() {
         body.insert(
             "tools".into(),
-            super::tools::convert(&options.tools, wire)?.into(),
+            super::tools::convert(&options.tools, wire, model)?.into(),
         );
     }
     if send_tools && let Some(choice) = &options.tool_choice {
         body.insert("tool_choice".into(), params::tool_choice(choice, wire)?);
     }
-    if let Some(allowed) = call.as_ref().and_then(|c| c.options.allowed_tools.as_ref())
-        && let Some(sent) = body.get("tools").and_then(Value::as_array)
-    {
-        let choice = super::tools::allowed_tools(allowed, &options.tools, sent, model)?;
-        body.insert("tool_choice".into(), choice);
+    if let Some(call) = &call {
+        match &call.options.allowed_tools {
+            Some(allowed) if !options.tools.is_empty() => {
+                let choice = super::tools::allowed_tools(allowed, &options.tools, model)?;
+                body.insert("tool_choice".into(), choice);
+            }
+            Some(_) => {}
+            None => {
+                if let Some(ToolChoice::Tool(name)) = dialect::tool_choice(&p, options) {
+                    let choice = super::tools::named_choice(&name.0, &options.tools)?;
+                    body.insert("tool_choice".into(), choice);
+                }
+            }
+        }
     }
     if let Some(profile) = chat
         && profile.dialect == Dialect::Mistral

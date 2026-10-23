@@ -878,7 +878,8 @@ async fn tools_and_builtin_guards() {
     .await;
     assert_eq!(
         fake.body()["tools"],
-        json!([{"type":"function","name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}},{"type":"web_search","search_context_size":"low"},{"type":"code_interpreter","container":{"type":"auto"}}])
+        // A plain function tool is not strict (OAI-009).
+        json!([{"type":"function","name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}},"strict":false},{"type":"web_search","search_context_size":"low"},{"type":"code_interpreter","container":{"type":"auto"}}])
     );
     let fake = Scripted::sse(vec![]);
     let model = Model::new("gpt", provider(fake.clone(), true));
