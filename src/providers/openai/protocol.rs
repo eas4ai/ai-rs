@@ -201,6 +201,7 @@ fn start(
     let provider_name = provider.name().to_owned();
     let model_id = model.id.clone();
     let transport = provider.shared_transport();
+    let downloads = downloads.or_else(|| provider.download_transport());
     stream::once(async move {
         // Check the request before any download, with each file to download
         // standing in as bytes, so a call that fails validation sends nothing.

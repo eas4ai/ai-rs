@@ -4,8 +4,9 @@ use super::{
 };
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
+    models::files::DownloadTransport,
     providers::{ModelsDevProvider, base::provider_config, hosts, http},
-    transport::HttpTransport,
+    transport::{HttpTransport, WebSocketTransport},
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -19,6 +20,8 @@ pub struct OpenAICompatibleProvider {
     /// Chosen when the provider is built, from the API it targets.
     default_protocol: Arc<dyn ProviderProtocol>,
     protocol_override: Option<Arc<dyn ProviderProtocol>>,
+    downloads: Option<Arc<dyn DownloadTransport>>,
+    websocket: Option<Arc<dyn WebSocketTransport>>,
 }
 impl std::fmt::Debug for OpenAICompatibleProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,6 +50,8 @@ impl OpenAICompatibleProvider {
             transport,
             default_protocol: Arc::new(OpenAIResponsesProtocol),
             protocol_override: None,
+            downloads: None,
+            websocket: None,
         }
     }
     /// Build a provider from models.dev metadata. Metadata that names a
@@ -100,11 +105,31 @@ impl OpenAICompatibleProvider {
             transport,
             default_protocol,
             protocol_override: None,
+            downloads: None,
+            websocket: None,
         })
     }
     #[must_use]
     pub fn with_protocol(mut self, protocol: Arc<dyn ProviderProtocol>) -> Self {
         self.protocol_override = Some(protocol);
+        self
+    }
+    /// Download the media URLs an API cannot fetch itself before each
+    /// request. Without one, such a URL fails with `Error::Validation`.
+    /// Download transports must honor the core DNS-pinning contract.
+    /// Runtime transports are not serialized; set this again after
+    /// restoring a snapshot.
+    #[must_use]
+    pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
+        self.downloads = Some(downloads);
+        self
+    }
+    /// Open realtime and live WebSockets with this transport. Runtime
+    /// transports are not serialized; set this again after restoring a
+    /// snapshot.
+    #[must_use]
+    pub fn with_websocket_transport(mut self, websocket: Arc<dyn WebSocketTransport>) -> Self {
+        self.websocket = Some(websocket);
         self
     }
     async fn get(&self, path: &[&str], model: Option<&str>) -> Result<Value, Error> {
@@ -141,6 +166,12 @@ impl Provider for OpenAICompatibleProvider {
     }
     fn protocol_override(&self) -> Option<Arc<dyn ProviderProtocol>> {
         self.protocol_override.clone()
+    }
+    fn websocket(&self) -> Option<Arc<dyn WebSocketTransport>> {
+        self.websocket.clone()
+    }
+    fn download_transport(&self) -> Option<Arc<dyn DownloadTransport>> {
+        self.downloads.clone()
     }
     fn is_configured(&self) -> bool {
         self.api_key().is_some_and(|k| !k.is_empty()) && self.config.is_configured()
@@ -231,6 +262,8 @@ pub fn register_factories(
             transport: transport.clone(),
             default_protocol,
             protocol_override,
+            downloads: None,
+            websocket: None,
         }))
     })
 }

@@ -29,6 +29,7 @@ static PROFILE: ResponsesProfile = ResponsesProfile {
         keep_error_object: false,
         top_level_first: false,
         code_prefixes_error: false,
+        config_headers: &[],
     },
     metadata_key: "huggingface",
     params_key: None,

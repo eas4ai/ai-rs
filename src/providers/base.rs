@@ -540,6 +540,13 @@ pub trait Provider: Send + Sync + AsProvider {
         None
     }
 
+    /// The transport that fetches the media URLs a protocol must download
+    /// itself, when the provider has one. It honors the core DNS-pinning
+    /// contract of [`crate::models::files::DownloadTransport`].
+    fn download_transport(&self) -> Option<Arc<dyn crate::models::files::DownloadTransport>> {
+        None
+    }
+
     /// Upload a file through the provider's files operation.
     async fn upload_file(
         &self,

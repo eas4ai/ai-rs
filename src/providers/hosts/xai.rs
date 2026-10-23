@@ -33,6 +33,7 @@ static PROFILE: ResponsesProfile = ResponsesProfile {
         keep_error_object: false,
         top_level_first: false,
         code_prefixes_error: true,
+        config_headers: &[],
     },
     metadata_key: "xai",
     params_key: Some("xai"),

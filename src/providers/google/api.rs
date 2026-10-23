@@ -29,6 +29,7 @@ pub(crate) static GEMINI_API: ApiProfile = ApiProfile {
     keep_error_object: false,
     top_level_first: false,
     code_prefixes_error: false,
+    config_headers: &[],
 };
 
 pub(crate) static VERTEX_API: ApiProfile = ApiProfile {
@@ -40,6 +41,7 @@ pub(crate) static VERTEX_API: ApiProfile = ApiProfile {
     keep_error_object: false,
     top_level_first: false,
     code_prefixes_error: false,
+    config_headers: &[],
 };
 
 /// Which API a Gemini protocol talks to: the Gemini API or Vertex AI. The

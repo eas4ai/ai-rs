@@ -15,6 +15,7 @@ pub(crate) const API: http::ApiProfile = http::ApiProfile {
     keep_error_object: false,
     top_level_first: true,
     code_prefixes_error: false,
+    config_headers: &[],
 };
 
 /// An `error` event inside a Messages stream.
