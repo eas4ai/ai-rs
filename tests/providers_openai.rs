@@ -17,6 +17,8 @@ use suprnova_ai::{Model, Provider, ProviderConfig, StreamOptions};
 struct Scripted {
     requests: Mutex<Vec<HttpRequest>>,
     replies: Mutex<Vec<Result<HttpResponse, TransportError>>>,
+    /// The events of an SSE reply, sent when the request comes.
+    sse: Mutex<Option<Vec<Value>>>,
 }
 impl Scripted {
     fn response(status: u16, bytes: Vec<u8>) -> Arc<Self> {
@@ -27,31 +29,70 @@ impl Scripted {
             .collect();
         Arc::new(Self {
             requests: Mutex::new(vec![]),
-            replies: Mutex::new(vec![Ok(HttpResponse {
-                status,
-                headers: vec![("x-request-id".into(), "req-openai".into())],
-                body: stream::iter(chunks).boxed(),
-            })]),
+            replies: Mutex::new(vec![Ok(reply(status, chunks))]),
+            sse: Mutex::new(None),
         })
     }
+    /// An SSE reply of these events. A Responses reply without a terminal
+    /// event gets `response.completed`, as OpenAI ends every response.
     fn sse(items: Vec<Value>) -> Arc<Self> {
-        Self::response(
-            200,
-            items
-                .iter()
-                .map(|v| format!("data: {v}\n\n"))
-                .collect::<String>()
-                .into_bytes(),
-        )
+        Arc::new(Self {
+            requests: Mutex::new(vec![]),
+            replies: Mutex::new(vec![]),
+            sse: Mutex::new(Some(items)),
+        })
     }
     fn body(&self) -> Value {
         serde_json::from_slice(&self.requests.lock().unwrap()[0].body).unwrap()
     }
 }
+fn reply(status: u16, chunks: Vec<Result<Bytes, TransportError>>) -> HttpResponse {
+    HttpResponse {
+        status,
+        headers: vec![("x-request-id".into(), "req-openai".into())],
+        body: stream::iter(chunks).boxed(),
+    }
+}
 impl HttpTransport for Scripted {
     fn send(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
+        let responses = request
+            .url
+            .split('?')
+            .next()
+            .is_some_and(|path| path.ends_with("/responses"));
         self.requests.lock().unwrap().push(request);
-        let result = self.replies.lock().unwrap().remove(0);
+        let result = match self.sse.lock().unwrap().take() {
+            Some(mut items) => {
+                let terminal = items.iter().any(|item| {
+                    matches!(
+                        item["type"].as_str(),
+                        Some(
+                            "response.completed"
+                                | "response.incomplete"
+                                | "response.failed"
+                                | "response.done"
+                        )
+                    )
+                });
+                if responses && !terminal {
+                    items.push(
+                        json!({"type": "response.completed", "response": {"status": "completed"}}),
+                    );
+                }
+                let bytes = items
+                    .iter()
+                    .map(|v| format!("data: {v}\n\n"))
+                    .collect::<String>()
+                    .into_bytes();
+                // Deliberately split every UTF-8 and SSE boundary.
+                let chunks = bytes
+                    .chunks(3)
+                    .map(|b| Ok(Bytes::copy_from_slice(b)))
+                    .collect();
+                Ok(reply(200, chunks))
+            }
+            None => self.replies.lock().unwrap().remove(0),
+        };
         Box::pin(async move { result })
     }
 }
@@ -946,6 +987,7 @@ async fn malformed_sse_and_transport_errors() {
     let fake = Arc::new(Scripted {
         requests: Mutex::new(vec![]),
         replies: Mutex::new(vec![Err(TransportError::Timeout)]),
+        sse: Mutex::new(None),
     });
     let model = Model::new("gpt", provider(fake, false));
     let suprnova_ai::Error::Provider(e) = model
@@ -1222,6 +1264,7 @@ async fn stream_is_lazy_and_drop_cancels_body() {
             headers: vec![],
             body,
         })]),
+        sse: Mutex::new(None),
     });
     let m = Model::new("gpt", provider(fake.clone(), false));
     let mut events = m.provider.stream(&m, vec![], StreamOptions::default());
@@ -1360,6 +1403,7 @@ async fn an_unreadable_error_body_keeps_the_status_kind() {
                 ])
                 .boxed(),
             })]),
+            sse: Mutex::new(None),
         });
         let model = Model::new("gpt-5.4", provider(fake, false));
         let suprnova_ai::Error::Provider(e) = model.provider.probe(&model).await.unwrap_err()
