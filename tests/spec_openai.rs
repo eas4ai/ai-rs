@@ -1482,3 +1482,283 @@ async fn oai_007_chat_completions_files_go_as_typescript_sends_them() {
         assert!(transport.requests.lock().unwrap().is_empty());
     }
 }
+
+// OAI-008
+
+use suprnova_ai::types::messages::{
+    BuiltinToolCallPart, BuiltinToolReturnPart, HookPart, HookStatus,
+};
+
+fn md(value: Value) -> Option<suprnova_ai::types::messages::Metadata> {
+    Some([("openai".to_owned(), value)].into())
+}
+fn builtin_call(name: &str, item: &str, extra: Value) -> Part {
+    let mut metadata = json!({"item_id": item});
+    if let (Some(metadata), Some(extra)) = (metadata.as_object_mut(), extra.as_object()) {
+        metadata.extend(extra.clone());
+    }
+    Part::BuiltinToolCall(BuiltinToolCallPart {
+        id: format!("part_{item}"),
+        tool_call_id: item.into(),
+        tool_name: name.into(),
+        tool_args: "{}".into(),
+        provider_metadata: md(metadata),
+    })
+}
+fn builtin_return(name: &str, item: &str) -> Part {
+    Part::BuiltinToolReturn(BuiltinToolReturnPart {
+        id: format!("part_r_{item}"),
+        tool_call_id: item.into(),
+        tool_name: name.into(),
+        result: json!({"action": {"type": "search"}}),
+        is_error: false,
+        provider_metadata: md(json!({"item_id": item})),
+    })
+}
+/// A stored assistant turn: reasoning `rs_1`, text `msg_1`, a call `call_1`
+/// with the item id `fc_1`, a web search `ws_1` and its result.
+fn stored_turn() -> Vec<Message> {
+    let mut call = ToolCallPart::new("call_1", "weather", r#"{"city":"SF"}"#);
+    call.provider_metadata = md(json!({"item_id": "fc_1"}));
+    vec![
+        user("weather?"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                stored_reasoning("rs_1", "thinking", Some("enc")),
+                stored_text(),
+                builtin_call("web_search", "ws_1", json!({})),
+                builtin_return("web_search", "ws_1"),
+                Part::ToolCall(call),
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![Part::ToolResult(ToolResultPart::new(
+                "call_1",
+                "weather",
+                json!("sunny"),
+            ))],
+        ),
+    ]
+}
+/// Whether any input item has this id or references it.
+fn mentions(body: &Value, id: &str) -> bool {
+    items(body).iter().any(|item| item["id"] == id)
+}
+
+#[test]
+fn oai_008_a_conversation_leaves_out_the_items_it_holds() {
+    let body = body_for(
+        "gpt-5.4",
+        stored_turn(),
+        &openai(json!({"conversation": "conv_1"})),
+    );
+    for id in ["rs_1", "msg_1", "ws_1", "fc_1"] {
+        assert!(!mentions(&body, id), "{id}: {body}");
+    }
+    assert!(
+        !items(&body)
+            .iter()
+            .any(|item| item["type"] == "function_call"),
+        "{body}"
+    );
+    assert!(
+        items(&body)
+            .iter()
+            .any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1"),
+        "{body}"
+    );
+}
+
+#[test]
+fn oai_008_a_previous_response_leaves_out_its_reasoning() {
+    let body = body_for(
+        "gpt-5.4",
+        stored_turn(),
+        &openai(json!({"previousResponseId": "resp_0"})),
+    );
+    assert!(!mentions(&body, "rs_1"), "{body}");
+    assert!(
+        !items(&body).iter().any(|item| item["type"] == "reasoning"),
+        "{body}"
+    );
+}
+
+#[test]
+fn oai_008_a_stored_built_in_call_and_result_are_one_reference() {
+    let body = body_for("gpt-5.4", stored_turn(), &StreamOptions::default());
+    assert_eq!(references(&body, "ws_1"), 1, "{body}");
+    assert!(
+        !items(&body)
+            .iter()
+            .any(|item| item["type"] == "web_search_call"),
+        "{body}"
+    );
+}
+
+#[test]
+fn oai_008_compaction_is_a_reference_when_stored_and_an_item_when_not() {
+    let turn = || {
+        vec![
+            user("go on"),
+            Message::new(
+                MessageRole::Assistant,
+                vec![builtin_call(
+                    "compaction",
+                    "cmp_1",
+                    json!({"encrypted_content": "enc"}),
+                )],
+            ),
+            user("more"),
+        ]
+    };
+    let body = body_for("gpt-4.1", turn(), &StreamOptions::default());
+    assert_eq!(
+        items(&body)[1],
+        json!({"type": "item_reference", "id": "cmp_1"})
+    );
+    let body = body_for("gpt-4.1", turn(), &store(Some(false)));
+    assert_eq!(
+        items(&body)[1],
+        json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"})
+    );
+}
+
+/// An assistant turn with the MCP approval request `mcpr_1` and the
+/// application's answer to it.
+fn approval_turn(granted: bool) -> Vec<Message> {
+    let hook = HookPart {
+        id: "part_hook".into(),
+        hook_id: "mcpr_1".into(),
+        hook_type: "ToolApproval".into(),
+        status: HookStatus::Resolved,
+        metadata: [(
+            "openai".to_owned(),
+            json!({"approval_request_id": "mcpr_1"}),
+        )]
+        .into(),
+        resolution: Some(json!({"granted": granted})),
+        tool_call_id: Some("mcpr_1".into()),
+    };
+    vec![
+        user("delete it"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                builtin_call("mcp.delete", "mcpr_1", json!({})),
+                Part::Hook(hook),
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn oai_008_an_answered_mcp_approval_goes_back_as_a_response() {
+    let body = body_for("gpt-4.1", approval_turn(true), &StreamOptions::default());
+    assert_eq!(
+        items(&body)[1..],
+        [
+            json!({"type": "item_reference", "id": "mcpr_1"}),
+            json!({"type": "mcp_approval_response", "approval_request_id": "mcpr_1", "approve": true}),
+        ],
+        "{body}"
+    );
+    let body = body_for(
+        "gpt-4.1",
+        approval_turn(false),
+        &openai(json!({"previousResponseId": "resp_0"})),
+    );
+    let responses: Vec<_> = items(&body)
+        .iter()
+        .filter(|item| item["type"] == "mcp_approval_response")
+        .collect();
+    assert_eq!(
+        responses,
+        [
+            &json!({"type": "mcp_approval_response", "approval_request_id": "mcpr_1", "approve": false})
+        ]
+    );
+}
+
+#[test]
+fn oai_008_a_result_with_additional_tools_is_followed_by_them() {
+    let with_tools = |tools: Value| {
+        let mut messages = history(raw_call());
+        if let Part::ToolResult(result) = &mut messages[2].parts[0] {
+            result.provider_metadata = md(json!({"additionalTools": tools}));
+        }
+        messages
+    };
+    let tools = json!([{"type": "function", "name": "late", "parameters": {"type": "object"}}]);
+    let body = body_for(
+        "gpt-4.1",
+        with_tools(tools.clone()),
+        &StreamOptions::default(),
+    );
+    let output = items(&body)
+        .iter()
+        .position(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(
+        items(&body)[output + 1],
+        json!({"type": "additional_tools", "role": "developer", "tools": tools})
+    );
+    let error = build_request(
+        "gpt-4.1",
+        &config(),
+        with_tools(json!([{"type": "function", "name": ""}])),
+        &StreamOptions::default(),
+        true,
+    )
+    .expect_err("an invalid additionalTools entry");
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn oai_008_expanded_parallel_calls_go_back_as_their_wrapper() {
+    let call = |index: usize| {
+        let mut call = ToolCallPart::new(format!("c_{index}"), "weather", r#"{"city":"SF"}"#);
+        call.provider_metadata = md(json!({"parallel_tool_call": {
+            "item_id": "fc_p", "tool_call_id": "c", "tool_name": "parallel",
+            "input": "{\"tool_uses\":[]}", "index": index, "count": 2,
+        }}));
+        Part::ToolCall(call)
+    };
+    let result = |index: usize| {
+        Part::ToolResult(ToolResultPart::new(
+            format!("c_{index}"),
+            "weather",
+            json!(format!("r{index}")),
+        ))
+    };
+    let messages = vec![
+        user("weather twice"),
+        Message::new(MessageRole::Assistant, vec![call(0), call(1)]),
+        Message::new(MessageRole::Tool, vec![result(0), result(1)]),
+    ];
+    let body = body_for(
+        "gpt-4.1",
+        messages.clone(),
+        &openai(json!({"previousResponseId": "resp_0"})),
+    );
+    assert_eq!(
+        items(&body)[1..],
+        [
+            json!({"type": "function_call", "call_id": "c", "name": "parallel", "arguments": "{\"tool_uses\":[]}"}),
+            json!({"type": "function_call_output", "call_id": "c", "output": "r0\nr1"}),
+        ],
+        "{body}"
+    );
+    // Without a conversation or a previous response each call goes on its own.
+    let body = body_for("gpt-4.1", messages, &StreamOptions::default());
+    let calls: Vec<_> = items(&body)
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .map(|item| item["call_id"].clone())
+        .collect();
+    assert_eq!(calls, [json!("c_0"), json!("c_1")], "{body}");
+}
