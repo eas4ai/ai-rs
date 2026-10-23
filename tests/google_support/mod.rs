@@ -20,7 +20,10 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use bytes::Bytes;
@@ -42,6 +45,9 @@ pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// A body of this many bytes made as it is read, with the count of
+    /// bytes read so far, in place of `body`.
+    pub generated: Option<(usize, Arc<AtomicUsize>)>,
 }
 
 impl Reply {
@@ -50,6 +56,7 @@ impl Reply {
             status: 200,
             headers: vec![],
             body: value.to_string().into_bytes(),
+            generated: None,
         }
     }
     pub fn status(status: u16, value: Value) -> Self {
@@ -57,6 +64,7 @@ impl Reply {
             status,
             headers: vec![],
             body: value.to_string().into_bytes(),
+            generated: None,
         }
     }
     pub fn sse(chunks: &[Value]) -> Self {
@@ -68,6 +76,7 @@ impl Reply {
                 .map(|c| format!("data: {c}\r\n\r\n"))
                 .collect::<String>()
                 .into_bytes(),
+            generated: None,
         }
     }
     pub fn bytes(body: Vec<u8>) -> Self {
@@ -75,7 +84,20 @@ impl Reply {
             status: 200,
             headers: vec![],
             body,
+            generated: None,
         }
+    }
+    /// A body of `size` bytes of `a`, made as the crate reads it, and the
+    /// count of bytes it has read.
+    pub fn generated(size: usize) -> (Self, Arc<AtomicUsize>) {
+        let read = Arc::new(AtomicUsize::new(0));
+        let reply = Self {
+            status: 200,
+            headers: vec![],
+            body: vec![],
+            generated: Some((size, read.clone())),
+        };
+        (reply, read)
     }
     pub fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.into(), value.into()));
@@ -88,22 +110,21 @@ impl Reply {
 #[derive(Default)]
 pub struct Recorder {
     pub requests: Mutex<Vec<HttpRequest>>,
+    /// When each request arrived, on the Tokio clock.
+    times: Mutex<Vec<tokio::time::Instant>>,
     replies: Mutex<VecDeque<Reply>>,
     chunk: usize,
 }
 
 impl Recorder {
     pub fn new(replies: impl IntoIterator<Item = Reply>) -> Arc<Self> {
-        Arc::new(Self {
-            requests: Mutex::default(),
-            replies: Mutex::new(replies.into_iter().collect()),
-            chunk: 7,
-        })
+        Self::with_chunks(replies, 7)
     }
     /// Answer in chunks of this size, for large bodies.
     pub fn with_chunks(replies: impl IntoIterator<Item = Reply>, chunk: usize) -> Arc<Self> {
         Arc::new(Self {
             requests: Mutex::default(),
+            times: Mutex::default(),
             replies: Mutex::new(replies.into_iter().collect()),
             chunk,
         })
@@ -113,6 +134,10 @@ impl Recorder {
     }
     pub fn all(&self) -> Vec<HttpRequest> {
         self.requests.lock().unwrap().clone()
+    }
+    /// When each request arrived, on the Tokio clock.
+    pub fn times(&self) -> Vec<tokio::time::Instant> {
+        self.times.lock().unwrap().clone()
     }
     pub fn nth(&self, index: usize) -> HttpRequest {
         self.requests.lock().unwrap()[index].clone()
@@ -144,20 +169,38 @@ pub fn header(request: &HttpRequest, name: &str) -> Option<String> {
 impl HttpTransport for Recorder {
     fn send(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
         self.requests.lock().unwrap().push(request);
+        self.times.lock().unwrap().push(tokio::time::Instant::now());
         let reply = self.replies.lock().unwrap().pop_front();
-        let size = self.chunk;
+        let size = self.chunk.max(1);
         Box::pin(async move {
             let reply =
                 reply.ok_or_else(|| TransportError::Request("no scripted reply left".into()))?;
-            let chunks: Vec<_> = reply
-                .body
-                .chunks(size.max(1))
-                .map(|b| Ok(Bytes::copy_from_slice(b)))
-                .collect();
+            let body = match reply.generated {
+                Some((total, read)) => stream::unfold(0usize, move |sent| {
+                    let read = read.clone();
+                    async move {
+                        if sent >= total {
+                            return None;
+                        }
+                        let n = size.min(total - sent);
+                        read.fetch_add(n, Ordering::SeqCst);
+                        Some((Ok(Bytes::from(vec![b'a'; n])), sent + n))
+                    }
+                })
+                .boxed(),
+                None => {
+                    let chunks: Vec<_> = reply
+                        .body
+                        .chunks(size)
+                        .map(|b| Ok(Bytes::copy_from_slice(b)))
+                        .collect();
+                    stream::iter(chunks).boxed()
+                }
+            };
             Ok(HttpResponse {
                 status: reply.status,
                 headers: reply.headers,
-                body: stream::iter(chunks).boxed(),
+                body,
             })
         })
     }
