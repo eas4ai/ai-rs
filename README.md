@@ -5,7 +5,9 @@ Rust port of the inference core in AI SDK for Python 0.8.0.
 The crate provides messages, events, tool schemas, stream aggregation, provider
 contracts, streaming HTTP transport, the OpenAI-compatible and Anthropic provider
 adapters (`providers::openai`, `providers::anthropic`), hosted providers on those
-protocols (`providers::hosts`), the agent loop with tools,
+protocols (`providers::hosts`), Google's Gemini API and Vertex AI
+(`providers::google`, `providers::google_vertex`), the model operations beyond
+chat (`ops`), the agent loop with tools,
 approval hooks and middleware (`agents`), and the AI SDK UI message stream adapter
 (`ui::ai_sdk`). The provider registry starts empty; register the adapters you use.
 The Vercel AI Gateway, OIDC, telemetry and the MCP client are not ported.
@@ -111,6 +113,36 @@ xAI is ported for text: its built-in tools fail with
 `Error::UnsupportedOperation`, and its `store` setting is the provider
 parameter `xai` (`{"store": false}`).
 Hosts do not support `list_models` or `probe`.
+
+`providers::google` is the Gemini API and `providers::google_vertex` is Vertex
+AI, with every model kind of the TypeScript `@ai-sdk/google` and
+`@ai-sdk/google-vertex` 7.0.148 packages. Register them with
+`google::register` (handles `google` and `@ai-sdk/google`) and
+`google_vertex::register_provider` (`google-vertex` and
+`@ai-sdk/google-vertex`). The Gemini API key goes out as `x-goog-api-key`,
+also on Live API sockets, and never in a URL. Vertex AI takes its project and
+location from the `env` values `GOOGLE_VERTEX_PROJECT` and
+`GOOGLE_VERTEX_LOCATION`, and signs in with an Express Mode key
+(`GOOGLE_VERTEX_API_KEY`), an `AccessTokenSource`, or, with the `google-auth`
+feature, google-cloud-auth `Credentials` or a service account in
+`GOOGLE_CLIENT_EMAIL`, `GOOGLE_PRIVATE_KEY` and `GOOGLE_PRIVATE_KEY_ID`. A
+service account needs a process rustls crypto provider, such as
+`rustls::crypto::ring::default_provider().install_default()`; without one, a
+call fails with `Error::Configuration`. The Vertex auth headers go only to the
+base URL's host and `googleapis.com` hosts. `google_vertex::anthropic`,
+`google_vertex::maas` and `google_vertex::xai` add Claude, the open models and
+xAI on Vertex AI. `google::interactions::protocol()` and `agent_protocol()` run
+a model or an agent on the Interactions API; set one with
+`Model::with_protocol`.
+
+`ops` holds the operations beyond chat, with the names of the Python
+`ai.ops` module: `embed`, `generate_image`, `generate_video`, `generate_audio`,
+`transcribe`, `rerank` and `experimental::evaluate`, and the TypeScript core's
+`start_video` and `video_status`, `upload_file`, `batch`, `stream_transcription`,
+`stream_translation` and `realtime`. Each retries a retryable error twice by
+default, as model calls do. Live and realtime sessions need a WebSocket
+transport: implement `transport::WebSocketTransport`, or enable the
+`websocket` feature for `transport::TungsteniteTransport`.
 
 Enable the `testing` feature for `testing::ScriptedProvider`. It answers each call
 with the next scripted response and records each request, with no network.

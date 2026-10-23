@@ -17,7 +17,7 @@
 //!
 //! [`register`] installs the provider under `google-vertex` and
 //! `@ai-sdk/google-vertex`. It runs the Gemini protocol of
-//! [`google`](super::google) on Vertex AI: Gemini language models,
+//! [`google`] on Vertex AI: Gemini language models,
 //! embeddings, Gemini image generation, Veo video, Gemini and Chirp
 //! text-to-speech, Cloud Speech-to-Text and Gemini transcription, and the
 //! Interactions API. [`anthropic`], [`maas`] and [`xai`] install the partner

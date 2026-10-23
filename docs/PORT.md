@@ -29,6 +29,10 @@ source lacks follows the AI SDK for TypeScript 7.0.148 where `docs/spec/` says s
 | Upstream SDK HTTP clients | `transport` | Application-supplied HTTP transport and SSE framing |
 | None; TypeScript `@ai-sdk/cerebras`, `deepinfra`, `deepseek`, `fireworks`, `mistral`, `moonshotai`, `togetherai`, `zai`, `xai`, `huggingface`, `minimax` | `providers::hosts` | Hosted providers on the Chat Completions, Responses and Messages protocols |
 | `ai.ui.ai_sdk` | `ui::ai_sdk` | Inbound UI requests, persisted UI histories, approvals, identity metadata and outbound SSE |
+| `ai.ops`, and the TypeScript core's video, upload, batch, streaming and realtime functions | `ops` | Operation front ends: splitting, polling, retries and streams |
+| None; TypeScript `@ai-sdk/google` | `providers::google` | The Gemini API: generate content, every model kind, files, batches, the Live API and Interactions |
+| None; TypeScript `@ai-sdk/google-vertex` | `providers::google_vertex` | Vertex AI: Gemini, Chirp, Cloud Speech-to-Text, auth, and the Anthropic, MaaS and xAI partner models |
+| None | `transport::websocket`, `transport::TungsteniteTransport` | WebSocket contract for live and realtime sessions, and its tokio-tungstenite implementation |
 
 ## Wire format
 
@@ -121,7 +125,8 @@ to the later agent runtime. Rust `Drop` handles stream and resource cancellation
 
 ## Departures from Python
 
-These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.md`.
+These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
+`docs/spec/google.md`, `docs/spec/vertex.md` and `docs/spec/operations.md`.
 
 - Model ids must name their provider. Python routes an id without a colon to its
   gateway provider and folds `gateway`, `ai-gateway` and `vercel` into one
@@ -187,6 +192,37 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md` and `docs/spec/hosts.m
   metadata names `@ai-sdk/openai`, not when the id is `openai`, and gives
   metadata for a Chat Completions host of `providers::hosts`, by package or id,
   that host's rules.
+- `ops` adds Python's `ai.ops` front ends and the TypeScript core's video jobs,
+  uploads, batches, streaming transcription and translation, realtime sessions
+  and evaluation. Every operation that returns one result retries a retryable
+  error twice, as the TypeScript core does; a streaming operation retries only
+  before its first part and before it reads any audio.
+- `providers::google` and `providers::google_vertex` port the TypeScript
+  Google packages, which Python lacks, with every model kind. Settings those
+  packages drop with a warning fail with `Error::Validation`; operations return
+  the TypeScript warnings in `Item.warnings`. Grounding sources are in the final
+  message metadata under `google.sources`, and `Tool::with_strict` marks a
+  strict function tool.
+- No Google key goes in a URL: Live API sockets send it as `x-goog-api-key`, a
+  realtime server connection sends its token as `Authorization: Token`, and a
+  Veo download sends the key only to the base URL's origin. The Vertex auth
+  headers go only to the base URL's host and `googleapis.com` hosts.
+- Every Interactions request sends `Api-Revision: 2026-05-20` unless the
+  configured headers set one, as Google's Go SDK does. An agent or background
+  call that is dropped or times out cancels the interaction; TypeScript cancels
+  only on abort. A poll timeout is not retried, so a call never starts a second
+  interaction after the first ran for the whole timeout. A reasoning effort or
+  summary on Interactions fails: use the options `thinkingLevel` and
+  `thinkingSummaries`.
+- Generate content, image, speech, video and Interactions responses are read up
+  to 256 MiB per body and per stream event, as Google's Go SDK reads stream
+  lines; other responses keep the 8 MiB limit.
+- Vertex AI signs in with an access token source, or with the `google-auth`
+  feature, google-cloud-auth credentials or a service account from the `env`
+  map; the crate reads no credential file. Vertex Anthropic sends an output
+  schema as the forced `json` tool, takes only the Anthropic tool versions
+  Vertex AI lists, and parses a buffered `rawPredict` response with the stream
+  parser. MaaS downloads every file URL first.
 
 ## UI adapter
 
@@ -244,6 +280,9 @@ rules follow the source.
 | UI transport integration | `tests/ui_transport.rs`, `tests/ui_aggregator.rs` | Scripted `HttpTransport`, byte-split SSE, hydration, lazy conversion, error termination and typed reducer compatibility |
 | `docs/spec/models.md` (no Python source) | `tests/spec_models.rs` | MOD-001 to MOD-009: model ids, gateway removal, credential-free snapshots, retries, timeouts, drop cancellation, the scripted provider, the reqwest transport's time limits |
 | `docs/spec/agents.md` (no Python source) | `tests/spec_agents.rs` | AGT-001 to AGT-006: step checks, unknown tools, tool concurrency, run usage, stop reasons, interrupted history |
+| `docs/spec/google.md` (no Python source) | `tests/spec_google.rs` | GGL-001 to GGL-032: the Gemini API's language model, options, tools, history, responses, errors, embeddings, images, speech, transcription, live transcription and translation, Veo, files, batches, realtime, Interactions, evaluation and size limits |
+| `docs/spec/vertex.md` (no Python source) | `tests/spec_vertex.rs` | VTX-001 to VTX-015: Vertex AI endpoints, Express Mode, auth, the Gemini differences, streamed arguments, tool result downloads, embeddings, images, video, Chirp, Cloud Speech-to-Text, Gemini transcription, Interactions and the Anthropic, MaaS and xAI partner models |
+| `docs/spec/operations.md` (no Python source) | `tests/spec_operations.rs` | OPS-001 to OPS-011: front-end pass-through and retries, embedding runs, image and video batches, video jobs, uploads, batches, streaming transcription and translation, realtime connections, the WebSocket transport and the evaluation adapter |
 | `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-025: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort, the DeepSeek, Moonshot AI and Mistral dialects, tool calls without an index, stream error kinds, the xAI and Hugging Face Responses rules, Responses errors and terminal events |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
@@ -268,13 +307,13 @@ Rust streaming tests because they cannot be stored in JSON fixtures.
 Implemented after the core cut: `providers::openai` (Responses and Chat Completions
 protocols, built-in tools, streaming, errors), `providers::anthropic` (messages,
 tools, reasoning, streaming, errors), `providers::hosts` (hosted providers on those
-two protocols), `agents` (Agent, tools, hooks, aggregators,
-runtime, middleware, buffering) and `ui::ai_sdk`. Each keeps the core contracts and
+two protocols), `providers::google` and `providers::google_vertex` (every model kind of the
+TypeScript Google packages), `ops` (operation front ends), `agents` (Agent,
+tools, hooks, aggregators, runtime, middleware, buffering) and `ui::ai_sdk`. Each keeps the core contracts and
 the Python tests' semantics; see its module documentation and tests.
 
 Still absent, by decision: the Vercel AI Gateway protocol, routing and catalog, OIDC,
-telemetry spans, dedicated media and embedding operation front ends beyond the
-provider base contract, the MCP client, durable workflow integrations and
+telemetry spans, the MCP client, durable workflow integrations and
 environment-loading convenience factories.
 
 The absent modules have no placeholder implementations.
