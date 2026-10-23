@@ -307,7 +307,7 @@ pub(crate) async fn status(
             Default::default(),
         )?,
         Flavor::Vertex => endpoint.request(
-            "GET",
+            "POST",
             &["models".into(), format!("{model_id}:fetchPredictOperation")],
             Some(json!({"operationName": name})),
             Default::default(),

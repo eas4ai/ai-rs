@@ -452,7 +452,7 @@ pub(crate) fn build(
     let (system, contents) = messages::convert(history, target)?;
     let (wire_tools, mut tool_config) =
         tools::prepare(&tools_list, settings.tool_choice.as_ref(), model_id, flavor)?;
-    if streaming && flavor.is_vertex() && google.stream_function_call_arguments == Some(false) {
+    if streaming && flavor.is_vertex() && google.stream_function_call_arguments == Some(true) {
         let config = tool_config.get_or_insert_with(|| json!({}));
         let calling = config
             .as_object_mut()

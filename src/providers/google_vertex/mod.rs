@@ -111,6 +111,7 @@ pub(crate) fn is_dns_label(value: &str) -> bool {
 pub(crate) fn host(location: &str) -> String {
     match location {
         "global" => "aiplatform.googleapis.com".into(),
+        "eu" | "us" => format!("aiplatform.{location}.rep.googleapis.com"),
         other => format!("{other}-aiplatform.googleapis.com"),
     }
 }
@@ -268,7 +269,7 @@ impl VertexProvider {
             inner: self.transport.clone(),
             auth: self.auth.clone(),
             config: self.config.clone(),
-            auth_wins: true,
+            auth_wins: false,
             base_url,
         });
         self
@@ -294,7 +295,7 @@ pub fn provider(mut config: ProviderConfig, transport: Arc<dyn HttpTransport>) -
             inner: transport.clone(),
             auth: auth.clone(),
             config: config.clone(),
-            auth_wins: true,
+            auth_wins: false,
             base_url,
         }),
         config,

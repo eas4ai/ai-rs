@@ -56,7 +56,7 @@ use crate::{
 };
 
 /// The Anthropic API version Vertex AI takes.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 const LABELS_HEADER: &str = "x-vertex-ai-labels";
 
 /// The Anthropic tool types Vertex AI takes (`googleVertexAnthropicTools`).

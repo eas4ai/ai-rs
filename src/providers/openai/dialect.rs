@@ -168,12 +168,14 @@ pub(super) fn request(
             // Llama 4 on Vertex AI needs an output limit
             // (`google-vertex-maas-provider.ts`).
             if VERTEX_MAAS_LIMITS.contains(&model) && !body.contains_key(profile.max_tokens_field) {
-                body.insert(profile.max_tokens_field.into(), json!(4096));
+                body.insert(profile.max_tokens_field.into(), json!(8192));
             }
         }
         // xAI on Vertex AI takes no reasoning effort
         // (`google-vertex-xai-provider.ts`).
-        Dialect::VertexXai => {}
+        Dialect::VertexXai => {
+            body.remove("reasoning_effort");
+        }
         Dialect::DeepSeek => match effort(p) {
             Some(Effort::Disabled) => {
                 body.remove("reasoning_effort");

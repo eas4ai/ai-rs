@@ -290,7 +290,7 @@ pub(crate) async fn transcribe_vertex_gemini(
         parts.iter().filter_map(text).collect()
     };
     let plain = joined(&|part| part.get("text").and_then(Value::as_str));
-    let text = if true {
+    let text = if plain.is_empty() {
         joined(&|part| {
             part.pointer("/audioTranscription/text")
                 .and_then(Value::as_str)
@@ -383,7 +383,7 @@ pub(crate) async fn transcribe_cloud(
     let body = json!({
         "config": {
             "model": model_id,
-            "languageCodes": options.language_codes.clone().unwrap_or_else(|| vec!["en-US".into()]),
+            "languageCodes": options.language_codes.clone().unwrap_or_else(|| vec!["auto".into()]),
             "autoDecodingConfig": {},
             "features": {
                 "enableWordTimeOffsets": options.enable_word_time_offsets.unwrap_or(true),

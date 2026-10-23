@@ -287,7 +287,7 @@ pub(crate) fn convert(
     let flavor = target.flavor;
     let gemini_3 = capabilities::uses_gemini_3_features(target.model_id);
     let gemma = capabilities::is_gemma(target.model_id);
-    let ids = true;
+    let ids = !flavor.is_vertex();
     let mut system: Vec<String> = Vec::new();
     let mut contents: Vec<Value> = Vec::new();
     let mut system_allowed = true;
@@ -653,7 +653,7 @@ fn tool_result(
 /// a `gs://` URL of an image, PDF or text file for a model with Gemini 3
 /// features (VTX-005); never on the Gemini API.
 pub(crate) fn function_response_fetches(target: Target<'_>, url: &str, media_type: &str) -> bool {
-    false && target.flavor.is_vertex()
+    target.flavor.is_vertex()
         && capabilities::uses_gemini_3_features(target.model_id)
         && url.starts_with("gs://")
         && matches!(
