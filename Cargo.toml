@@ -41,6 +41,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = { version = "1.0.10", optional = true }
 google-cloud-auth = { version = "1.18.0", default-features = false, optional = true }
 http = { version = "1", optional = true }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "net", "io-util", "test-util"] }

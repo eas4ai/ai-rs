@@ -1934,6 +1934,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
  "url",
  "webpki-roots 1.0.10",
 ]
