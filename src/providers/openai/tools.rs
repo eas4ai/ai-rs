@@ -1,11 +1,19 @@
-//! Provider-executed tool factories. Arguments use the Python wire snake_case keys.
-use super::{dialect, params::invalid, protocol::Wire};
+//! OpenAI's tool factories, and the tools of a call as OpenAI's APIs take
+//! them. Arguments use the Python wire snake_case keys.
+use super::{
+    capabilities::{Capabilities, dropped},
+    dialect,
+    params::invalid,
+    profile::ResponsesDialect,
+    protocol::Wire,
+};
 use crate::{
     Error,
     types::tools::{Tool, ToolConfig, ToolKind},
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 
 fn make(name: &str, args: Value) -> Result<Tool, Error> {
     let mut args = args
@@ -90,19 +98,27 @@ pub fn custom(name: impl Into<String>, args: Value) -> Result<Tool, Error> {
     )
     .map_err(|e| invalid(e.to_string()))
 }
+pub fn apply_patch() -> Tool {
+    Tool {
+        name: "apply_patch".into(),
+        tool_config: Some(ToolConfig {
+            id: Some("openai.apply_patch".into()),
+            args: Map::new(),
+        }),
+        ..local_shell()
+    }
+}
 /// The arguments of a custom tool (`customArgsSchema`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct CustomArgs {
     description: Option<String>,
     #[serde(rename = "async")]
     is_async: Option<bool>,
     format: Option<CustomFormat>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-#[allow(dead_code)]
 enum CustomFormat {
     Grammar {
         syntax: GrammarSyntax,
@@ -110,7 +126,7 @@ enum CustomFormat {
     },
     Text,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 enum GrammarSyntax {
     Regex,
@@ -122,19 +138,163 @@ impl CustomArgs {
             .map_err(|e| invalid(format!("invalid OpenAI custom tool arguments: {e}")))
     }
 }
-pub fn apply_patch() -> Tool {
-    Tool {
-        name: "apply_patch".into(),
-        tool_config: Some(ToolConfig {
-            id: Some("openai.apply_patch".into()),
-            args: Map::new(),
-        }),
-        ..local_shell()
+
+/// The OpenAI options a function tool's `tool_config` arguments hold, under
+/// their wire names (`OpenAIToolOptions` of `openai-responses-prepare-tools.ts`).
+/// Other arguments, such as another provider's, are left alone.
+#[derive(Default, Deserialize)]
+struct FunctionOptions {
+    namespace: Option<Namespace>,
+    defer_loading: Option<bool>,
+    #[serde(rename = "async")]
+    is_async: Option<bool>,
+    output_schema: Option<Map<String, Value>>,
+    allowed_callers: Option<Vec<Value>>,
+    omit_from_request_tools: Option<bool>,
+}
+#[derive(Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Namespace {
+    name: String,
+    description: Option<String>,
+}
+impl FunctionOptions {
+    fn of(tool: &Tool) -> Result<Self, Error> {
+        let Some(config) = &tool.tool_config else {
+            return Ok(Self::default());
+        };
+        serde_json::from_value(Value::Object(config.args.clone())).map_err(|e| {
+            invalid(format!(
+                "invalid OpenAI options of function tool {:?}: {e}",
+                tool.name
+            ))
+        })
+    }
+    fn omitted(&self) -> bool {
+        self.omit_from_request_tools == Some(true)
     }
 }
-pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
-    let responses = matches!(wire, Wire::Responses(_));
+
+/// The names of the function tools whose text results go JSON-quoted,
+/// because they declare an `output_schema` (OAI-009).
+pub(super) fn output_schema_tools(tools: &[Tool]) -> Result<Vec<String>, Error> {
+    let mut names = vec![];
+    for tool in tools.iter().filter(|t| t.kind == ToolKind::Function) {
+        if FunctionOptions::of(tool)?.output_schema.is_some() {
+            names.push(tool.name.clone());
+        }
+    }
+    Ok(names)
+}
+
+/// `async` goes out on GPT-6 and later; elsewhere a true value is left out
+/// and logged (`resolveAsyncToolOption`).
+fn async_flag(value: Option<bool>, tool: &str, model: &str) -> Option<bool> {
+    if value == Some(true) && !Capabilities::of(model).gpt6 {
+        dropped(
+            "async",
+            model,
+            &format!("async tool calling for {tool:?} is only supported by GPT-6 and later models"),
+        );
+        return None;
+    }
+    value
+}
+
+/// The OpenAI name of a provider tool: its id without `openai.`.
+fn provider_name(tool: &Tool) -> Result<&str, Error> {
+    let id = tool
+        .tool_config
+        .as_ref()
+        .and_then(|config| config.id.as_deref())
+        .ok_or_else(|| invalid("provider tool has no config"))?;
+    id.strip_prefix("openai.")
+        .ok_or_else(|| invalid("provider tool is not an OpenAI tool"))
+}
+
+/// A provider tool as OpenAI's Responses API takes it.
+fn provider_item(tool: &Tool, model: &str) -> Result<Value, Error> {
+    let name = provider_name(tool)?;
+    let args = &tool
+        .tool_config
+        .as_ref()
+        .expect("provider_name checked it")
+        .args;
+    match name {
+        "local_shell" | "apply_patch" | "computer" | "programmatic_tool_calling" => {
+            return Ok(json!({"type": name}));
+        }
+        "custom" => {
+            let custom = CustomArgs::parse(args)?;
+            let mut item = json!({"type": "custom", "name": tool.name});
+            if let Some(description) = custom.description {
+                item["description"] = json!(description);
+            }
+            if let Some(flag) = async_flag(custom.is_async, &tool.name, model) {
+                item["async"] = json!(flag);
+            }
+            if let Some(format) = custom.format {
+                item["format"] = serde_json::to_value(format)?;
+            }
+            return Ok(item);
+        }
+        "web_search" | "web_search_preview" | "file_search" | "code_interpreter"
+        | "image_generation" | "shell" | "mcp" | "tool_search" => {}
+        _ => {
+            return Err(Error::UnsupportedOperation(format!(
+                "unsupported OpenAI provider tool openai.{name}"
+            )));
+        }
+    }
+    let mut args = args.clone();
+    if name == "file_search"
+        && let Some(ranking) = args.remove("ranking").filter(|v| !v.is_null())
+    {
+        args.insert("ranking_options".into(), ranking);
+    }
+    if name == "code_interpreter" {
+        args.entry("container")
+            .or_insert_with(|| json!({"type":"auto"}));
+    }
+    // Python uses {"type": name, **args}, so an explicit type in args wins.
+    args.entry("type").or_insert_with(|| json!(name));
+    Ok(args.into())
+}
+
+/// A function tool as OpenAI's own Responses API takes it, and the
+/// namespace it goes in (`prepareFunctionTool`).
+fn responses_function(tool: &Tool, options: &FunctionOptions, model: &str) -> Result<Value, Error> {
+    let spec = tool
+        .spec
+        .as_ref()
+        .ok_or_else(|| invalid("function tool has no spec"))?;
+    let mut item = json!({
+        "type": "function",
+        "name": tool.name,
+        "description": spec.description.as_deref().unwrap_or(""),
+        "parameters": serde_json::to_value(&spec.params)?,
+        "strict": tool.is_strict(),
+    });
+    if let Some(flag) = async_flag(options.is_async, &tool.name, model) {
+        item["async"] = json!(flag);
+    }
+    if let Some(defer) = options.defer_loading {
+        item["defer_loading"] = json!(defer);
+    }
+    if let Some(callers) = &options.allowed_callers {
+        item["allowed_callers"] = json!(callers);
+    }
+    if let Some(schema) = &options.output_schema {
+        item["output_schema"] = Value::Object(schema.clone());
+    }
+    Ok(item)
+}
+
+pub(super) fn convert(tools: &[Tool], wire: Wire, model: &str) -> Result<Vec<Value>, Error> {
+    let openai = wire.responses_dialect() == Some(ResponsesDialect::OpenAI);
     let mut result = vec![];
+    // The index in `result` of each namespace group, with its description.
+    let mut namespaces: BTreeMap<String, (usize, Option<String>)> = BTreeMap::new();
     for tool in tools {
         tool.validate_shape().map_err(|e| invalid(e.to_string()))?;
         if tool.kind == ToolKind::Function {
@@ -142,80 +302,112 @@ pub(super) fn convert(tools: &[Tool], wire: Wire) -> Result<Vec<Value>, Error> {
                 .spec
                 .as_ref()
                 .ok_or_else(|| invalid("function tool has no spec"))?;
-            let parameters = match wire {
-                Wire::Chat(profile) => {
-                    dialect::tool_parameters(profile, serde_json::to_value(&spec.params)?)?
+            match wire {
+                Wire::Responses(_) if openai => {
+                    let options = FunctionOptions::of(tool)?;
+                    if options.omitted() {
+                        continue;
+                    }
+                    let item = responses_function(tool, &options, model)?;
+                    let Some(namespace) = &options.namespace else {
+                        result.push(item);
+                        continue;
+                    };
+                    match namespaces.get(&namespace.name) {
+                        Some((_, description)) if *description != namespace.description => {
+                            return Err(invalid(format!(
+                                "conflicting descriptions for OpenAI tool namespace {:?}",
+                                namespace.name
+                            )));
+                        }
+                        Some((index, _)) => {
+                            if let Some(group) = result[*index]["tools"].as_array_mut() {
+                                group.push(item);
+                            }
+                        }
+                        None => {
+                            namespaces.insert(
+                                namespace.name.clone(),
+                                (result.len(), namespace.description.clone()),
+                            );
+                            let mut group = json!({"type": "namespace", "name": namespace.name, "tools": [item]});
+                            if let Some(description) = &namespace.description {
+                                group["description"] = json!(description);
+                            }
+                            result.push(group);
+                        }
+                    }
                 }
-                Wire::Responses(_) => serde_json::to_value(&spec.params)?,
-            };
-            let function = json!({"name":tool.name,"description":spec.description.as_deref().unwrap_or(""),"parameters":parameters});
-            if responses {
-                let mut function = function;
-                function["type"] = json!("function");
-                result.push(function);
-            } else {
-                result.push(json!({"type":"function","function":function}));
+                Wire::Responses(_) => result.push(json!({
+                    "type": "function",
+                    "name": tool.name,
+                    "description": spec.description.as_deref().unwrap_or(""),
+                    "parameters": serde_json::to_value(&spec.params)?,
+                })),
+                Wire::Chat(profile) => {
+                    let parameters =
+                        dialect::tool_parameters(profile, serde_json::to_value(&spec.params)?)?;
+                    let mut function = json!({"name":tool.name,"description":spec.description.as_deref().unwrap_or(""),"parameters":parameters});
+                    if profile.openai_own && tool.is_strict() {
+                        function["strict"] = json!(true);
+                    }
+                    result.push(json!({"type":"function","function":function}));
+                }
             }
             continue;
         }
-        if !responses {
-            return Err(Error::UnsupportedOperation(
-                "OpenAI built-in tools require the Responses API".into(),
-            ));
+        match wire {
+            Wire::Chat(_) => {
+                return Err(Error::UnsupportedOperation(
+                    "OpenAI built-in tools require the Responses API".into(),
+                ));
+            }
+            Wire::Responses(profile) if !openai => {
+                return Err(Error::UnsupportedOperation(format!(
+                    "{} does not support provider tools",
+                    profile.api.label
+                )));
+            }
+            Wire::Responses(_) => result.push(provider_item(tool, model)?),
         }
-        if let Wire::Responses(profile) = wire
-            && profile.dialect != super::profile::ResponsesDialect::OpenAI
-        {
-            return Err(Error::UnsupportedOperation(format!(
-                "{} does not support provider tools",
-                profile.api.label
-            )));
-        }
-        let config = tool
-            .tool_config
-            .as_ref()
-            .ok_or_else(|| invalid("provider tool has no config"))?;
-        let id = config.id.as_deref().unwrap_or("");
-        let name = id
-            .strip_prefix("openai.")
-            .ok_or_else(|| invalid("provider tool is not an OpenAI tool"))?;
-        if ![
-            "web_search",
-            "web_search_preview",
-            "file_search",
-            "code_interpreter",
-            "image_generation",
-            "local_shell",
-            "shell",
-            "apply_patch",
-            "mcp",
-            "tool_search",
-        ]
-        .contains(&name)
-        {
-            return Err(Error::UnsupportedOperation(format!(
-                "unsupported OpenAI provider tool {id}"
-            )));
-        }
-        let mut args = if matches!(name, "local_shell" | "apply_patch") {
-            Map::new()
-        } else {
-            config.args.clone()
-        };
-        if name == "file_search"
-            && let Some(ranking) = args.remove("ranking").filter(|v| !v.is_null())
-        {
-            args.insert("ranking_options".into(), ranking);
-        }
-        if name == "code_interpreter" {
-            args.entry("container")
-                .or_insert_with(|| json!({"type":"auto"}));
-        }
-        // Python uses {"type": name, **args}, so an explicit type in args wins.
-        args.entry("type").or_insert_with(|| json!(name));
-        result.push(args.into());
     }
     Ok(result)
+}
+
+/// A named tool choice on OpenAI's own Responses API: `{"type": <tool>}` for
+/// the OpenAI tools that take it, `{"type": "custom", "name"}` for a custom
+/// tool and `{"type": "function", "name"}` otherwise. A tool left out of the
+/// request cannot be forced.
+pub(super) fn named_choice(name: &str, tools: &[Tool]) -> Result<Value, Error> {
+    let tool = tools.iter().find(|tool| tool.name == name);
+    if let Some(tool) = tool
+        && tool.kind == ToolKind::Function
+        && FunctionOptions::of(tool)?.omitted()
+    {
+        return Err(invalid(format!(
+            "cannot force tool {name:?}, which is omitted from the request tools; use automatic tool choice for history-loaded tools"
+        )));
+    }
+    let provider = match tool {
+        Some(tool) if tool.kind == ToolKind::Provider => Some(provider_name(tool)?),
+        _ => None,
+    };
+    Ok(match provider {
+        Some(
+            kind @ ("code_interpreter"
+            | "file_search"
+            | "image_generation"
+            | "web_search_preview"
+            | "web_search"
+            | "mcp"
+            | "apply_patch"
+            | "computer"
+            | "programmatic_tool_calling"),
+        ) => json!({"type": kind}),
+        Some("custom") => json!({"type": "custom", "name": name}),
+        Some(kind) => json!({"type": "function", "name": kind}),
+        None => json!({"type": "function", "name": name}),
+    })
 }
 
 /// How a tool of the call can appear in `tool_choice.allowed_tools`.
@@ -225,12 +417,38 @@ enum Allowed {
     Unsupported(String),
 }
 
-/// A sent tool's entry in `allowed_tools` (`toAllowedToolResolution`).
-fn allowed_entry(sent: &Value) -> Allowed {
-    let kind = sent["type"].as_str().unwrap_or_default();
-    match kind {
-        "function" | "custom" => Allowed::Entry(json!({"type": kind, "name": sent["name"]})),
-        "mcp" => Allowed::Entry(json!({"type": "mcp", "server_label": sent["server_label"]})),
+/// A tool's entry in `allowed_tools`, and its OpenAI name when that differs
+/// from its own (`toAllowedToolResolution`).
+fn allowed_entry(tool: &Tool) -> Result<(Allowed, Option<String>), Error> {
+    if tool.kind == ToolKind::Function {
+        let options = FunctionOptions::of(tool)?;
+        let unsupported = |reason: &str| Ok((Allowed::Unsupported(reason.into()), None));
+        if options.omitted() {
+            return unsupported(
+                "tools omitted from the request tools array cannot be allow-listed",
+            );
+        }
+        if options.namespace.is_some() {
+            return unsupported(
+                "tools inside an OpenAI tool namespace are not visible to tool_choice.allowed_tools",
+            );
+        }
+        if options.defer_loading == Some(true) {
+            return unsupported("deferred tools are not visible to tool_choice.allowed_tools");
+        }
+        return Ok((
+            Allowed::Entry(json!({"type": "function", "name": tool.name})),
+            None,
+        ));
+    }
+    let kind = provider_name(tool)?;
+    let alias = (kind != tool.name && kind != "custom").then(|| kind.to_owned());
+    let entry = match kind {
+        "custom" => Allowed::Entry(json!({"type": "custom", "name": tool.name})),
+        "mcp" => Allowed::Entry(json!({
+            "type": "mcp",
+            "server_label": tool.tool_config.as_ref().and_then(|c| c.args.get("server_label")),
+        })),
         "file_search"
         | "web_search"
         | "web_search_preview"
@@ -244,7 +462,8 @@ fn allowed_entry(sent: &Value) -> Allowed {
         _ => Allowed::Unsupported(format!(
             "OpenAI does not support {kind} tools in tool_choice.allowed_tools"
         )),
-    }
+    };
+    Ok((entry, alias))
 }
 
 /// The tool choice of the option `allowedTools`: each named tool of the call
@@ -255,23 +474,21 @@ fn allowed_entry(sent: &Value) -> Allowed {
 pub(super) fn allowed_tools(
     allowed: &super::options::AllowedTools,
     tools: &[Tool],
-    sent: &[Value],
     model: &str,
 ) -> Result<Value, Error> {
     // By tool name, and by the OpenAI name of a provider tool named otherwise;
     // `None` marks an OpenAI name that several different tools share.
-    let mut by_name = std::collections::BTreeMap::new();
-    let mut aliases: std::collections::BTreeMap<String, Option<Allowed>> = Default::default();
-    for (tool, sent) in tools.iter().zip(sent) {
-        let resolution = allowed_entry(sent);
+    let mut by_name = BTreeMap::new();
+    let mut aliases: BTreeMap<String, Option<Allowed>> = BTreeMap::new();
+    for tool in tools {
+        let (resolution, alias) = allowed_entry(tool)?;
         by_name.insert(tool.name.clone(), resolution.clone());
-        let canonical = sent["type"].as_str().unwrap_or_default();
-        if tool.kind == ToolKind::Provider && canonical != tool.name {
+        if let Some(alias) = alias {
             aliases
-                .entry(canonical.to_owned())
-                .and_modify(|alias| {
-                    if alias.as_ref() != Some(&resolution) {
-                        *alias = None;
+                .entry(alias)
+                .and_modify(|known| {
+                    if known.as_ref() != Some(&resolution) {
+                        *known = None;
                     }
                 })
                 .or_insert(Some(resolution));
@@ -285,7 +502,7 @@ pub(super) fn allowed_tools(
             (Some(direct), _) => direct.clone(),
             (None, Some(Some(alias))) => alias.clone(),
             (None, Some(None)) => {
-                super::capabilities::dropped(
+                dropped(
                     &setting,
                     model,
                     "several tools of the call share this OpenAI tool name",
@@ -298,7 +515,7 @@ pub(super) fn allowed_tools(
         match resolution {
             Allowed::Entry(entry) => entries.push(entry),
             Allowed::Unsupported(reason) => {
-                super::capabilities::dropped(&setting, model, &reason);
+                dropped(&setting, model, &reason);
                 left_out.push(name.as_str());
             }
         }
