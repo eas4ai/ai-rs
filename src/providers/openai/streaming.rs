@@ -1,3 +1,4 @@
+use super::tools::HostTools;
 use super::{
     dialect,
     profile::{ChatProfile, Dialect, ReasoningTokens, ResponsesDialect, ResponsesProfile},
@@ -82,6 +83,8 @@ struct Call {
     args: String,
     started: bool,
     delta: bool,
+    /// The input goes out whole when the item is done, not as deltas.
+    whole: bool,
 }
 struct Parser {
     input: futures::stream::BoxStream<'static, Result<SseJson, crate::Error>>,
@@ -134,6 +137,10 @@ struct Parser {
     response_model: Option<String>,
     metadata: Option<Metadata>,
     image_type: String,
+    /// The provider tools the application runs (OAI-010).
+    host: HostTools,
+    /// A call the application runs arrived in this response.
+    host_call: bool,
 }
 /// `hold_reasoning` keeps each reasoning block open until its item ends, so
 /// that every block carries the item's final encrypted content; an unstored
@@ -145,6 +152,7 @@ pub(super) fn parse(
     image_type: String,
     json_output: bool,
     hold_reasoning: bool,
+    host: HostTools,
 ) -> EventStream {
     let api = wire.api();
     let state = Parser {
@@ -190,6 +198,8 @@ pub(super) fn parse(
         response_model: None,
         metadata: None,
         image_type,
+        host,
+        host_call: false,
     };
     stream::try_unfold(state, |mut p| async move {
         loop {
@@ -573,6 +583,10 @@ impl Parser {
                     self.response_model = r["model"].as_str().map(str::to_owned);
                     self.finish = match kind {
                         "response.incomplete" => Some(incomplete_reason(r)),
+                        // A call the application runs ends the turn for it.
+                        _ if self.host_call && finish_reason(r) == Some("stop") => {
+                            Some("tool_call")
+                        }
                         _ => finish_reason(r),
                     }
                     .map(str::to_owned);
@@ -606,7 +620,9 @@ impl Parser {
             | "response.function_call_arguments.done"
             | "response.custom_tool_call_input.done" => {
                 let key = lookup(&self.calls, &self.indices, data);
-                if let Some(state) = self.calls.get_mut(&key) {
+                if let Some(state) = self.calls.get_mut(&key)
+                    && !state.whole
+                {
                     let done = kind.ends_with(".done");
                     let text = if done {
                         arguments(data)
@@ -736,7 +752,29 @@ impl Parser {
                 self.reasoning.insert(id.clone());
                 self.queue.push_back(block("reasoning_start", &id, md));
             }
-            "function_call" | "custom_tool_call" => {
+            _ if self.runs_on_host(item) => {
+                let id = nonempty(string(item, "call_id"), &key, "").to_owned();
+                let (name, _) = self.host_call_input(item);
+                self.queue.push_back(Event::ToolStart(ToolStart {
+                    event: meta(md),
+                    tool_call_id: id.clone(),
+                    tool_name: name.clone(),
+                }));
+                if let Some(index) = index(data) {
+                    self.indices.insert(index, key.clone());
+                }
+                self.calls.insert(
+                    key,
+                    Call {
+                        id,
+                        name,
+                        started: true,
+                        whole: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            "function_call" => {
                 let id = nonempty(string(item, "call_id"), &key, "").to_owned();
                 let name = string(item, "name").to_owned();
                 let args = arguments(item).to_owned();
@@ -763,6 +801,7 @@ impl Parser {
                         delta: !args.is_empty(),
                         args,
                         started: true,
+                        whole: false,
                     },
                 );
             }
@@ -805,7 +844,33 @@ impl Parser {
                 }
             }
             "reasoning" => self.reasoning_done(item, &key),
-            "function_call" | "custom_tool_call" => {
+            _ if self.runs_on_host(item) => {
+                let state = remove_state(&mut self.calls, &mut self.indices, &key, data);
+                let id = state
+                    .as_ref()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| nonempty(string(item, "call_id"), &key, "").into());
+                let (name, input) = self.host_call_input(item);
+                if state.is_none() {
+                    self.queue.push_back(Event::ToolStart(ToolStart {
+                        event: meta(md.clone()),
+                        tool_call_id: id.clone(),
+                        tool_name: name,
+                    }));
+                }
+                self.queue.push_back(Event::ToolDelta(ToolDelta {
+                    event: Default::default(),
+                    tool_call_id: id.clone(),
+                    chunk: input,
+                }));
+                self.queue.push_back(Event::ToolEnd(ToolEnd {
+                    event: meta(md),
+                    tool_call_id: id,
+                    tool_call: ToolCallPart::new("", "", ""),
+                }));
+                self.host_call = true;
+            }
+            "function_call" => {
                 let state = remove_state(&mut self.calls, &mut self.indices, &key, data);
                 let id = state
                     .as_ref()
@@ -895,6 +960,65 @@ impl Parser {
                 }
             }
             _ => {}
+        }
+    }
+    /// Whether the application runs this item's call (OAI-010).
+    fn runs_on_host(&self, item: &Value) -> bool {
+        match string(item, "type") {
+            "local_shell_call" | "apply_patch_call" | "custom_tool_call" => true,
+            "shell_call" => self.host.shell_on_host(),
+            "computer_call" => !string(item, "call_id").is_empty(),
+            _ => false,
+        }
+    }
+    /// The tool name and input of a call the application runs, as
+    /// `responses/openai-responses-language-model.ts` gives them, with the
+    /// wire's snake_case keys.
+    fn host_call_input(&self, item: &Value) -> (String, String) {
+        let present = |keys: &[&str], from: &Value| -> Value {
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                if let Some(value) = from.get(*key).filter(|v| !v.is_null()) {
+                    out.insert((*key).into(), value.clone());
+                }
+            }
+            out.into()
+        };
+        match string(item, "type") {
+            "local_shell_call" => (
+                self.host.name("local_shell"),
+                json!({"action": item["action"]}).to_string(),
+            ),
+            "shell_call" => (
+                self.host.name("shell"),
+                json!({"action": present(&["commands", "timeout_ms", "max_output_length"], &item["action"])})
+                    .to_string(),
+            ),
+            "apply_patch_call" => (
+                self.host.name("apply_patch"),
+                json!({"call_id": item["call_id"], "operation": item["operation"]}).to_string(),
+            ),
+            "computer_call" => {
+                let actions = match (&item["actions"], &item["action"]) {
+                    (Value::Array(actions), _) => json!(actions),
+                    (_, action) if action.is_object() => json!([action]),
+                    _ => json!([]),
+                };
+                let checks = match &item["pending_safety_checks"] {
+                    Value::Array(checks) => json!(checks),
+                    _ => json!([]),
+                };
+                (
+                    self.host.name("computer"),
+                    json!({"actions": actions, "pending_safety_checks": checks, "status": item["status"]})
+                        .to_string(),
+                )
+            }
+            // A custom tool's input is free text, sent as a JSON string.
+            _ => (
+                string(item, "name").to_owned(),
+                Value::String(string(item, "input").to_owned()).to_string(),
+            ),
         }
     }
     fn reasoning_done(&mut self, item: &Value, key: &str) {

@@ -576,6 +576,23 @@ fn openai_assistant(
         if history.conversation && id.is_some() {
             continue;
         }
+        if let Part::ToolCall(c) = p
+            && let Some(kind) = history.host_tools.kind(&c.tool_name)
+        {
+            // A previous response already holds the calls it made.
+            if history.previous_response && references && id.is_some() {
+                continue;
+            }
+            match id {
+                Some(id) if references => {
+                    if sent.insert(id.to_owned()) {
+                        out.push(json!({"type": "item_reference", "id": id}));
+                    }
+                }
+                _ => out.push(host_call(kind, c, id)),
+            }
+            continue;
+        }
         if let Part::ToolCall(c) = p {
             match parallel.call(c) {
                 Some(Some(wrapper)) if !history.conversation => out.push(wrapper),
@@ -693,6 +710,107 @@ fn openai_assistant(
             }
         }
     }
+}
+
+/// A call the application runs, as its own Responses item (OAI-010). Its
+/// input is the reader's: `{"action"}` for shells, `{"call_id",
+/// "operation"}` for `apply_patch`, `{"actions", "pending_safety_checks",
+/// "status"}` for `computer`, and a JSON string for a custom tool.
+fn host_call(kind: &str, call: &ToolCallPart, id: Option<&str>) -> Value {
+    let input: Value = serde_json::from_str(&call.tool_args).unwrap_or(Value::Null);
+    let mut item = match kind {
+        "local_shell" => {
+            json!({"type": "local_shell_call", "call_id": call.tool_call_id, "action": input["action"]})
+        }
+        "shell" => {
+            json!({"type": "shell_call", "call_id": call.tool_call_id, "status": "completed", "action": input["action"]})
+        }
+        "apply_patch" => json!({
+            "type": "apply_patch_call",
+            "call_id": input.get("call_id").filter(|v| v.is_string()).cloned().unwrap_or_else(|| json!(call.tool_call_id)),
+            "status": "completed",
+            "operation": input["operation"],
+        }),
+        "computer" => json!({
+            "type": "computer_call",
+            "call_id": call.tool_call_id,
+            "status": input.get("status").filter(|v| v.is_string()).cloned().unwrap_or_else(|| json!("completed")),
+            "actions": input.get("actions").cloned().unwrap_or_else(|| json!([])),
+            "pending_safety_checks": input.get("pending_safety_checks").cloned().unwrap_or_else(|| json!([])),
+        }),
+        _ => json!({
+            "type": "custom_tool_call",
+            "call_id": call.tool_call_id,
+            "name": call.tool_name,
+            "input": input.as_str().map_or_else(|| call.tool_args.clone(), str::to_owned),
+        }),
+    };
+    if let Some(id) = id {
+        item["id"] = json!(id);
+    }
+    item
+}
+
+/// The result of a call the application runs, as its output item
+/// (OAI-010). `local_shell` and custom tools take text, or an object's
+/// `output`; `shell` takes `{"output": [...], "max_output_length"}`;
+/// `apply_patch` `{"status", "output"}`; and `computer` `{"output":
+/// {"type": "computer_screenshot", ...}, "acknowledged_safety_checks"}`.
+fn host_result(kind: &str, call_id: &str, value: &ToolResultValue) -> Result<Value, Error> {
+    let value = match value {
+        ToolResultValue::Json(value) => value.clone(),
+        other => serde_json::to_value(other)?,
+    };
+    let text = |value: &Value| match value.get("output").unwrap_or(value) {
+        Value::String(text) => json!(text),
+        other => json!(other.to_string()),
+    };
+    let bad = |what: &str| invalid(format!("a {kind} tool result must be {what}"));
+    Ok(match kind {
+        "local_shell" => {
+            json!({"type": "local_shell_call_output", "call_id": call_id, "output": text(&value)})
+        }
+        "shell" => {
+            let output = value
+                .get("output")
+                .filter(|o| o.is_array())
+                .ok_or_else(|| bad("an object with an output array"))?;
+            let mut item =
+                json!({"type": "shell_call_output", "call_id": call_id, "output": output});
+            if let Some(max) = value.get("max_output_length").filter(|v| !v.is_null()) {
+                item["max_output_length"] = max.clone();
+            }
+            item
+        }
+        "apply_patch" => {
+            let status = value
+                .get("status")
+                .filter(|s| s == &"completed" || s == &"failed")
+                .ok_or_else(|| bad("an object with a status of completed or failed"))?;
+            let mut item =
+                json!({"type": "apply_patch_call_output", "call_id": call_id, "status": status});
+            if let Some(output) = value.get("output").filter(|v| !v.is_null()) {
+                item["output"] = output.clone();
+            }
+            item
+        }
+        "computer" => {
+            let output = value
+                .get("output")
+                .filter(|o| o["type"] == "computer_screenshot")
+                .ok_or_else(|| bad("an object with a computer_screenshot output"))?;
+            let mut item =
+                json!({"type": "computer_call_output", "call_id": call_id, "output": output});
+            if let Some(checks) = value
+                .get("acknowledged_safety_checks")
+                .filter(|v| !v.is_null())
+            {
+                item["acknowledged_safety_checks"] = checks.clone();
+            }
+            item
+        }
+        _ => json!({"type": "custom_tool_call_output", "call_id": call_id, "output": text(&value)}),
+    })
 }
 
 /// The `additional_tools` item a tool result's `additionalTools` metadata
@@ -902,6 +1020,8 @@ pub(super) struct History<'a> {
     /// The tools whose text results go JSON-quoted, because they declare
     /// an `output_schema` (OAI-009).
     pub quoted_results: &'a [String],
+    /// The provider tools the application runs (OAI-010).
+    pub host_tools: &'a super::tools::HostTools,
 }
 
 impl<'a> History<'a> {
@@ -917,6 +1037,7 @@ impl<'a> History<'a> {
             conversation: false,
             previous_response: false,
             quoted_results: &[],
+            host_tools: &super::tools::NO_HOST_TOOLS,
         }
     }
 }
@@ -1064,6 +1185,13 @@ pub(super) fn convert(
                 for p in &msg.parts {
                     if let Part::Hook(hook) = p {
                         approval_response(hook, &history, &mut parallel, &mut out);
+                        continue;
+                    }
+                    if let Part::ToolResult(r) = p
+                        && openai_responses
+                        && let Some(kind) = history.host_tools.kind(&r.tool_name)
+                    {
+                        out.push(host_result(kind, &r.tool_call_id, r.get_model_input())?);
                         continue;
                     }
                     if let Part::ToolResult(r) = p

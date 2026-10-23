@@ -253,6 +253,7 @@ fn start(
             format!("image/{image_type}"),
             options.output_schema.is_some(),
             hold_reasoning,
+            super::tools::HostTools::of(&options.tools),
         ))
     })
     .try_flatten()
@@ -308,6 +309,7 @@ pub(crate) fn wire_request(
     let use_references = body.get("store") != Some(&Value::Bool(false));
     body.insert("model".into(), json!(model));
     body.insert("stream".into(), json!(true));
+    let host_tools = super::tools::HostTools::of(&options.tools);
     let quoted_results = match &call {
         Some(_) => super::tools::output_schema_tools(&options.tools)?,
         None => vec![],
@@ -323,6 +325,7 @@ pub(crate) fn wire_request(
             conversation: call.options.conversation.is_some(),
             previous_response: call.options.previous_response_id.is_some(),
             quoted_results: &quoted_results,
+            host_tools: &host_tools,
         },
         None => messages::History::plain(model, use_references),
     };

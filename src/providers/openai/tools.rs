@@ -532,3 +532,72 @@ pub(super) fn allowed_tools(
         "tools": entries,
     }))
 }
+
+/// The provider tools of a call that the application runs, rather than
+/// OpenAI (OAI-010): `local_shell`, `shell` without a container
+/// environment, `apply_patch`, `computer` and custom tools.
+#[derive(Clone, Debug, Default)]
+pub(super) struct HostTools {
+    /// Each declared host-run tool's OpenAI kind, by its tool name.
+    kinds: BTreeMap<String, &'static str>,
+    /// Whether OpenAI runs the declared `shell` tool in a container.
+    shell_in_container: bool,
+}
+
+/// The host-run tools of a call that declares none.
+pub(super) static NO_HOST_TOOLS: HostTools = HostTools {
+    kinds: BTreeMap::new(),
+    shell_in_container: false,
+};
+
+impl HostTools {
+    pub(super) fn of(tools: &[Tool]) -> Self {
+        let mut this = Self::default();
+        for tool in tools.iter().filter(|t| t.kind == ToolKind::Provider) {
+            let Ok(kind) = provider_name(tool) else {
+                continue;
+            };
+            let kind = match kind {
+                "local_shell" => "local_shell",
+                "apply_patch" => "apply_patch",
+                "computer" => "computer",
+                "custom" => "custom",
+                "shell" => {
+                    let environment = tool
+                        .tool_config
+                        .as_ref()
+                        .and_then(|c| c.args.get("environment"))
+                        .and_then(|e| e.get("type"))
+                        .and_then(Value::as_str);
+                    if matches!(environment, Some("container_auto" | "container_reference")) {
+                        this.shell_in_container = true;
+                        continue;
+                    }
+                    "shell"
+                }
+                _ => continue,
+            };
+            this.kinds.insert(tool.name.clone(), kind);
+        }
+        this
+    }
+
+    /// The tool name of a call of this OpenAI kind: the declared tool's, or
+    /// the kind itself.
+    pub(super) fn name(&self, kind: &str) -> String {
+        self.kinds
+            .iter()
+            .find(|(_, k)| **k == kind)
+            .map_or_else(|| kind.to_owned(), |(name, _)| name.clone())
+    }
+
+    /// The OpenAI kind of a declared host-run tool, by its tool name.
+    pub(super) fn kind(&self, name: &str) -> Option<&'static str> {
+        self.kinds.get(name).copied()
+    }
+
+    /// Whether the application runs `shell` calls.
+    pub(super) fn shell_on_host(&self) -> bool {
+        !self.shell_in_container
+    }
+}
