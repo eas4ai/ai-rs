@@ -4991,3 +4991,73 @@ async fn oai_026_a_core_cache_mode_fails_before_a_request() {
         assert!(transport.requests.lock().unwrap().is_empty());
     }
 }
+
+// OAI-027
+
+fn schema_options(schema: Value) -> StreamOptions {
+    StreamOptions {
+        output_schema: Some(schema.try_into().unwrap()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn oai_027_a_one_item_all_of_reference_becomes_the_reference() {
+    let defs = json!({"A": {"type": "object", "properties": {"x": {"type": "string"}}}});
+    let root = json!({"allOf": [{"$ref": "#/$defs/A"}], "$defs": defs});
+    let body = body_for("gpt-4.1", vec![user("hi")], &schema_options(root.clone()));
+    let schema = &body["text"]["format"]["schema"];
+    assert_eq!(schema.get("allOf"), None, "{schema}");
+    assert_eq!(schema["type"], "object", "{schema}");
+    assert_eq!(schema["properties"]["x"]["type"], "string", "{schema}");
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
+    let nested = json!({"type": "object", "properties": {"y": {"allOf": [{"$ref": "#/$defs/A"}]}}, "$defs": defs});
+    let chat = chat_body("gpt-4.1", vec![user("hi")], &schema_options(nested));
+    let y = &chat["response_format"]["json_schema"]["schema"]["properties"]["y"];
+    assert_eq!(y.get("allOf"), None, "{y}");
+    assert_eq!(y["$ref"], "#/$defs/A", "{y}");
+}
+
+#[test]
+fn oai_027_property_names_and_lookarounds_are_left_out_and_logged() {
+    let tool = Tool::function(
+        "lookup",
+        ToolSpec {
+            description: None,
+            params: json!({"type": "object", "properties": {
+                "tags": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z]+$"}},
+                "code": {"type": "string", "pattern": "^(?=A)[A-Z]+$"},
+            }})
+            .try_into()
+            .unwrap(),
+        },
+    );
+    let (body, events) = logged(|| tools_sent("gpt-4.1", vec![tool]));
+    let properties = &body[0]["parameters"]["properties"];
+    assert_eq!(properties["tags"].get("propertyNames"), None, "{body}");
+    assert_eq!(properties["code"].get("pattern"), None, "{body}");
+    assert!(
+        events.contains(&("propertyNames".to_owned(), "gpt-4.1".to_owned())),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&("pattern".to_owned(), "gpt-4.1".to_owned())),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn oai_027_another_property_names_fails_before_a_request() {
+    let transport = Recorder::new([text_reply()]);
+    let model = Model::new(
+        "gpt-4.1",
+        Arc::new(OpenAICompatibleProvider::new(config(), transport.clone())),
+    );
+    let options = schema_options(json!({"type": "object", "propertyNames": {"type": "number"}}));
+    let error = run(&model, options).await.unwrap_err();
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+    assert!(transport.requests.lock().unwrap().is_empty());
+}
