@@ -257,7 +257,8 @@ pub(crate) fn request(
     })
 }
 
-/// Raw 16-bit little-endian mono PCM in a 44-byte WAV container.
+/// Raw 16-bit little-endian mono PCM in a 44-byte WAV container. Callers
+/// pass a checked rate; the byte rate saturates rather than overflow.
 pub(crate) fn wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     let size = u32::try_from(pcm.len()).unwrap_or(u32::MAX);
     let mut out = Vec::with_capacity(44 + pcm.len());
@@ -269,7 +270,7 @@ pub(crate) fn wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    out.extend_from_slice(&sample_rate.saturating_mul(2).to_le_bytes());
     out.extend_from_slice(&2u16.to_le_bytes());
     out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");
@@ -278,11 +279,30 @@ pub(crate) fn wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     out
 }
 
-/// The sample rate of a MIME type such as `audio/L16;rate=24000`.
-fn sample_rate(mime_type: Option<&str>) -> Option<u32> {
-    let rest = mime_type?.split("rate=").nth(1)?;
+/// The highest sample rate a speech response may state, in Hz.
+const MAX_SAMPLE_RATE: u32 = 768_000;
+
+/// The sample rate of a MIME type such as `audio/L16;rate=24000`: `None`
+/// when it states none, and an error for 0 or a rate above 768 kHz.
+fn sample_rate(provider: &str, mime_type: Option<&str>) -> Result<Option<u32>, Error> {
+    let Some(rest) = mime_type.and_then(|mime| mime.split("rate=").nth(1)) else {
+        return Ok(None);
+    };
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+    if digits.is_empty() {
+        return Ok(None);
+    }
+    digits
+        .parse::<u32>()
+        .ok()
+        .filter(|rate| (1..=MAX_SAMPLE_RATE).contains(rate))
+        .map(Some)
+        .ok_or_else(|| {
+            http::response_error(
+                provider,
+                "Google speech audio states an invalid sample rate",
+            )
+        })
 }
 
 /// Generate speech.
@@ -340,7 +360,8 @@ pub(crate) async fn generate(
         ),
         None => (Vec::new(), None),
     };
-    let rate = sample_rate(mime_type.as_deref()).unwrap_or(DEFAULT_SAMPLE_RATE);
+    let rate =
+        sample_rate(&endpoint.provider, mime_type.as_deref())?.unwrap_or(DEFAULT_SAMPLE_RATE);
     let pcm = mime_type.as_deref().map_or(!structured, |mime| {
         let lower = mime.to_ascii_lowercase();
         ["audio/l16", "audio/pcm"]

@@ -1589,6 +1589,27 @@ async fn ggl_015_legacy_models_prefix_instructions_and_wrap_pcm_in_wav() {
 }
 
 #[tokio::test]
+async fn ggl_015_an_implausible_sample_rate_fails_the_call() {
+    for mime in [
+        "audio/L16;rate=4294967295",
+        "audio/L16;rate=99999999999",
+        "audio/L16;rate=0",
+    ] {
+        let transport = Recorder::new([audio_response(mime, &[1, 0, 2, 0])]);
+        let m = model("gemini-2.5-flash-preview-tts", transport.clone());
+        let prompt = AudioPrompt {
+            text: "hello".into(),
+            instructions: None,
+        };
+        let error = ops::generate_audio(&m, prompt, AudioParams::default(), Default::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Provider(_)), "{mime}: {error:?}");
+        assert_eq!(transport.count(), 1, "{mime}");
+    }
+}
+
+#[tokio::test]
 async fn ggl_015_structured_models_send_turns_and_the_output_format() {
     let transport = Recorder::new([audio_response("audio/L16;rate=24000", &[1, 0])]);
     let m = model("gemini-3.8-flash-tts", transport.clone());
