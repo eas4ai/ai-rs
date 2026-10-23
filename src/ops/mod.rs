@@ -149,7 +149,7 @@ pub async fn embed(
         }
     };
     let runs = runs.into_iter().zip(run_params);
-    let items = if false {
+    let items = if limits.parallel {
         try_join_all(runs.map(call)).await?
     } else {
         let mut items = Vec::new();
@@ -169,8 +169,8 @@ pub async fn generate_image(
     params: ImageParams,
     options: OperationOptions,
 ) -> Result<Item<Vec<FilePart>>, Error> {
-    let _limits = protocol_of(model)?.image_limits(model);
-    let calls = vec![params.n].into_iter().map(|n| {
+    let limits = protocol_of(model)?.image_limits(model);
+    let calls = batches(params.n, limits.max_per_call).into_iter().map(|n| {
         let prompt = prompt.clone();
         let params = ImageParams {
             n,
@@ -238,7 +238,12 @@ async fn video_batch(
     let mut item = poll_video(model, protocol.as_ref(), &started.value, options).await?;
     let mut videos = Vec::with_capacity(item.value.len());
     for video in std::mem::take(&mut item.value) {
-        videos.push(video);
+        videos.push(
+            with_retries(&options.retry, || {
+                protocol.download_video(model, video.clone(), provider)
+            })
+            .await?,
+        );
     }
     item.value = videos;
     let mut warnings = started.warnings;
@@ -358,11 +363,12 @@ pub async fn generate_audio(
     params: AudioParams,
     options: OperationOptions,
 ) -> Result<Item<Vec<FilePart>>, Error> {
-    let _ = &options;
-    model
-        .provider
-        .generate_audio(model, prompt.clone(), params.clone())
-        .await
+    with_retries(&options.retry, || {
+        model
+            .provider
+            .generate_audio(model, prompt.clone(), params.clone())
+    })
+    .await
 }
 
 /// Transcribe a whole audio file.
@@ -403,10 +409,6 @@ pub async fn upload_file(
     params: UploadParams,
     options: OperationOptions,
 ) -> Result<Item<UploadedFile>, Error> {
-    let file = UploadFile {
-        filename: None,
-        ..file
-    };
     with_retries(&options.retry, || {
         provider.upload_file(file.clone(), params.clone())
     })
@@ -425,10 +427,6 @@ pub async fn stream_transcription(
 ) -> Result<TranscriptionStream, Error> {
     let protocol = protocol_of(model)?;
     let audio = SharedAudio::new(audio);
-    let params = StreamTranscribeParams {
-        include_raw: false,
-        ..params
-    };
     stream_with_retries(&options.retry, &audio, |chunks| {
         protocol.stream_transcription(
             model,
@@ -453,10 +451,6 @@ pub async fn stream_translation(
 ) -> Result<TranslationStream, Error> {
     let protocol = protocol_of(model)?;
     let audio = SharedAudio::new(audio);
-    let params = StreamTranslateParams {
-        source_language: None,
-        ..params
-    };
     stream_with_retries(&options.retry, &audio, |chunks| {
         protocol.stream_translation(
             model,
