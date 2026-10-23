@@ -3939,6 +3939,44 @@ async fn oai_021_a_reference_without_an_openai_id_fails_before_a_request() {
     assert!(transport.requests.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn oai_021_an_id_that_names_no_path_segment_fails_before_a_request() {
+    // A URL path drops a `.` or `..` segment, so such an id would send the
+    // call to another endpoint.
+    let transport = Recorder::new([]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    for id in ["", " ", ".", ".."] {
+        let reference: std::collections::BTreeMap<String, String> =
+            [("openai".to_owned(), id.to_owned())].into();
+        for error in [
+            suprnova_ai::ops::file_info(&provider, &reference, Default::default())
+                .await
+                .err(),
+            suprnova_ai::ops::download_file(&provider, &reference, Default::default())
+                .await
+                .err(),
+            suprnova_ai::ops::delete_file(&provider, &reference, Default::default())
+                .await
+                .err(),
+            suprnova_ai::ops::batch::status(&provider, id, Default::default())
+                .await
+                .err(),
+            suprnova_ai::ops::batch::cancel(&provider, id, Default::default())
+                .await
+                .err(),
+            suprnova_ai::ops::batch::results(&provider, id, Default::default())
+                .await
+                .err(),
+        ] {
+            assert!(
+                matches!(error, Some(suprnova_ai::Error::Validation(_))),
+                "{id:?}: {error:?}"
+            );
+        }
+    }
+    assert!(transport.requests.lock().unwrap().is_empty());
+}
+
 // OAI-022
 
 #[tokio::test]
