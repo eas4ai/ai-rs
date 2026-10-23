@@ -5091,6 +5091,94 @@ fn with_breakpoint(mut part: Part) -> Part {
 }
 
 #[test]
+fn oai_026_breakpoints_reach_custom_results_parallel_outputs_and_chat_assistant_text() {
+    let breakpoint = json!({"mode": "explicit", "ttl": "12h"});
+    // The result of a custom tool.
+    let messages = vec![
+        user("count"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![Part::ToolCall(ToolCallPart::new(
+                "call_ct",
+                "sql",
+                json!("select 1").to_string(),
+            ))],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![with_breakpoint(Part::ToolResult(ToolResultPart::new(
+                "call_ct",
+                "sql",
+                json!("1 row"),
+            )))],
+        ),
+    ];
+    let body = body_for("gpt-5.4", messages, &with_tools(host_tools()));
+    let output = items(&body)
+        .iter()
+        .find(|item| item["type"] == "custom_tool_call_output")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        output["output"],
+        json!([{"type": "input_text", "text": "1 row", "prompt_cache_breakpoint": breakpoint}]),
+        "{body}"
+    );
+    // The joined outputs of an expanded parallel call keep each breakpoint.
+    let call = |index: usize| {
+        let mut call = ToolCallPart::new(format!("c_{index}"), "weather", r#"{"city":"SF"}"#);
+        call.provider_metadata = md(json!({"parallel_tool_call": {
+            "item_id": "fc_p", "tool_call_id": "c", "tool_name": "parallel",
+            "input": "{\"tool_uses\":[]}", "index": index, "count": 2,
+        }}));
+        Part::ToolCall(call)
+    };
+    let result = |index: usize| {
+        Part::ToolResult(ToolResultPart::new(
+            format!("c_{index}"),
+            "weather",
+            json!(format!("r{index}")),
+        ))
+    };
+    let messages = vec![
+        user("weather twice"),
+        Message::new(MessageRole::Assistant, vec![call(0), call(1)]),
+        Message::new(
+            MessageRole::Tool,
+            vec![result(0), with_breakpoint(result(1))],
+        ),
+    ];
+    let body = body_for(
+        "gpt-4.1",
+        messages,
+        &openai(json!({"previousResponseId": "resp_0"})),
+    );
+    assert_eq!(
+        items(&body)[2],
+        json!({"type": "function_call_output", "call_id": "c", "output": [
+            {"type": "input_text", "text": "r0"},
+            {"type": "input_text", "text": "\nr1", "prompt_cache_breakpoint": breakpoint},
+        ]}),
+        "{body}"
+    );
+    // Assistant text on Chat Completions.
+    let messages = vec![
+        user("hi"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![with_breakpoint(Part::Text(TextPart::new("hello")))],
+        ),
+        user("again"),
+    ];
+    let chat = chat_body("gpt-4.1", messages, &StreamOptions::default());
+    assert_eq!(
+        chat["messages"][1]["content"],
+        json!([{"type": "text", "text": "hello", "prompt_cache_breakpoint": breakpoint}]),
+        "{chat}"
+    );
+}
+
+#[test]
 fn oai_026_prompt_cache_options_and_breakpoints_go_out() {
     use suprnova_ai::models::params::{CacheParams, ProviderValue};
     let breakpoint = json!({"mode": "explicit", "ttl": "12h"});
