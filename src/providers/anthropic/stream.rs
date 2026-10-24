@@ -908,16 +908,40 @@ impl Parser {
                         filename: None,
                         media_type: source["media_type"].as_str().unwrap_or_default().to_owned(),
                     });
-                    (
-                        "web_fetch",
-                        json!({"type": "web_fetch_result", "url": content["url"],
-                            "retrievedAt": content["retrieved_at"], "content": {
-                            "type": document["type"], "title": document["title"],
-                            "citations": document["citations"], "source": {"type": source["type"],
-                            "mediaType": source["media_type"], "data": source["data"]}}}),
-                        false,
-                        caller,
-                    )
+                    // A field Anthropic leaves out stays out.
+                    let pick = |value: &Value, keys: &[(&str, &str)]| {
+                        let mut out = Map::new();
+                        for (from, to) in keys {
+                            if let Some(v) = value.get(*from) {
+                                out.insert((*to).into(), v.clone());
+                            }
+                        }
+                        out
+                    };
+                    let mut inner = pick(
+                        document,
+                        &[
+                            ("type", "type"),
+                            ("title", "title"),
+                            ("citations", "citations"),
+                        ],
+                    );
+                    inner.insert(
+                        "source".into(),
+                        Value::Object(pick(
+                            source,
+                            &[
+                                ("type", "type"),
+                                ("media_type", "mediaType"),
+                                ("data", "data"),
+                            ],
+                        )),
+                    );
+                    let mut result =
+                        pick(&content, &[("url", "url"), ("retrieved_at", "retrievedAt")]);
+                    result.insert("type".into(), json!("web_fetch_result"));
+                    result.insert("content".into(), Value::Object(inner));
+                    ("web_fetch", Value::Object(result), false, caller)
                 }
                 _ => ("web_fetch", error(&content), true, caller),
             },

@@ -100,6 +100,12 @@ fn sse(events: &[Value]) -> (u16, Vec<u8>) {
         .collect();
     (200, text.into_bytes())
 }
+fn sse_event(event: Value) -> String {
+    format!(
+        "event: {}\ndata: {event}\n\n",
+        event["type"].as_str().unwrap()
+    )
+}
 /// A stream of these content events between a message's start and stop.
 fn message(blocks: Vec<Value>, usage: Value, reason: &str) -> (u16, Vec<u8>) {
     let mut events = vec![json!({"type": "message_start", "message": {
@@ -1729,6 +1735,224 @@ async fn ant_008_a_code_execution_subtool_is_a_code_execution_call() {
     );
 }
 
+/// The built-in blocks of one response, each with its start, its input
+/// and its stop, as Anthropic streams them.
+fn builtin_blocks() -> Vec<Value> {
+    vec![
+        json!({"type": "server_tool_use", "id": "srv_ws", "name": "web_search", "input": {"query": "rust"}}),
+        json!({"type": "web_search_tool_result", "tool_use_id": "srv_ws", "content": [
+            {"type": "web_search_result", "url": "https://rust.test", "title": "Rust", "encrypted_content": "e1", "page_age": "1 day"}]}),
+        json!({"type": "server_tool_use", "id": "srv_wf", "name": "web_fetch", "input": {"url": "https://doc.test"}}),
+        json!({"type": "web_fetch_tool_result", "tool_use_id": "srv_wf", "content": {"type": "web_fetch_result",
+            "url": "https://doc.test", "retrieved_at": "2026-10-24T00:00:00Z", "content": {"type": "document",
+            "title": "Doc", "source": {"type": "text", "media_type": "text/plain", "data": "hello"}}}}),
+        json!({"type": "server_tool_use", "id": "srv_bash", "name": "bash_code_execution", "input": {"command": "ls"}}),
+        json!({"type": "bash_code_execution_tool_result", "tool_use_id": "srv_bash", "content": {
+            "type": "bash_code_execution_result", "stdout": "a.txt", "stderr": "", "return_code": 0, "content": []}}),
+        json!({"type": "server_tool_use", "id": "srv_edit", "name": "text_editor_code_execution", "input": {"command": "view", "path": "a.txt"}}),
+        json!({"type": "text_editor_code_execution_tool_result", "tool_use_id": "srv_edit", "content": {
+            "type": "text_editor_code_execution_view_result", "content": "x", "file_type": "text", "num_lines": 1,
+            "start_line": 1, "total_lines": 1}}),
+        json!({"type": "server_tool_use", "id": "srv_code", "name": "code_execution", "input": {"code": "print(1)"}}),
+        json!({"type": "code_execution_tool_result", "tool_use_id": "srv_code", "content": {
+            "type": "code_execution_result", "stdout": "1", "stderr": "", "return_code": 0, "content": []}}),
+        json!({"type": "server_tool_use", "id": "srv_ts", "name": "tool_search_tool_regex", "input": {"pattern": "weather"}}),
+        json!({"type": "tool_search_tool_result", "tool_use_id": "srv_ts", "content": {
+            "type": "tool_search_tool_search_result", "tool_references": [{"type": "tool_reference", "tool_name": "weather"}]}}),
+        json!({"type": "server_tool_use", "id": "srv_adv", "name": "advisor", "input": {}}),
+        json!({"type": "advisor_tool_result", "tool_use_id": "srv_adv", "content": {"type": "advisor_result", "text": "Try X", "stop_reason": "end_turn"}}),
+        json!({"type": "mcp_tool_use", "id": "mcp_1", "name": "lookup", "server_name": "docs", "input": {"q": "a"}}),
+        json!({"type": "mcp_tool_result", "tool_use_id": "mcp_1", "is_error": false, "content": [{"type": "text", "text": "found"}]}),
+    ]
+}
+/// A stream of these complete blocks: a tool use's input as one delta.
+fn blocks_reply(blocks: &[Value], reason: &str) -> (u16, Vec<u8>) {
+    let mut events = vec![];
+    for (index, block) in blocks.iter().enumerate() {
+        let mut opened = block.clone();
+        let input = block.get("input").cloned();
+        if matches!(block["type"].as_str(), Some("server_tool_use" | "tool_use")) {
+            opened["input"] = json!({});
+        }
+        events
+            .push(json!({"type": "content_block_start", "index": index, "content_block": opened}));
+        if let (Some(input), Some("server_tool_use" | "tool_use")) = (input, block["type"].as_str())
+        {
+            events.push(json!({"type": "content_block_delta", "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}));
+        }
+        events.push(json!({"type": "content_block_stop", "index": index}));
+    }
+    message(events, json!({"output_tokens": 1}), reason)
+}
+async fn streamed(
+    model_id: &str,
+    reply: (u16, Vec<u8>),
+    options: StreamOptions,
+) -> suprnova_ai::models::StreamHandle {
+    let mut handle = suprnova_ai::stream(
+        &model(model_id, Recorder::new([reply])),
+        vec![user("hi")],
+        options,
+    );
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    handle
+}
+
+#[tokio::test]
+async fn ant_008_built_in_tools_arrive_in_typescript_shapes() {
+    let handle = streamed(
+        "claude-sonnet-4-6",
+        blocks_reply(&builtin_blocks(), "end_turn"),
+        StreamOptions::default(),
+    )
+    .await;
+    let message = handle.message();
+    let calls: Vec<(String, Value)> = message
+        .builtin_tool_calls()
+        .iter()
+        .map(|c| {
+            (
+                c.tool_name.clone(),
+                serde_json::from_str(&c.tool_args).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("web_search".to_owned(), json!({"query": "rust"})),
+            ("web_fetch".to_owned(), json!({"url": "https://doc.test"})),
+            (
+                "code_execution".to_owned(),
+                json!({"type": "bash_code_execution", "command": "ls"})
+            ),
+            (
+                "code_execution".to_owned(),
+                json!({"type": "text_editor_code_execution", "command": "view", "path": "a.txt"})
+            ),
+            (
+                "code_execution".to_owned(),
+                json!({"type": "programmatic-tool-call", "code": "print(1)"})
+            ),
+            (
+                "tool_search_tool_regex".to_owned(),
+                json!({"pattern": "weather"})
+            ),
+            ("advisor".to_owned(), json!({})),
+            ("lookup".to_owned(), json!({"q": "a"})),
+        ]
+    );
+    let results: Vec<(String, Value, bool)> = message
+        .builtin_tool_returns()
+        .iter()
+        .map(|r| (r.tool_name.clone(), r.result.clone(), r.is_error))
+        .collect();
+    assert_eq!(
+        results[0],
+        (
+            "web_search".to_owned(),
+            json!([{"url": "https://rust.test", "title": "Rust", "pageAge": "1 day", "encryptedContent": "e1", "type": "web_search_result"}]),
+            false
+        )
+    );
+    assert_eq!(
+        results[1],
+        (
+            "web_fetch".to_owned(),
+            json!({"type": "web_fetch_result", "url": "https://doc.test", "retrievedAt": "2026-10-24T00:00:00Z",
+        "content": {"type": "document", "title": "Doc", "source": {"type": "text", "mediaType": "text/plain", "data": "hello"}}}),
+            false
+        )
+    );
+    assert_eq!(results[2].1["type"], "bash_code_execution_result");
+    assert_eq!(
+        results[4].1,
+        json!({"type": "code_execution_result", "stdout": "1", "stderr": "", "return_code": 0, "content": []})
+    );
+    assert_eq!(
+        results[5],
+        (
+            "tool_search_tool_regex".to_owned(),
+            json!([{"type": "tool_reference", "toolName": "weather"}]),
+            false
+        )
+    );
+    assert_eq!(
+        results[6],
+        (
+            "advisor".to_owned(),
+            json!({"type": "advisor_result", "text": "Try X", "stopReason": "end_turn"}),
+            false
+        )
+    );
+    assert_eq!(
+        results[7],
+        (
+            "lookup".to_owned(),
+            json!([{"type": "text", "text": "found"}]),
+            false
+        )
+    );
+    let mcp = message.builtin_tool_calls()[7]
+        .provider_metadata
+        .clone()
+        .unwrap();
+    assert_eq!(
+        mcp["anthropic"],
+        json!({"type": "mcp-tool-use", "serverName": "docs"})
+    );
+}
+
+#[tokio::test]
+async fn ant_008_errors_callers_and_deferred_calls_are_kept() {
+    let reply = blocks_reply(
+        &[
+            json!({"type": "server_tool_use", "id": "srv_ws", "name": "web_search", "input": {"query": "x"}}),
+            json!({"type": "web_search_tool_result", "tool_use_id": "srv_ws", "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}}),
+            json!({"type": "tool_use", "id": "toolu_p", "name": "weather", "caller": {"type": "code_execution_20260120", "tool_id": "srv_1"}, "input": {"city": "SF"}}),
+        ],
+        "tool_use",
+    );
+    let handle = streamed("claude-sonnet-4-6", reply, StreamOptions::default()).await;
+    let error = handle.message().builtin_tool_returns()[0].clone();
+    assert!(error.is_error);
+    assert_eq!(
+        error.result,
+        json!({"type": "web_search_tool_result_error", "errorCode": "max_uses_exceeded"})
+    );
+    let call = &handle.message().tool_calls()[0];
+    assert_eq!(
+        call.provider_metadata.as_ref().unwrap()["anthropic"]["caller"],
+        json!({"type": "code_execution_20260120", "toolId": "srv_1"})
+    );
+    // A deferred call of a program in the message start.
+    let mut events = vec![sse_event(
+        json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-4-6",
+        "content": [{"type": "tool_use", "id": "toolu_d", "name": "weather", "input": {"city": "LA"}, "caller": {"type": "code_execution_20260120", "tool_id": "srv_1"}}],
+        "stop_reason": null, "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+    )];
+    events.push(sse_event(json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 1}})));
+    events.push(sse_event(json!({"type": "message_stop"})));
+    let handle = streamed(
+        "claude-sonnet-4-6",
+        (200, events.concat().into_bytes()),
+        StreamOptions::default(),
+    )
+    .await;
+    let call = &handle.message().tool_calls()[0];
+    assert_eq!(
+        (call.tool_call_id.as_str(), call.tool_name.as_str()),
+        ("toolu_d", "weather")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&call.tool_args).unwrap(),
+        json!({"city": "LA"})
+    );
+}
+
 // ANT-009
 
 #[tokio::test]
@@ -1754,6 +1978,122 @@ async fn ant_009_arguments_that_are_not_an_object_are_wrapped() {
         body["messages"][1]["content"][0]["input"],
         json!({"rawInvalidInput": [1]}),
         "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_009_built_in_history_goes_back_as_the_stream_received_it() {
+    let handle = streamed(
+        "claude-sonnet-4-6",
+        blocks_reply(&builtin_blocks(), "end_turn"),
+        StreamOptions::default(),
+    )
+    .await;
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi"), handle.message().clone(), user("more")],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!(builtin_blocks()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_009_an_error_without_a_code_goes_back_unavailable() {
+    use suprnova_ai::types::messages::{BuiltinToolCallPart, BuiltinToolReturnPart};
+    let call = BuiltinToolCallPart {
+        id: "c".into(),
+        tool_call_id: "srv_1".into(),
+        tool_name: "web_search".into(),
+        tool_args: r#"{"query": "x"}"#.into(),
+        provider_metadata: None,
+    };
+    let result = BuiltinToolReturnPart {
+        id: "r".into(),
+        tool_call_id: "srv_1".into(),
+        tool_name: "web_search".into(),
+        result: json!({"type": "web_search_tool_result_error"}),
+        is_error: true,
+        provider_metadata: None,
+    };
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("hi"),
+            assistant(vec![
+                Part::BuiltinToolCall(call),
+                Part::BuiltinToolReturn(result),
+            ]),
+            user("more"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][1]["content"][1],
+        json!({"type": "web_search_tool_result", "tool_use_id": "srv_1",
+               "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"}}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_009_a_caller_goes_back_only_while_its_code_execution_call_is_there() {
+    use suprnova_ai::types::messages::BuiltinToolCallPart;
+    let program = |id: &str| {
+        let mut call = ToolCallPart::new(format!("toolu_{id}"), "weather", "{}");
+        call.provider_metadata =
+            metadata(json!({"caller": {"type": "code_execution_20260120", "toolId": id}}));
+        Part::ToolCall(call)
+    };
+    let code = Part::BuiltinToolCall(BuiltinToolCallPart {
+        id: "c".into(),
+        tool_call_id: "srv_kept".into(),
+        tool_name: "code_execution".into(),
+        tool_args: r#"{"type": "programmatic-tool-call", "code": "x"}"#.into(),
+        provider_metadata: None,
+    });
+    let result = |id: &str| {
+        Message::new(
+            MessageRole::Tool,
+            vec![Part::ToolResult(
+                suprnova_ai::types::messages::ToolResultPart::new(
+                    format!("toolu_{id}"),
+                    "weather",
+                    json!("ok"),
+                ),
+            )],
+        )
+    };
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("hi"),
+            assistant(vec![code, program("srv_kept"), program("srv_gone")]),
+            result("srv_kept"),
+            result("srv_gone"),
+            user("more"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    let content = &body["messages"][1]["content"];
+    assert_eq!(content[0]["name"], "code_execution", "{body}");
+    assert_eq!(content[0]["input"], json!({"code": "x"}), "{body}");
+    assert_eq!(
+        content[1]["caller"],
+        json!({"type": "code_execution_20260120", "tool_id": "srv_kept"}),
+        "{body}"
+    );
+    assert!(content[2].get("caller").is_none(), "{body}");
+    assert!(
+        logs.take()
+            .contains(&("caller".to_owned(), "claude-sonnet-4-6".to_owned()))
     );
 }
 

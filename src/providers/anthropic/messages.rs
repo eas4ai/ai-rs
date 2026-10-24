@@ -519,12 +519,34 @@ fn builtin_result(
                 "tool_use_id": id, "content": {"type": "web_fetch_tool_result_error",
                 "error_code": error_code(value)}}),
             "web_fetch" => {
+                // A field the result does not hold stays out.
+                let pick = |value: &Value, keys: &[(&str, &str)]| {
+                    let mut out = Map::new();
+                    for (from, to) in keys {
+                        if let Some(v) = value.get(*from) {
+                            out.insert((*to).into(), v.clone());
+                        }
+                    }
+                    out
+                };
                 let content = &value["content"];
-                let source = &content["source"];
-                json!({"type": "web_fetch_tool_result", "tool_use_id": id, "content": {
-                    "type": "web_fetch_result", "url": value["url"], "retrieved_at": value["retrievedAt"],
-                    "content": {"type": "document", "title": content["title"], "citations": content["citations"],
-                        "source": {"type": source["type"], "media_type": source["mediaType"], "data": source["data"]}}}})
+                let mut document = pick(content, &[("title", "title"), ("citations", "citations")]);
+                document.insert("type".into(), json!("document"));
+                document.insert(
+                    "source".into(),
+                    Value::Object(pick(
+                        &content["source"],
+                        &[
+                            ("type", "type"),
+                            ("mediaType", "media_type"),
+                            ("data", "data"),
+                        ],
+                    )),
+                );
+                let mut fetched = pick(value, &[("url", "url"), ("retrievedAt", "retrieved_at")]);
+                fetched.insert("type".into(), json!("web_fetch_result"));
+                fetched.insert("content".into(), Value::Object(document));
+                json!({"type": "web_fetch_tool_result", "tool_use_id": id, "content": fetched})
             }
             "web_search" if result.is_error => json!({"type": "web_search_tool_result",
                 "tool_use_id": id, "content": {"type": "web_search_tool_result_error",
