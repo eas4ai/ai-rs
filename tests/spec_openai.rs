@@ -4034,10 +4034,11 @@ async fn oai_021_a_reference_without_an_openai_id_fails_before_a_request() {
 #[tokio::test]
 async fn oai_021_an_id_that_names_no_path_segment_fails_before_a_request() {
     // A URL path drops a `.` or `..` segment, so such an id would send the
-    // call to another endpoint.
+    // call to another endpoint. The URL parser also drops a tab, CR or LF
+    // inside a segment, so `"\t.."` names no segment either.
     let transport = Recorder::new([]);
     let provider = OpenAICompatibleProvider::new(config(), transport.clone());
-    for id in ["", " ", ".", ".."] {
+    for id in ["", " ", ".", "..", "\t..", ".\n.", "\r.", "file\u{7f}1"] {
         let reference: std::collections::BTreeMap<String, String> =
             [("openai".to_owned(), id.to_owned())].into();
         for error in [
