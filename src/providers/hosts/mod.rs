@@ -268,12 +268,13 @@ impl HostProvider {
     /// and PDFs for the hosts that take them as OpenAI does; and for image
     /// calls, the image URLs DeepInfra edits and a Fireworks Kontext result
     /// on another origin than the base URL, which comes without the key.
-    /// Without one, such a URL fails with `Error::Validation`. Responses and
-    /// Messages hosts send no downloaded media and ignore it. Download
-    /// transports must honor the core DNS-pinning contract. A snapshot does
-    /// not keep the transport; a restore through a registry made with the
-    /// host module's `register_with_downloads` (Moonshot AI, DeepInfra and
-    /// Fireworks) gets it back.
+    /// Without one, such a URL fails with `Error::Validation`, and so does
+    /// every Fireworks Kontext call, before its job starts, wherever its
+    /// result would be. Responses and Messages hosts send no downloaded media
+    /// and ignore it. Download transports must honor the core DNS-pinning
+    /// contract. A snapshot does not keep the transport; a restore through a
+    /// registry made with the host module's `register_with_downloads`
+    /// (Moonshot AI, DeepInfra and Fireworks) gets it back.
     #[must_use]
     pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
         self.downloads = Some(downloads);

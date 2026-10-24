@@ -692,9 +692,9 @@ async fn fireworks(
         // the transport that HST-031 names first.
         let downloads = downloads.ok_or_else(|| {
             invalid(
-                "a Fireworks Kontext model's result is fetched through the download transport; \
-                 build the provider with with_download_transport or register it with \
-                 register_with_downloads",
+                "a Fireworks Kontext call needs a download transport, since its result is \
+                 usually on another origin; build the provider with with_download_transport or \
+                 register it with register_with_downloads",
             )
         })?;
         crate::models::call::require_timer()?;
