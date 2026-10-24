@@ -18,7 +18,7 @@ use crate::{
         multipart::Multipart,
         operations::{DownloadedFile, Item, UploadFile, UploadParams, UploadedFile},
     },
-    transport::HttpTransport,
+    transport::{HttpRequest, HttpTransport},
 };
 
 /// Where a files call goes: the provider's configuration and transport.
@@ -45,6 +45,24 @@ pub(super) fn path_id<'a>(what: &str, id: &'a str) -> Result<&'a str, Error> {
         return Err(invalid(format!("{id:?} is not an OpenAI {what} id")));
     }
     Ok(id)
+}
+
+/// The request for a file's content, which takes any media type.
+pub(super) fn content_request(config: &ProviderConfig, id: &str) -> Result<HttpRequest, Error> {
+    let id = path_id("file", id)?;
+    let mut request = http_request(
+        &errors::API,
+        "GET",
+        config,
+        &["files", id, "content"],
+        None,
+        None,
+    )?;
+    request
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("accept"));
+    request.headers.push(("accept".into(), "*/*".into()));
+    Ok(request)
 }
 
 /// The OpenAI file id of a provider reference.
@@ -146,19 +164,7 @@ impl Files<'_> {
         reference: &BTreeMap<String, String>,
         max_bytes: usize,
     ) -> Result<Item<DownloadedFile>, Error> {
-        let id = file_id(reference)?;
-        let mut request = http_request(
-            &errors::API,
-            "GET",
-            self.config,
-            &["files", id, "content"],
-            None,
-            None,
-        )?;
-        request
-            .headers
-            .retain(|(name, _)| !name.eq_ignore_ascii_case("accept"));
-        request.headers.push(("accept".into(), "*/*".into()));
+        let request = content_request(self.config, file_id(reference)?)?;
         let response =
             http::send(&errors::API, self.transport, request, self.provider, None).await?;
         let (headers, data) =
