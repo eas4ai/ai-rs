@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::{StreamExt, stream};
 use serde_json::{Map, Value, json};
 
@@ -21,7 +21,6 @@ use crate::{
     models::StreamOptions,
     models::files::DownloadTransport,
     providers::{http, operations::*},
-    transport::Body,
     types::{Message, messages::generate_id},
 };
 
@@ -29,8 +28,6 @@ use crate::{
 const INLINE_LIMIT: usize = 20_000_000;
 /// The most bytes of a JSON lines input file.
 const INPUT_FILE_LIMIT: usize = 2 * 1024 * 1024 * 1024;
-/// The most bytes of one results line.
-pub(crate) const RESULT_LINE_LIMIT: usize = 64 * 1024 * 1024;
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Validation(message.into())
@@ -568,87 +565,12 @@ pub(crate) async fn results(endpoint: &Endpoint, batch_id: &str) -> Result<Batch
     )?;
     let response = endpoint.send(request, None).await?;
     let api = *endpoint.flavor.api();
-    Ok(
-        json_lines(api, provider.clone(), response.body, RESULT_LINE_LIMIT)
-            .map(move |line| line.and_then(|line| result(&provider, &line)))
-            .boxed(),
+    Ok(http::json_lines(
+        api,
+        provider.clone(),
+        response.body,
+        http::RESULT_LINE_LIMIT,
     )
-}
-
-/// Read a body as JSON lines, each at most `limit` bytes.
-pub(crate) fn json_lines(
-    api: http::ApiProfile,
-    provider: String,
-    body: Body,
-    limit: usize,
-) -> futures::stream::BoxStream<'static, Result<Value, Error>> {
-    struct Lines {
-        body: Body,
-        buffer: BytesMut,
-        /// How much of the buffer holds no newline, so that each byte is
-        /// searched once.
-        searched: usize,
-        done: bool,
-    }
-    let state = Lines {
-        body,
-        buffer: BytesMut::new(),
-        searched: 0,
-        done: false,
-    };
-    stream::try_unfold(state, move |mut state| {
-        let provider = provider.clone();
-        async move {
-            loop {
-                let found = state.buffer[state.searched..]
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .map(|at| state.searched + at);
-                state.searched = found.unwrap_or(state.buffer.len());
-                if let Some(end) = found {
-                    let line = state.buffer.split_to(end + 1);
-                    state.searched = 0;
-                    let text = &line[..end];
-                    let text = text.strip_suffix(b"\r").unwrap_or(text);
-                    if text.iter().all(u8::is_ascii_whitespace) {
-                        continue;
-                    }
-                    let value = serde_json::from_slice(text).map_err(|_| {
-                        http::response_error(
-                            &provider,
-                            "a Google batch result line is not valid JSON",
-                        )
-                    })?;
-                    return Ok(Some((value, state)));
-                }
-                if state.buffer.len() > limit {
-                    return Err(http::limit_error(
-                        &api,
-                        &provider,
-                        "batch result line",
-                        limit,
-                    ));
-                }
-                if state.done {
-                    if state.buffer.iter().all(u8::is_ascii_whitespace) {
-                        return Ok(None);
-                    }
-                    let rest = state.buffer.split();
-                    let value = serde_json::from_slice(&rest).map_err(|_| {
-                        http::response_error(
-                            &provider,
-                            "a Google batch result line is not valid JSON",
-                        )
-                    })?;
-                    return Ok(Some((value, state)));
-                }
-                match state.body.next().await {
-                    Some(Ok(chunk)) => state.buffer.extend_from_slice(&chunk),
-                    Some(Err(error)) => return Err(http::transport_error(&api, &provider, error)),
-                    None => state.done = true,
-                }
-            }
-        }
-    })
-    .boxed()
+    .map(move |line| line.and_then(|line| result(&provider, &line)))
+    .boxed())
 }

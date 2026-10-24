@@ -1,6 +1,9 @@
 //! OpenAI's batches of Responses requests (`openai-batch.ts`), OAI-023.
 
-use std::time::{Duration, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
@@ -8,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::{
     errors,
-    files::{Files, path_id},
+    files::{Files, content_request, path_id},
     params::invalid,
     profile,
     protocol::{Wire, http_request, wire_request},
@@ -24,9 +27,10 @@ use crate::{
         operations::{
             BatchError, BatchOutcome, BatchPage, BatchParams, BatchRequest, BatchRequestCounts,
             BatchRequestKind, BatchResult, BatchResultKind, BatchResults, BatchStarted, BatchState,
-            BatchStatus, BatchWarning, MAX_DOWNLOAD_BYTES, Warning,
+            BatchStatus, BatchWarning, Warning,
         },
     },
+    transport::HttpTransport,
     types::Message,
 };
 
@@ -399,7 +403,14 @@ impl Files<'_> {
         })
     }
 
-    pub(super) async fn batch_results(&self, batch_id: &str) -> Result<BatchResults, Error> {
+    /// The results of a finished batch: the output file's lines, then the
+    /// error file's, each read as it arrives. `transport` is this one's,
+    /// owned, so the stream can ask for the error file when the output ends.
+    pub(super) async fn batch_results(
+        &self,
+        batch_id: &str,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<BatchResults, Error> {
         let batch_id = path_id("batch", batch_id)?;
         let batch = self.get(&["batches", batch_id], &[]).await?;
         let state = status(&batch, self.provider)?.state;
@@ -418,26 +429,28 @@ impl Files<'_> {
                 format!("OpenAI batch \"{batch_id}\" completed without batch output."),
             ));
         }
-        let mut lines = Vec::new();
-        for file in files {
-            let content = self
-                .download(&[("openai".to_owned(), file)].into(), MAX_DOWNLOAD_BYTES)
-                .await?
-                .value
-                .data;
-            for line in content.split(|byte| *byte == b'\n') {
-                if line.iter().all(u8::is_ascii_whitespace) {
-                    continue;
-                }
-                let value: Value = serde_json::from_slice(line).map_err(|_| {
-                    http::response_error(self.provider, "OpenAI batch result line is not JSON")
-                })?;
-                lines.push(value);
-            }
-        }
+        let config = self.config.clone();
         let provider = self.provider.to_owned();
-        Ok(stream::iter(lines)
-            .then(move |line| result(line, provider.clone()))
+        let reader = provider.clone();
+        Ok(stream::iter(files)
+            .then(move |file| {
+                let (config, transport, provider) =
+                    (config.clone(), transport.clone(), reader.clone());
+                async move {
+                    let request = content_request(&config, &file)?;
+                    let response =
+                        http::send(&errors::API, transport.as_ref(), request, &provider, None)
+                            .await?;
+                    Ok::<_, Error>(http::json_lines(
+                        errors::API,
+                        provider,
+                        response.body,
+                        http::RESULT_LINE_LIMIT,
+                    ))
+                }
+            })
+            .try_flatten()
+            .and_then(move |line| result(line, provider.clone()))
             .boxed())
     }
 }

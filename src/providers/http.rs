@@ -387,6 +387,83 @@ pub(crate) enum SseJson {
     Done,
 }
 
+/// The most bytes of one batch results line.
+pub(crate) const RESULT_LINE_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Read a body as JSON lines, each at most `limit` bytes.
+pub(crate) fn json_lines(
+    api: ApiProfile,
+    provider: String,
+    body: Body,
+    limit: usize,
+) -> BoxStream<'static, Result<Value, Error>> {
+    struct Lines {
+        body: Body,
+        buffer: bytes::BytesMut,
+        /// How much of the buffer holds no newline, so that each byte is
+        /// searched once.
+        searched: usize,
+        done: bool,
+    }
+    let state = Lines {
+        body,
+        buffer: bytes::BytesMut::new(),
+        searched: 0,
+        done: false,
+    };
+    futures::stream::try_unfold(state, move |mut state| {
+        let provider = provider.clone();
+        async move {
+            loop {
+                let found = state.buffer[state.searched..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|at| state.searched + at);
+                state.searched = found.unwrap_or(state.buffer.len());
+                if let Some(end) = found {
+                    let line = state.buffer.split_to(end + 1);
+                    state.searched = 0;
+                    let text = &line[..end];
+                    let text = text.strip_suffix(b"\r").unwrap_or(text);
+                    if text.iter().all(u8::is_ascii_whitespace) {
+                        continue;
+                    }
+                    let value = serde_json::from_slice(text).map_err(|_| {
+                        response_error(
+                            &provider,
+                            format!("{} batch result line is not valid JSON", api.label),
+                        )
+                    })?;
+                    return Ok(Some((value, state)));
+                }
+                if state.buffer.len() > limit {
+                    return Err(limit_error(&api, &provider, "batch result line", limit));
+                }
+                if state.done {
+                    if state.buffer.iter().all(u8::is_ascii_whitespace) {
+                        return Ok(None);
+                    }
+                    let rest = state.buffer.split();
+                    state.searched = 0;
+                    let value = serde_json::from_slice(&rest).map_err(|_| {
+                        response_error(
+                            &provider,
+                            format!("{} batch result line is not valid JSON", api.label),
+                        )
+                    })?;
+                    return Ok(Some((value, state)));
+                }
+                match state.body.next().await {
+                    Some(Ok(chunk)) => state.buffer.extend_from_slice(&chunk),
+                    Some(Err(error)) => return Err(transport_error(&api, &provider, error)),
+                    None => state.done = true,
+                }
+            }
+        }
+    })
+    .boxed()
+}
+
 /// Read a server-sent event body as JSON objects. Transport failures map
 /// through the profile; data that is not a JSON object is a response error.
 pub(crate) fn sse_json(

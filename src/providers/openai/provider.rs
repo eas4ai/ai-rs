@@ -282,7 +282,9 @@ impl Provider for OpenAICompatibleProvider {
             .await
     }
     async fn batch_results(&self, batch_id: &str) -> Result<BatchResults, Error> {
-        self.files("batch_results")?.batch_results(batch_id).await
+        self.files("batch_results")?
+            .batch_results(batch_id, self.transport.clone())
+            .await
     }
     async fn probe(&self, model: &Model) -> Result<(), Error> {
         if !self.is_configured() {
