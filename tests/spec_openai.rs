@@ -2613,6 +2613,30 @@ fn oai_011_a_program_call_goes_back_with_its_caller_and_async() {
             .unwrap_or_else(|| panic!("no function_call_output: {body}"));
         assert_eq!(output["caller"], caller, "{metadata}: {body}");
     }
+    // A custom tool call keeps its async too.
+    let mut call = ToolCallPart::new("call_ct", "sql", r#""select 1""#);
+    call.provider_metadata = Some(
+        [(
+            "openai".to_owned(),
+            json!({"item_id": "ct_1", "raw_item": {"type": "custom_tool_call", "id": "ct_1", "call_id": "call_ct", "name": "sql", "input": "select 1", "async": true}}),
+        )]
+        .into(),
+    );
+    let mut options = with_tools(host_tools());
+    options.params = store(Some(false)).params;
+    let body = body_for(
+        "gpt-5.4",
+        vec![
+            user("rows?"),
+            Message::new(MessageRole::Assistant, vec![Part::ToolCall(call)]),
+        ],
+        &options,
+    );
+    let custom = items(&body)
+        .iter()
+        .find(|item| item["type"] == "custom_tool_call")
+        .unwrap_or_else(|| panic!("no custom_tool_call: {body}"));
+    assert_eq!(custom["async"], true, "{body}");
 }
 
 // OAI-012
