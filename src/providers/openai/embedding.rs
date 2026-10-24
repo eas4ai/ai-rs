@@ -97,17 +97,26 @@ fn camel_case(name: &str) -> String {
 
 fn options(
     protocol: OpenAIEmbeddingProtocol,
-    provider: &str,
+    provider: &dyn Provider,
     params: &EmbedParams,
 ) -> Result<EmbeddingOptions, Error> {
-    let keys = match protocol.compatible {
+    let name = provider.name();
+    let mut keys = match protocol.compatible {
         Some(_) => vec![
             "openaiCompatible".to_owned(),
-            provider.to_owned(),
-            camel_case(provider),
+            name.to_owned(),
+            camel_case(name),
         ],
         None => vec!["openai".to_owned()],
     };
+    // A host's own entry, whatever the provider is named (HST-028).
+    if let Some(key) = protocol
+        .compatible
+        .and_then(|_| crate::providers::hosts::entry_key(provider))
+        .filter(|key| !keys.iter().any(|k| k == key))
+    {
+        keys.push(key.to_owned());
+    }
     let mut merged = Map::new();
     for key in keys {
         match params.provider_options.get(&key) {
@@ -139,7 +148,7 @@ pub(super) async fn embed(
             values.len()
         )));
     }
-    let options = options(protocol, provider.name(), &params)?;
+    let options = options(protocol, provider, &params)?;
     let mut body = json!({"model": model.id, "input": values, "encoding_format": "float"});
     if let Some(dimensions) = options.dimensions {
         body["dimensions"] = Value::Number(dimensions);

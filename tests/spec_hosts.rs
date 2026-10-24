@@ -4430,3 +4430,150 @@ async fn hst_030_and_hst_031_a_registry_carries_the_download_transport() {
     let form = String::from_utf8_lossy(&transport.request().body).into_owned();
     assert!(form.contains("image/jpeg"), "{form}");
 }
+
+// HST-027 to HST-032 through models.dev metadata.
+
+fn modelsdev(
+    id: &str,
+    npm: &str,
+    api: &str,
+    transport: Arc<dyn HttpTransport>,
+) -> Arc<dyn Provider> {
+    let metadata: ModelsDevProvider =
+        serde_json::from_value(json!({"id": id, "npm": npm, "api": api, "env": []})).unwrap();
+    Arc::new(
+        OpenAICompatibleProvider::from_modelsdev_provider(&metadata, key_config(), transport)
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn hst_028_to_hst_032_a_models_dev_provider_for_a_host_serves_its_model_kinds() {
+    // Embeddings, under the host's entry, for the models.dev id fireworks-ai.
+    let server = Arc::new(EmbedServer::default());
+    let provider = modelsdev(
+        "fireworks-ai",
+        "@ai-sdk/fireworks",
+        FIREWORKS,
+        server.clone(),
+    );
+    let item = suprnova_ai::ops::embed(
+        &Model::new("some-embedder", provider),
+        vec!["a".into()],
+        embed_params(Some(("fireworks", json!({"dimensions": 8})))),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(item.value.len(), 1);
+    let body: Value = serde_json::from_slice(&server.requests.lock().unwrap()[0].body).unwrap();
+    assert_eq!(body["dimensions"], 8, "{body}");
+    // Images and reranking for Together AI.
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let provider = modelsdev(
+        "togetherai",
+        "@ai-sdk/togetherai",
+        "https://api.together.xyz/v1",
+        transport.clone(),
+    );
+    let item = suprnova_ai::ops::generate_image(
+        &Model::new("black-forest-labs/FLUX.1-dev", provider),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(png_bytes(&item.value[0]), PNG);
+    let transport = Recorder::new([rerank_reply()]);
+    let provider = modelsdev(
+        "togetherai",
+        "@ai-sdk/togetherai",
+        "https://api.together.xyz/v1",
+        transport.clone(),
+    );
+    suprnova_ai::ops::rerank(
+        &Model::new("Salesforce/Llama-Rank-v1", provider),
+        Documents::Text(vec!["a".into()]),
+        "q".into(),
+        RerankParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        "https://api.together.xyz/v1/rerank"
+    );
+}
+
+#[tokio::test]
+async fn hst_027_a_models_dev_provider_for_a_host_keeps_its_completion_rules() {
+    // The host's entry under its own name, and its error kinds.
+    let transport = Recorder::new([completion_stream("hi")]);
+    let provider = modelsdev(
+        "fireworks-ai",
+        "@ai-sdk/fireworks",
+        FIREWORKS,
+        transport.clone(),
+    );
+    let model = Model::new("some-model", provider)
+        .with_protocol(Arc::new(fireworks::completion_protocol()));
+    let (_, events) = call(
+        &model,
+        vec![user_message("hello")],
+        entries(&[("fireworks", json!({"suffix": "end"}))]),
+    )
+    .await;
+    ok(&events);
+    assert_eq!(transport.body()["suffix"], "end");
+    let transport = Recorder::new([(503, br#"{"error": {"message": "busy"}}"#.to_vec())]);
+    let provider = modelsdev("fireworks-ai", "@ai-sdk/fireworks", FIREWORKS, transport);
+    let model = Model::new("some-model", provider)
+        .with_protocol(Arc::new(fireworks::completion_protocol()));
+    let options = StreamOptions {
+        retry: suprnova_ai::RetryPolicy::none(),
+        ..Default::default()
+    };
+    let (_, events) = call(&model, vec![user_message("hello")], options).await;
+    let Some(Err(Error::Provider(error))) = events.into_iter().find(Result::is_err) else {
+        panic!("the call did not fail with a provider error");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::ServiceUnavailable);
+}
+
+#[tokio::test]
+async fn hst_030_a_models_dev_provider_lends_its_download_transport_to_images() {
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let downloads = Arc::new(Downloads::default());
+    let metadata: ModelsDevProvider = serde_json::from_value(json!({"id": "deepinfra",
+        "npm": "@ai-sdk/deepinfra", "api": "https://api.deepinfra.com/v1/openai", "env": []}))
+    .unwrap();
+    let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+        &metadata,
+        key_config(),
+        transport.clone(),
+    )
+    .unwrap()
+    .with_download_transport(downloads.clone());
+    suprnova_ai::ops::generate_image(
+        &Model::new("black-forest-labs/FLUX.1-Kontext-dev", Arc::new(provider)),
+        prompt(
+            "a cat",
+            vec![MediaInput::Url("https://img.test/a.png".into())],
+            None,
+        ),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *downloads.urls.lock().unwrap(),
+        vec!["https://img.test/a.png".to_owned()]
+    );
+    assert_eq!(
+        transport.request().url,
+        "https://api.deepinfra.com/v1/openai/images/edits"
+    );
+}
