@@ -126,6 +126,22 @@ transcription, translation and realtime sessions.
 `AgentTool::with_provider_declaration` lets an agent run the tools that OpenAI
 leaves to the application, such as `local_shell` and `apply_patch`.
 
+`providers::anthropic` has every model kind of the TypeScript
+`@ai-sdk/anthropic` 4.0.85 package: the Messages language model
+(`AnthropicMessagesProtocol`), files, skills, batches and evaluation. Provider
+options are the `anthropic` provider parameter, with the TypeScript option
+names; an unknown option fails with `Error::Validation`. Where TypeScript
+changes a setting with a warning, such as a temperature on a model that takes
+none or disabled thinking on a model that always thinks, the crate makes the
+same change and logs it as a `tracing` debug event with target
+`suprnova_ai::anthropic`. Without an output limit a call asks for the model's
+own limit, 128,000 tokens for current models; set one to cap a reply. An
+`ANTHROPIC_AUTH_TOKEN` in the configuration's `env` goes as a bearer token in
+place of the key, to Anthropic's own API only. `anthropic::tools` builds every
+Anthropic tool version. Build the provider with `with_download_transport` to
+send text file URLs, and pass `anthropic::container_id(&history)` as the next
+call's `container` option to keep a code execution container.
+
 `providers::hosts` has Cerebras, DeepInfra, DeepSeek, Fireworks, Mistral,
 Moonshot AI, Together AI and Z.ai on Chat Completions, xAI and Hugging Face on
 the Responses API, and MiniMax on the Anthropic Messages protocol. Register one with its module's `register`, for
