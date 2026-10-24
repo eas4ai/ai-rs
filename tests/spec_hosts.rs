@@ -5347,3 +5347,208 @@ async fn hst_036_the_final_message_carries_deepseek_metadata() {
     }
     assert_eq!(md["choiceIndex"], 0, "{md}");
 }
+
+// HST-037
+
+use suprnova_ai::providers::operations::{UploadFile, UploadParams};
+
+fn deepseek_provider(transport: Arc<Recorder>) -> Arc<dyn Provider> {
+    registry(host("deepseek"), key_config(), transport)
+        .get_provider("deepseek")
+        .unwrap()
+}
+fn upload(data: &[u8], media_type: &str, filename: Option<&str>) -> UploadFile {
+    UploadFile {
+        data: Bytes::copy_from_slice(data),
+        media_type: media_type.into(),
+        filename: filename.map(str::to_owned),
+    }
+}
+fn upload_params(entry: Option<Value>) -> UploadParams {
+    UploadParams {
+        provider_options: entry
+            .map(|value| [("deepseek".to_owned(), value)].into())
+            .unwrap_or_default(),
+    }
+}
+fn form_text(transport: &Recorder) -> String {
+    String::from_utf8_lossy(&transport.request().body).into_owned()
+}
+fn form_field(name: &str, value: &str) -> String {
+    format!("name=\"{name}\"\r\n\r\n{value}\r\n")
+}
+async fn deepseek_upload(
+    transport: Arc<Recorder>,
+    file: UploadFile,
+    entry: Option<Value>,
+) -> Result<
+    suprnova_ai::providers::operations::Item<suprnova_ai::providers::operations::UploadedFile>,
+    Error,
+> {
+    let provider = deepseek_provider(transport);
+    suprnova_ai::ops::upload_file(
+        provider.as_ref(),
+        file,
+        upload_params(entry),
+        Default::default(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn hst_037_deepseek_uploads_a_file_as_typescript_uploads_it() {
+    let transport = Recorder::new([json_reply(json!({
+        "id": "file-api-xyz789", "object": "file", "bytes": 24, "created_at": 1800000000,
+        "expires_at": 1800003600, "filename": "a.png", "purpose": "user_data"
+    }))]);
+    let uploaded = deepseek_upload(
+        transport.clone(),
+        upload(PNG, "image/png", Some("a.png")),
+        Some(json!({"expiresAfter": 3600})),
+    )
+    .await
+    .unwrap();
+    let request = transport.request();
+    assert_eq!(request.url, "https://api.deepseek.com/files");
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        transport.header("authorization").as_deref(),
+        Some("Bearer sk-test")
+    );
+    let sent = form_text(&transport);
+    assert!(sent.contains(&form_field("purpose", "user_data")), "{sent}");
+    assert!(
+        sent.contains(&form_field("expires_after[anchor]", "created_at")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains(&form_field("expires_after[seconds]", "3600")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("name=\"file\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"),
+        "{sent}"
+    );
+    assert!(request.body.windows(PNG.len()).any(|window| window == PNG));
+    let value = &uploaded.value;
+    assert_eq!(
+        value.provider_reference,
+        [("deepseek".to_owned(), "file-api-xyz789".to_owned())].into()
+    );
+    assert_eq!(value.filename.as_deref(), Some("a.png"));
+    assert_eq!(value.media_type.as_deref(), Some("image/png"));
+    assert_eq!(value.size_bytes, Some(24));
+    assert_eq!(
+        value.created_at.as_deref(),
+        Some("2027-01-15T08:00:00.000Z")
+    );
+    assert_eq!(
+        value.expires_at.as_deref(),
+        Some("2027-01-15T09:00:00.000Z")
+    );
+    assert_eq!(
+        uploaded.provider_metadata.as_ref().unwrap()["deepseek"],
+        json!({"object": "file", "filename": "a.png", "purpose": "user_data", "bytes": 24,
+            "createdAt": 1800000000, "expiresAt": 1800003600})
+    );
+    // Without an expiry option no expiry goes, and what the response lacks
+    // is absent; the given filename stands in for the response's.
+    let transport = Recorder::new([json_reply(json!({"id": "file-2"}))]);
+    let uploaded = deepseek_upload(
+        transport.clone(),
+        upload(PNG, "image/png", Some("b.png")),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!form_text(&transport).contains("expires_after"));
+    let value = &uploaded.value;
+    assert_eq!(value.filename.as_deref(), Some("b.png"));
+    assert_eq!(value.size_bytes, None);
+    assert_eq!(value.created_at, None);
+    assert_eq!(value.expires_at, None);
+    assert_eq!(
+        uploaded.provider_metadata.as_ref().unwrap()["deepseek"],
+        json!({})
+    );
+}
+
+#[tokio::test]
+async fn hst_037_invalid_deepseek_uploads_fail_before_a_request() {
+    let big = vec![0u8; 65 * 1024 * 1024];
+    let long_name = "a".repeat(513);
+    let cases: Vec<(UploadFile, Option<Value>)> = vec![
+        (upload(&big, "image/png", Some("a.png")), None),
+        (upload(PNG, "image/png", Some(&long_name)), None),
+        (upload(PNG, "application/pdf", Some("a.png")), None),
+        (upload(b"%PDF-1.4", "image/jpeg", Some("a.jpg")), None),
+        (
+            upload(b"\x00\x01\x02", "application/octet-stream", Some("a.bin")),
+            None,
+        ),
+        (
+            upload(PNG, "image/png", Some("a.png")),
+            Some(json!({"expiresAfter": 60})),
+        ),
+        (
+            upload(PNG, "image/png", Some("a.png")),
+            Some(json!({"expiresAfter": 3600.5})),
+        ),
+        (upload(PNG, "image/png", Some("a.png")), Some(json!("soon"))),
+    ];
+    for (index, (file, entry)) in cases.into_iter().enumerate() {
+        let transport = Recorder::new([json_reply(json!({"id": "file-1"}))]);
+        let error = deepseek_upload(transport.clone(), file, entry)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Validation(_)),
+            "case {index}: {error:?}"
+        );
+        assert_eq!(transport.count(), 0, "case {index}");
+    }
+    // A generic type passes with a detected image or a known extension, and
+    // a declared type is read before its parameters, in any case.
+    for (index, file) in [
+        upload(PNG, "application/octet-stream", None),
+        upload(b"\x00\x01\x02", "", Some("a.webp")),
+        upload(PNG, "image/*", Some("x")),
+        upload(PNG, "IMAGE/PNG; charset=binary", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let transport = Recorder::new([json_reply(json!({"id": "file-1"}))]);
+        deepseek_upload(transport.clone(), file, None)
+            .await
+            .unwrap_or_else(|error| panic!("case {index}: {error:?}"));
+        assert_eq!(transport.count(), 1, "case {index}");
+    }
+}
+
+#[tokio::test]
+async fn hst_037_deepseek_file_info_download_and_delete_are_unsupported() {
+    let transport = Recorder::new([]);
+    let provider = deepseek_provider(transport.clone());
+    let reference = [("deepseek".to_owned(), "file-1".to_owned())].into();
+    let info = suprnova_ai::ops::file_info(provider.as_ref(), &reference, Default::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(info, Error::UnsupportedOperation(_)), "{info:?}");
+    let download =
+        suprnova_ai::ops::download_file(provider.as_ref(), &reference, Default::default())
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(download, Error::UnsupportedOperation(_)),
+        "{download:?}"
+    );
+    let delete = suprnova_ai::ops::delete_file(provider.as_ref(), &reference, Default::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(delete, Error::UnsupportedOperation(_)),
+        "{delete:?}"
+    );
+    assert_eq!(transport.count(), 0);
+}
