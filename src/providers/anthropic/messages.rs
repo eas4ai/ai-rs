@@ -332,14 +332,22 @@ fn result_file(file: &FilePart, notes: &mut Notes, betas: &mut Vec<String>) -> O
     let image = file.media_type.starts_with("image/");
     let kind = if image { "image" } else { "document" };
     let text = file.data.as_text();
-    if let Some(id) = text.filter(|t| t.starts_with("file_")) {
-        add_betas(betas, ["files-api-2025-04-14"]);
-        return Some(json!({"type": kind, "source": {"type": "file", "file_id": id}}));
+    // A file id or URL names its file by its media type alone; only an
+    // image or a PDF goes there.
+    let named = text.filter(|t| t.starts_with("file_") || media::is_downloadable_url(t));
+    if let Some(named) = named
+        && (image || file.media_type == "application/pdf")
+    {
+        if named.starts_with("file_") {
+            add_betas(betas, ["files-api-2025-04-14"]);
+            return Some(json!({"type": kind, "source": {"type": "file", "file_id": named}}));
+        }
+        return Some(json!({"type": kind, "source": {"type": "url", "url": named}}));
     }
-    if let Some(url) = text.filter(|t| media::is_downloadable_url(t)) {
-        return Some(json!({"type": kind, "source": {"type": "url", "url": url}}));
-    }
-    let media_type = full_media_type(file).ok();
+    let media_type = named
+        .is_none()
+        .then(|| full_media_type(file).ok())
+        .flatten();
     if image && let Some(media_type) = media_type {
         return Some(json!({"type": "image", "source": {
             "type": "base64", "media_type": media_type, "data": base64(&file.data)}}));
