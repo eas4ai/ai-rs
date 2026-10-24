@@ -1,4 +1,4 @@
-use super::{AnthropicMessagesProtocol, errors::API};
+use super::{AnthropicMessagesProtocol, errors::API, protocol};
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     errors::{ProviderError, ProviderErrorKind},
@@ -123,7 +123,12 @@ impl Provider for AnthropicCompatibleProvider {
         Some(self.transport.clone())
     }
     fn is_configured(&self) -> bool {
-        self.api_key().is_some_and(|key| !key.is_empty()) && self.config.is_configured()
+        let token = self
+            .config
+            .env
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .is_some_and(|token| !token.is_empty());
+        (token || self.api_key().is_some_and(|key| !key.is_empty())) && self.config.is_configured()
     }
     fn to_value(&self) -> Result<Value, Error> {
         let mut value = self.config.snapshot()?;
@@ -136,7 +141,7 @@ impl Provider for AnthropicCompatibleProvider {
         Ok(value)
     }
     async fn list_models(&self) -> Result<Vec<String>, Error> {
-        let request = http::request(
+        let mut request = http::request(
             &API,
             &self.config,
             "GET",
@@ -145,6 +150,7 @@ impl Provider for AnthropicCompatibleProvider {
             Default::default(),
             Default::default(),
         )?;
+        protocol::authorize(&protocol::ANTHROPIC, &self.config, &mut request)?;
         let data = http::json(&API, self.transport.as_ref(), request, &self.name, None).await?;
         let models = data.get("data").and_then(Value::as_array).ok_or_else(|| {
             http::response_error(&self.name, "Anthropic model list is missing data")
@@ -172,7 +178,7 @@ impl Provider for AnthropicCompatibleProvider {
             .with_provider(&self.name)
             .into());
         }
-        let request = http::request(
+        let mut request = http::request(
             &API,
             &self.config,
             "GET",
@@ -181,6 +187,7 @@ impl Provider for AnthropicCompatibleProvider {
             Default::default(),
             Default::default(),
         )?;
+        protocol::authorize(&protocol::ANTHROPIC, &self.config, &mut request)?;
         http::json(
             &API,
             self.transport.as_ref(),

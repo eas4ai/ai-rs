@@ -71,6 +71,7 @@ static PROFILE: MessagesProfile = MessagesProfile {
         ..errors::API
     },
     always_reasons: |_| false,
+    auth_token_env: None,
 };
 
 /// The Anthropic tools Vertex AI takes, in the versions it lists.
@@ -503,11 +504,12 @@ fn build(
     if !streaming {
         parts.body.remove("stream");
     }
+    let mut headers = parts.headers(config);
     if let Some(labels) = labels(options)?
         && !has_header(config.headers.keys(), LABELS_HEADER)
-        && !has_header(parts.headers.keys(), LABELS_HEADER)
+        && !has_header(headers.keys(), LABELS_HEADER)
     {
-        parts.headers.insert(LABELS_HEADER.into(), labels);
+        headers.insert(LABELS_HEADER.into(), labels);
     }
     let method = if streaming {
         "streamRawPredict"
@@ -521,7 +523,7 @@ fn build(
         "POST",
         &[&format!("{}:{method}", model.id)],
         Some(Value::Object(parts.body)),
-        parts.headers,
+        headers,
         parts.query,
     )
 }

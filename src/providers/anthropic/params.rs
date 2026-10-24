@@ -5,13 +5,15 @@ use crate::{
     types::tools::{ToolChoice, ToolChoiceMode},
 };
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 #[derive(Default)]
 pub(super) struct RequestParams {
     pub body: Map<String, Value>,
     pub headers: BTreeMap<String, String>,
     pub query: BTreeMap<String, Value>,
     pub extra_body: BTreeMap<String, Value>,
+    /// The betas the request needs, in the order they were added.
+    pub betas: Vec<String>,
 }
 fn unsupported(label: &str, name: &str) -> Error {
     Error::Validation(format!("{label} does not support {name}"))
@@ -89,16 +91,12 @@ fn sampling(
     }
     Ok(())
 }
-pub(super) fn add_betas(headers: &mut BTreeMap<String, String>, betas: &BTreeSet<String>) {
-    if !betas.is_empty()
-        && !headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("anthropic-beta"))
-    {
-        headers.insert(
-            "anthropic-beta".into(),
-            betas.iter().cloned().collect::<Vec<_>>().join(","),
-        );
+/// Add betas the request needs, each once.
+pub(super) fn add_betas<'a>(betas: &mut Vec<String>, more: impl IntoIterator<Item = &'a str>) {
+    for beta in more {
+        if !betas.iter().any(|known| known == beta) {
+            betas.push(beta.to_owned());
+        }
     }
 }
 pub(super) fn translate(
@@ -204,12 +202,8 @@ pub(super) fn translate(
     {
         out.extra_body.insert("context_management".into(),json!({"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":threshold.0}}]}));
         add_betas(
-            &mut out.headers,
-            &[
-                "compact-2026-01-12".into(),
-                "context-management-2025-06-27".into(),
-            ]
-            .into(),
+            &mut out.betas,
+            ["compact-2026-01-12", "context-management-2025-06-27"],
         );
     }
     if let Some(query) = &p.extra_query {

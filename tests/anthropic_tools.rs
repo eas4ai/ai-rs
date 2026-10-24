@@ -87,7 +87,7 @@ async fn all_builtin_tools_and_custom_function_schema() {
     );
 }
 #[tokio::test]
-async fn caller_beta_wins_case_insensitively() {
+async fn caller_betas_join_the_tool_betas_case_insensitively() {
     let params = InferenceRequestParams {
         extra_headers: Some(
             [(
@@ -110,7 +110,11 @@ async fn caller_beta_wins_case_insensitively() {
         },
     )
     .await;
-    assert_eq!(header(&r, "anthropic-beta").as_deref(), Some("custom-beta"));
+    // The betas the tools need, then the caller's, once each (ANT-001).
+    assert_eq!(
+        header(&r, "anthropic-beta").as_deref(),
+        Some("code-execution-web-tools-2026-02-09,custom-beta")
+    );
 }
 #[test]
 fn domain_filters_are_mutually_exclusive_only_when_nonempty() {

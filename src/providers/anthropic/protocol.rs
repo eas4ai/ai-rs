@@ -2,7 +2,7 @@
 pub use super::messages::{file_to_anthropic, messages_to_anthropic, tool_result_to_anthropic};
 use super::{errors, params, tools};
 use crate::{
-    Error, Model, Provider, ProviderProtocol, StreamOptions,
+    Error, Model, Provider, ProviderConfig, ProviderProtocol, StreamOptions,
     providers::{EventStream, http},
     transport::HttpRequest,
     types::Message,
@@ -10,6 +10,7 @@ use crate::{
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AnthropicMessagesProtocol;
@@ -23,12 +24,16 @@ pub(crate) struct MessagesProfile {
     /// Whether a model always reasons, so that it takes a reasoning effort
     /// and disabled reasoning becomes the lowest effort.
     pub always_reasons: fn(&str) -> bool,
+    /// The configuration `env` value that holds a bearer token sent in
+    /// place of the API key, for Anthropic's own API (ANT-001).
+    pub auth_token_env: Option<&'static str>,
 }
 
 pub(crate) static ANTHROPIC: MessagesProfile = MessagesProfile {
     protocol_class_id: "anthropic_messages",
     api: errors::API,
     always_reasons: |_| false,
+    auth_token_env: Some("ANTHROPIC_AUTH_TOKEN"),
 };
 
 /// The Messages protocol for a host, as its profile describes it.
@@ -58,11 +63,81 @@ fn rejects_forced_tool_use(model: &str) -> bool {
 }
 
 /// A Messages request before its URL: the body with `stream: true`, the
-/// headers and the query.
+/// headers, the query and the betas it needs.
 pub(crate) struct MessagesRequest {
     pub body: serde_json::Map<String, Value>,
-    pub headers: std::collections::BTreeMap<String, String>,
-    pub query: std::collections::BTreeMap<String, Value>,
+    pub headers: BTreeMap<String, String>,
+    pub query: BTreeMap<String, Value>,
+    pub betas: Vec<String>,
+}
+
+impl MessagesRequest {
+    /// The request's headers with one `anthropic-beta` header: its betas,
+    /// then those the configuration's and the call's own `anthropic-beta`
+    /// headers name, once each.
+    pub(crate) fn headers(&self, config: &ProviderConfig) -> BTreeMap<String, String> {
+        let named = |headers: &BTreeMap<String, String>| {
+            headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                .flat_map(|(_, value)| value.split(','))
+                .map(|beta| beta.trim().to_ascii_lowercase())
+                .filter(|beta| !beta.is_empty())
+                .collect::<Vec<_>>()
+        };
+        let mut betas = self.betas.clone();
+        let user = [named(&config.headers), named(&self.headers)].concat();
+        params::add_betas(&mut betas, user.iter().map(String::as_str));
+        let mut headers: BTreeMap<String, String> = self
+            .headers
+            .iter()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        if !betas.is_empty() {
+            headers.insert("anthropic-beta".into(), betas.join(","));
+        }
+        headers
+    }
+}
+
+/// Send the profile's bearer token, when the configuration holds one, in
+/// place of the API key; with an API key value too it fails.
+pub(crate) fn authorize(
+    profile: &MessagesProfile,
+    config: &ProviderConfig,
+    request: &mut HttpRequest,
+) -> Result<(), Error> {
+    let Some(token) = profile
+        .auth_token_env
+        .and_then(|env| config.env.get(env))
+        .filter(|token| !token.is_empty())
+    else {
+        return Ok(());
+    };
+    if config
+        .api_key_value
+        .as_deref()
+        .is_some_and(|key| !key.is_empty())
+    {
+        return Err(Error::Configuration(format!(
+            "{} takes an API key or an auth token, not both",
+            profile.api.label
+        )));
+    }
+    request
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
+    if !request
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+    {
+        request
+            .headers
+            .push(("authorization".into(), format!("Bearer {token}")));
+    }
+    Ok(())
 }
 
 pub(crate) fn request_parts(
@@ -106,7 +181,7 @@ pub(crate) fn request_parts(
     if !wire_tools.is_empty() {
         params.body.insert("tools".into(), json!(wire_tools));
     }
-    params::add_betas(&mut params.headers, &betas);
+    params::add_betas(&mut params.betas, betas.iter().map(String::as_str));
     if let (SchemaMode::OutputFormat, Some(schema)) = (schema_mode, &options.output_schema) {
         let format =
             json!({"type":"json_schema","schema":super::schema::transform(schema.as_value(),0)?});
@@ -119,6 +194,7 @@ pub(crate) fn request_parts(
         body: params.body,
         headers: params.headers,
         query: params.query,
+        betas: params.betas,
     })
 }
 
@@ -136,15 +212,18 @@ fn build_request(
         options,
         SchemaMode::OutputFormat,
     )?;
-    http::request(
+    let headers = parts.headers(provider.config());
+    let mut request = http::request(
         &profile.api,
         provider.config(),
         "POST",
         &["v1", "messages"],
         Some(Value::Object(parts.body)),
-        parts.headers,
+        headers,
         parts.query,
-    )
+    )?;
+    authorize(profile, provider.config(), &mut request)?;
+    Ok(request)
 }
 
 fn start(
