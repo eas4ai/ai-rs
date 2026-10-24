@@ -2,7 +2,9 @@
 //! low, medium and high, so `minimal` goes out as `low` and `xhigh` and `max`
 //! as `high`. The `fireworks` provider options entry takes `promptCacheKey`,
 //! `serviceTier`, `thinking` and `reasoningHistory`, sent under Fireworks'
-//! names, and any other Fireworks field as it is.
+//! names, and any other Fireworks field as it is. Its models also complete
+//! text (`completion_protocol`), embed, and generate images, polling the
+//! Kontext models' jobs.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,

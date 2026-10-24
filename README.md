@@ -158,6 +158,18 @@ with `hosts::moonshotai::register_with_downloads` to send image and video URLs.
 xAI is ported for text: its built-in tools fail with
 `Error::UnsupportedOperation`, and its `store` setting is the provider
 parameter `xai` (`{"store": false}`).
+Together AI, DeepInfra and Fireworks are ported whole. A chat call reads the
+host's entry (`togetherai`, `deepinfra` or `fireworks`) as the TypeScript
+compatible model does: `user`, `reasoningEffort`, `textVerbosity` and
+`strictJsonSchema`, with any other key, such as `repetition_penalty`, sent in
+the body; Fireworks also takes `promptCacheKey`, `serviceTier`, `thinking` and
+`reasoningHistory`. Set `togetherai::completion_protocol()` (or DeepInfra's or
+Fireworks') with `Model::with_protocol` for a completion model. `ops::embed`
+and `ops::generate_image` work with any of their models, and `ops::rerank`
+with Together AI's. Image calls make one image each and return the TypeScript
+warnings in `Item.warnings`; DeepInfra fetches input image URLs, and Fireworks
+a Kontext result on another server, through the provider's download
+transport (`with_download_transport`).
 Hosts do not support `list_models` or `probe`.
 
 `providers::google` is the Gemini API and `providers::google_vertex` is Vertex

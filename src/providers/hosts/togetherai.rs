@@ -1,6 +1,9 @@
 //! Together AI over Chat Completions. Only `deepseek-ai/DeepSeek-V4-Flash-0731`
 //! takes an output schema as a JSON schema; other models get JSON mode, which
 //! does not enforce the schema.
+//!
+//! Its models also complete text (`completion_protocol`), embed, generate
+//! images and rerank documents.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
