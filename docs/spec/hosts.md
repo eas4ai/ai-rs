@@ -518,19 +518,20 @@ the size as strings, and the `fireworks` entry as given, to
 (`accounts/fireworks/models/flux-kontext-pro` and `flux-kontext-max`), and
 to `<base>/workflows/<model>/text_to_image` for every other model, and
 return the response bytes as the image. For the two Kontext models it MUST
-read `request_id`, then `POST <base>/workflows/<model>/get_result` with
-`{"id"}` every 500 ms until `status` is `Ready`, when it MUST download
-`result.sample` with the key only from the base URL's origin and through the
-download transport without it from another, failing with
-`Error::Validation` when there is none; `Error` or `Failed`, or 120 s
-without `Ready`, MUST fail the call. A size on a model that is not a size
+fail with `Error::Validation` before any request when the provider has no
+download transport; with one, it MUST read `request_id`, then `POST
+<base>/workflows/<model>/get_result` with `{"id"}` every 500 ms until
+`status` is `Ready`, when it MUST download `result.sample` with the key only
+from the base URL's origin and through the download transport without it
+from another; `Error` or `Failed`, or 120 s without `Ready`, MUST fail the
+call. A size on a model that is not a size
 model, an aspect ratio on a size model, input images after the first and a
 mask MUST be warned and left out. The entry's `output_format` other than
 `jpeg` or `png`, or a `safety_tolerance` outside 0 to 6, MUST fail with
 `Error::Validation` before any request.
-Falsifier: A recorded call for a size model, for `accounts/fireworks/models/flux-1-dev-fp8` and for `accounts/fireworks/models/flux-kontext-pro` goes to another URL or sends another body; the Kontext call does not poll `get_result` until `Ready`, downloads the sample from another origin with the key or from the base origin without it, downloads one from another origin without a download transport, or does not fail on `Failed` or after 120 s; a stated warning is missing or its setting is sent; or an invalid entry sends a request.
+Falsifier: A recorded call for a size model, for `accounts/fireworks/models/flux-1-dev-fp8` and for `accounts/fireworks/models/flux-kontext-pro` goes to another URL or sends another body; the Kontext call does not poll `get_result` until `Ready`, downloads the sample from another origin with the key or from the base origin without it, sends a request when the provider has no download transport, or does not fail on `Failed` or after 120 s; a stated warning is missing or its setting is sent; or an invalid entry sends a request.
 Mechanism: hosts
-Rationale: `fireworks-image-model.ts`, whose `getFromApi` sends the headers only to the credentialed origin; the crate fetches other origins through the download transport, as GGL-019 does for Veo videos.
+Rationale: `fireworks-image-model.ts`, whose `getFromApi` sends the headers only to the credentialed origin and whose sample "typically points at a CDN"; the crate fetches other origins through the download transport, as GGL-019 does for Veo videos, and checks for one before a job is started and billed.
 Status: Agreed 2026-10-24
 
 [HST-032] Together AI reranking MUST send `POST <base>/rerank` with

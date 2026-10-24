@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: compatible-hosts-whole
+Current: fireworks-kontext-downloads
 
 ## rename-to-suprnova-ai
 
@@ -314,6 +314,23 @@ calls run only on Together AI's free models
 kind is checked with recorded requests only. This is the first of four
 commitments that port the remaining hosts whole; DeepSeek and MiniMax,
 Mistral, and xAI follow.
+
+Done when the hosts, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## fireworks-kontext-downloads
+
+Requirements: HST-031, PKG-002, PKG-006
+
+Fail a Fireworks Kontext image call (`flux-kontext-pro` and
+`flux-kontext-max`) with `Error::Validation` before any request when the
+provider has no download transport, so no job is started and billed whose
+sample the crate cannot fetch (`src/providers/hosts/images.rs`). Add the
+test to the HST-031 tests in `tests/spec_hosts.rs`, change any existing
+Kontext test that runs without a download transport, and say in the
+Fireworks module doc and `docs/PORT.md` that Kontext needs one. No live
+calls: Kontext is paid, so the check uses recorded requests only.
 
 Done when the hosts, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
