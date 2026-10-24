@@ -1,14 +1,17 @@
 //! The model kinds a host serves beside chat, on the protocol its provider
 //! gives every model: Together AI's, DeepInfra's and Fireworks' embeddings
 //! on the compatible embedding protocol (HST-028) and their image models
-//! (HST-029 to HST-031).
-use super::{Models, images};
+//! (HST-029 to HST-031), and Together AI's reranking (HST-032).
+use super::{Models, images, rerank};
 use crate::{
     Error, Model, Provider, ProviderProtocol, StreamOptions,
     providers::{
         EventStream,
         openai::{OpenAIEmbeddingProtocol, protocol::HostChatProtocol},
-        operations::{CallLimits, EmbedParams, ImageParams, ImagePrompt, Item},
+        operations::{
+            CallLimits, Documents, EmbedParams, ImageParams, ImagePrompt, Item, RankedDocument,
+            RerankParams,
+        },
     },
     types::{Message, messages::FilePart},
 };
@@ -89,6 +92,19 @@ impl ProviderProtocol for HostModels {
             provider,
         )
         .await
+    }
+    async fn rerank(
+        &self,
+        model: &Model,
+        documents: Documents,
+        query: String,
+        params: RerankParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<RankedDocument>>, Error> {
+        if !self.models.reranking {
+            return Err(Error::UnsupportedOperation("rerank".into()));
+        }
+        rerank::together(&self.chat.0.api, model, documents, query, params, provider).await
     }
     /// Each host's image model makes one image per call.
     fn image_limits(&self, _model: &Model) -> CallLimits {
