@@ -3338,3 +3338,140 @@ async fn hst_022_and_hst_024_send_every_text_part() {
         "{body}"
     );
 }
+
+// HST-026 to HST-032: Together AI, DeepInfra and Fireworks, whole.
+
+const COMPATIBLE_HOSTS: [&str; 3] = ["togetherai", "deepinfra", "fireworks"];
+
+/// A call with these provider entries and a core temperature of 0.7.
+fn entries(entries: &[(&str, Value)]) -> StreamOptions {
+    let mut options = temperature(0.7);
+    let params = options.params.take().unwrap_or_default();
+    options.params = Some(entries.iter().fold(params, |p, (key, value)| {
+        p.with_provider_param(*key, value.clone())
+    }));
+    options
+}
+
+// HST-026
+
+#[tokio::test]
+async fn hst_026_each_host_reads_its_entry() {
+    for name in COMPATIBLE_HOSTS {
+        let entry = json!({"user": "u", "reasoningEffort": "low", "textVerbosity": "low",
+            "repetition_penalty": 1.1, "temperature": 0.3, "messages": []});
+        let body = host_body(
+            name,
+            "some-model",
+            vec![user_message("hello")],
+            entries(&[(name, entry)]),
+        )
+        .await;
+        assert_eq!(body["user"], "u", "{name}: {body}");
+        assert_eq!(body["reasoning_effort"], "low", "{name}: {body}");
+        assert_eq!(body["verbosity"], "low", "{name}: {body}");
+        assert_eq!(body["repetition_penalty"], 1.1, "{name}: {body}");
+        assert_eq!(body["temperature"], 0.3, "{name}: {body}");
+        assert_eq!(body["messages"][0]["content"], "hello", "{name}: {body}");
+        for key in ["reasoningEffort", "textVerbosity"] {
+            assert!(body.get(key).is_none(), "{name}: {key} in {body}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn hst_026_the_hosts_entry_wins_over_openai_compatible_and_sets_strict() {
+    let body = host_body(
+        "togetherai",
+        "some-model",
+        vec![user_message("hello")],
+        entries(&[(
+            "openaiCompatible",
+            json!({"user": "v", "textVerbosity": "high"}),
+        )]),
+    )
+    .await;
+    assert_eq!(body["user"], "v", "{body}");
+    assert_eq!(body["verbosity"], "high", "{body}");
+    let body = host_body(
+        "togetherai",
+        "some-model",
+        vec![user_message("hello")],
+        entries(&[
+            ("openaiCompatible", json!({"user": "v"})),
+            ("togetherai", json!({"user": "h"})),
+        ]),
+    )
+    .await;
+    assert_eq!(body["user"], "h", "{body}");
+    let mut options =
+        entries(&[("deepinfra", json!({"strictJsonSchema": false}))]).with_output::<Answer>();
+    options.output_type_name = Some("answer".into());
+    let body = host_body(
+        "deepinfra",
+        "some-model",
+        vec![user_message("hello")],
+        options,
+    )
+    .await;
+    assert_eq!(
+        body["response_format"]["json_schema"]["strict"], false,
+        "{body}"
+    );
+    assert!(body.get("strictJsonSchema").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn hst_026_fireworks_renames_its_options() {
+    let entry = json!({"promptCacheKey": "k", "serviceTier": "priority",
+        "thinking": {"type": "enabled", "budgetTokens": 2048},
+        "reasoningHistory": "preserved", "reasoningEffort": "xhigh"});
+    let body = host_body(
+        "fireworks",
+        "some-model",
+        vec![user_message("hello")],
+        entries(&[("fireworks", entry)]),
+    )
+    .await;
+    assert_eq!(body["prompt_cache_key"], "k", "{body}");
+    assert_eq!(body["service_tier"], "priority", "{body}");
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 2048}),
+        "{body}"
+    );
+    assert_eq!(body["reasoning_history"], "preserved", "{body}");
+    assert_eq!(body["reasoning_effort"], "high", "{body}");
+    for key in [
+        "promptCacheKey",
+        "serviceTier",
+        "reasoningHistory",
+        "reasoningEffort",
+    ] {
+        assert!(body.get(key).is_none(), "{key} in {body}");
+    }
+}
+
+#[tokio::test]
+async fn hst_026_invalid_entries_fail_before_a_request() {
+    for (name, entry) in [
+        ("togetherai", json!("fast")),
+        ("deepinfra", json!({"user": 7})),
+        ("fireworks", json!({"serviceTier": "flex"})),
+        ("fireworks", json!({"thinking": {"type": "auto"}})),
+        ("fireworks", json!({"thinking": {"budgetTokens": 512}})),
+        ("fireworks", json!({"reasoningHistory": "full"})),
+    ] {
+        let error = rejected(
+            name,
+            "some-model",
+            vec![user_message("hello")],
+            entries(&[(name, entry.clone())]),
+        )
+        .await;
+        assert!(
+            matches!(error, Error::Validation(_)),
+            "{name} {entry}: {error:?}"
+        );
+    }
+}
