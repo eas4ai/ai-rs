@@ -81,11 +81,16 @@ impl ProviderProtocol for HostModels {
         let Some(kind) = self.models.images else {
             return Err(Error::UnsupportedOperation("generate_image".into()));
         };
-        let downloads = self.chat.1.as_deref();
+        // A models.dev provider holds its download transport itself.
+        let downloads = self
+            .chat
+            .1
+            .clone()
+            .or_else(|| provider.download_transport());
         images::generate(
             kind,
             &self.chat.0.api,
-            downloads,
+            downloads.as_deref(),
             model,
             prompt,
             params,

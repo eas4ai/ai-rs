@@ -94,24 +94,33 @@ fn host_for(metadata: &ModelsDevProvider) -> Option<&'static Host> {
         .or_else(|| HOSTS.iter().find(|host| host.name == metadata.id))
         .copied()
 }
+/// The Chat Completions host profile of a provider's default protocol: a
+/// provider of this module, or one built from the host's models.dev
+/// metadata.
+fn chat_host_of(provider: &dyn Provider) -> Option<&'static ChatProfile> {
+    let protocol = provider.default_protocol()?;
+    let class = protocol.protocol_class_id();
+    HOSTS.iter().find_map(|host| match host.protocol {
+        HostProtocol::Chat(profile) if profile.protocol_class_id == class => Some(profile),
+        _ => None,
+    })
+}
 /// The error rules of the Chat Completions host a provider is, for the
 /// completion and embedding calls it makes on the compatible protocols
 /// (HST-027, HST-028).
 pub(crate) fn chat_api(provider: &dyn Provider) -> Option<&'static ApiProfile> {
-    HOSTS
-        .iter()
-        .find(|host| host.name == provider.provider_class_id())
-        .and_then(|host| match host.protocol {
-            HostProtocol::Chat(profile) => Some(&profile.api),
-            HostProtocol::Responses(_) | HostProtocol::Messages(_) => None,
-        })
+    chat_host_of(provider).map(|profile| &profile.api)
 }
-/// The Chat Completions profile of the host that models.dev metadata names.
-pub(crate) fn chat_profile_for(metadata: &ModelsDevProvider) -> Option<&'static ChatProfile> {
-    match host_for(metadata)?.protocol {
-        HostProtocol::Chat(profile) => Some(profile),
-        HostProtocol::Responses(_) | HostProtocol::Messages(_) => None,
-    }
+/// The name of the options entry of the host a provider is, which its
+/// completion and embedding calls read too (HST-027, HST-028).
+pub(crate) fn entry_key(provider: &dyn Provider) -> Option<&'static str> {
+    chat_host_of(provider)?.host_options.key()
+}
+/// The protocol of the Chat Completions host that models.dev metadata
+/// names, with the other model kinds the host serves.
+pub(crate) fn chat_protocol_for(metadata: &ModelsDevProvider) -> Option<Arc<dyn ProviderProtocol>> {
+    let host = host_for(metadata)?;
+    matches!(host.protocol, HostProtocol::Chat(_)).then(|| host.protocol(None))
 }
 /// The Responses profile of the host that models.dev metadata names.
 pub(crate) fn responses_profile_for(

@@ -4541,3 +4541,39 @@ async fn hst_027_a_models_dev_provider_for_a_host_keeps_its_completion_rules() {
     };
     assert_eq!(error.kind, ProviderErrorKind::ServiceUnavailable);
 }
+
+#[tokio::test]
+async fn hst_030_a_models_dev_provider_lends_its_download_transport_to_images() {
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let downloads = Arc::new(Downloads::default());
+    let metadata: ModelsDevProvider = serde_json::from_value(json!({"id": "deepinfra",
+        "npm": "@ai-sdk/deepinfra", "api": "https://api.deepinfra.com/v1/openai", "env": []}))
+    .unwrap();
+    let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+        &metadata,
+        key_config(),
+        transport.clone(),
+    )
+    .unwrap()
+    .with_download_transport(downloads.clone());
+    suprnova_ai::ops::generate_image(
+        &Model::new("black-forest-labs/FLUX.1-Kontext-dev", Arc::new(provider)),
+        prompt(
+            "a cat",
+            vec![MediaInput::Url("https://img.test/a.png".into())],
+            None,
+        ),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *downloads.urls.lock().unwrap(),
+        vec!["https://img.test/a.png".to_owned()]
+    );
+    assert_eq!(
+        transport.request().url,
+        "https://api.deepinfra.com/v1/openai/images/edits"
+    );
+}

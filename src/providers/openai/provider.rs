@@ -69,7 +69,8 @@ impl OpenAICompatibleProvider {
     /// Responses when it names OpenAI's own adapter package,
     /// `@ai-sdk/openai`, and Chat Completions otherwise; metadata that names
     /// a Chat Completions host, by package or id, gets that host's request
-    /// and response rules.
+    /// and response rules and the other model kinds it serves, such as
+    /// Together AI's embeddings, images and reranking.
     pub fn from_modelsdev_provider(
         metadata: &ModelsDevProvider,
         mut config: ProviderConfig,
@@ -103,8 +104,8 @@ impl OpenAICompatibleProvider {
                 Arc::new(HostResponsesProtocol(profile))
             } else if metadata.npm.as_deref() == Some("@ai-sdk/openai") {
                 Arc::new(OpenAIResponsesProtocol)
-            } else if let Some(profile) = hosts::chat_profile_for(metadata) {
-                Arc::new(HostChatProtocol(profile, None))
+            } else if let Some(protocol) = hosts::chat_protocol_for(metadata) {
+                protocol
             } else {
                 // A server that only speaks OpenAI's wire format gets the
                 // OpenAI-compatible rules, not OpenAI's own.

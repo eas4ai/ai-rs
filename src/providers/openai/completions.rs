@@ -153,13 +153,22 @@ fn camel_case(name: &str) -> String {
 /// server.
 fn provider_options(
     protocol: OpenAICompletionsProtocol,
-    provider: &str,
+    provider: &dyn Provider,
     p: &InferenceRequestParams,
 ) -> Result<Map<String, Value>, Error> {
-    let keys = match protocol.compatible {
-        Some(_) => vec![provider.to_owned(), camel_case(provider)],
+    let name = provider.name();
+    let mut keys = match protocol.compatible {
+        Some(_) => vec![name.to_owned(), camel_case(name)],
         None => vec!["openai".to_owned()],
     };
+    // A host's own entry, whatever the provider is named (HST-027).
+    if let Some(key) = protocol
+        .compatible
+        .and_then(|_| crate::providers::hosts::entry_key(provider))
+        .filter(|key| !keys.iter().any(|k| k == key))
+    {
+        keys.push(key.to_owned());
+    }
     let mut options = Map::new();
     for key in keys {
         match p
@@ -313,7 +322,7 @@ fn request(
     }
     let p = options.params.clone().unwrap_or_default();
     check_params(&p)?;
-    let mut provider_options = provider_options(protocol, provider.name(), &p)?;
+    let mut provider_options = provider_options(protocol, provider, &p)?;
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
     body.insert("prompt".into(), json!(prompt(&messages)?));
