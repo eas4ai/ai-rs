@@ -3684,3 +3684,184 @@ async fn hst_028_a_host_takes_2048_values_per_call() {
     sizes.sort_unstable();
     assert_eq!(sizes, vec![1, 2048]);
 }
+
+// HST-029 to HST-031: images.
+
+use suprnova_ai::providers::operations::{ImageParams, ImagePrompt, MediaInput, Warning};
+
+/// The start of a PNG file, which media type detection reads.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0";
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+fn json_reply(value: Value) -> (u16, Vec<u8>) {
+    (200, value.to_string().into_bytes())
+}
+fn image_params(
+    size: Option<&str>,
+    aspect_ratio: Option<&str>,
+    seed: Option<i64>,
+    entry: Option<(&str, Value)>,
+) -> ImageParams {
+    ImageParams {
+        n: 1,
+        size: size.map(str::to_owned),
+        aspect_ratio: aspect_ratio.map(str::to_owned),
+        seed,
+        provider_options: entry
+            .map(|(key, value)| [(key.to_owned(), value)].into())
+            .unwrap_or_default(),
+    }
+}
+fn prompt(text: &str, images: Vec<MediaInput>, mask: Option<MediaInput>) -> ImagePrompt {
+    ImagePrompt {
+        text: Some(text.into()),
+        images,
+        mask,
+    }
+}
+fn warned(warnings: &[Warning], kind: &str, feature: Option<&str>) -> bool {
+    warnings
+        .iter()
+        .any(|w| w.kind == kind && w.feature.as_deref() == feature)
+}
+async fn image(
+    name: &str,
+    model_id: &str,
+    transport: Arc<Recorder>,
+    prompt: ImagePrompt,
+    params: ImageParams,
+) -> Result<suprnova_ai::providers::operations::Item<Vec<FilePart>>, Error> {
+    suprnova_ai::ops::generate_image(
+        &model(name, model_id, transport),
+        prompt,
+        params,
+        Default::default(),
+    )
+    .await
+}
+fn png_bytes(file: &FilePart) -> &[u8] {
+    match &file.data {
+        suprnova_ai::types::messages::FileData::Bytes(bytes) => bytes,
+        other => panic!("{other:?}"),
+    }
+}
+
+// HST-029
+
+#[tokio::test]
+async fn hst_029_together_sends_the_generation_typescript_sends() {
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let item = image(
+        "togetherai",
+        "black-forest-labs/FLUX.1-kontext-pro",
+        transport.clone(),
+        prompt("a cat", vec![MediaInput::Bytes(PNG.to_vec())], None),
+        image_params(
+            Some("1024x768"),
+            None,
+            Some(7),
+            Some(("togetherai", json!({"steps": 4}))),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        "https://api.together.xyz/v1/images/generations"
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"model": "black-forest-labs/FLUX.1-kontext-pro", "prompt": "a cat", "seed": 7,
+            "width": 1024, "height": 768, "image_url": format!("data:image/png;base64,{}", b64(PNG)),
+            "response_format": "base64", "steps": 4})
+    );
+    assert_eq!(item.value.len(), 1);
+    assert_eq!(png_bytes(&item.value[0]), PNG);
+    assert_eq!(item.value[0].media_type, "image/png");
+    assert!(item.warnings.is_empty(), "{:?}", item.warnings);
+}
+
+#[tokio::test]
+async fn hst_029_gemini_3_pro_image_takes_no_seed_or_diffusion_options() {
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let entry = json!({"steps": 4, "guidance": 3, "negative_prompt": "x",
+        "disable_safety_checker": true, "other": 1});
+    let item = image(
+        "togetherai",
+        "google/gemini-3-pro-image",
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, Some(7), Some(("togetherai", entry))),
+    )
+    .await
+    .unwrap();
+    let body = transport.body();
+    for key in [
+        "seed",
+        "steps",
+        "guidance",
+        "negative_prompt",
+        "disable_safety_checker",
+    ] {
+        assert!(body.get(key).is_none(), "{key} in {body}");
+    }
+    assert_eq!(body["other"], 1, "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("seed")),
+        "{:?}",
+        item.warnings
+    );
+}
+
+#[tokio::test]
+async fn hst_029_an_aspect_ratio_and_extra_images_are_warned_and_left_out() {
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let item = image(
+        "togetherai",
+        "black-forest-labs/FLUX.1-kontext-pro",
+        transport.clone(),
+        prompt(
+            "a cat",
+            vec![
+                MediaInput::Url("https://img.test/a.png".into()),
+                MediaInput::Url("https://img.test/b.png".into()),
+            ],
+            None,
+        ),
+        image_params(None, Some("16:9"), None, None),
+    )
+    .await
+    .unwrap();
+    let body = transport.body();
+    assert!(body.get("aspect_ratio").is_none(), "{body}");
+    assert_eq!(body["image_url"], "https://img.test/a.png", "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("aspectRatio")),
+        "{:?}",
+        item.warnings
+    );
+    assert!(warned(&item.warnings, "other", None), "{:?}", item.warnings);
+}
+
+#[tokio::test]
+async fn hst_029_a_mask_fails_before_a_request() {
+    let transport = Recorder::new([]);
+    let error = image(
+        "togetherai",
+        "black-forest-labs/FLUX.1-kontext-pro",
+        transport.clone(),
+        prompt(
+            "a cat",
+            vec![MediaInput::Bytes(PNG.to_vec())],
+            Some(MediaInput::Bytes(PNG.to_vec())),
+        ),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+}
