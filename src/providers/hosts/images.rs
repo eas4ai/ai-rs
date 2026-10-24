@@ -686,7 +686,7 @@ async fn fireworks(
             Default::default(),
         )
     };
-    let bytes = if kontext {
+    let (bytes, declared) = if kontext {
         let submitted = http::json(
             api,
             transport,
@@ -751,21 +751,42 @@ async fn fireworks(
         };
         download_sample(api, downloads, &sample, provider, id).await?
     } else {
-        let response = http::send(
+        let request = http::request(
             api,
-            transport,
-            post(&url_path, body)?,
-            provider.name(),
-            Some(id),
-        )
-        .await?;
-        let (_, bytes) =
+            config,
+            "POST",
+            &url_path,
+            Some(body),
+            any_type(),
+            Default::default(),
+        )?;
+        let response = http::send(api, transport, request, provider.name(), Some(id)).await?;
+        let (headers, bytes) =
             http::read_body_with_limit(api, provider.name(), response, DEFAULT_MAX_BYTES).await?;
-        bytes.to_vec()
+        (bytes.to_vec(), content_type(&headers))
     };
-    let mut item = Item::new(vec![image(provider, bytes)?]);
+    // The bytes must be an image, by their content or the type the response
+    // declares; a JSON body is not one.
+    let media_type = media::detect_image_media_type(bytes.as_slice())
+        .map(str::to_owned)
+        .or(declared.filter(|declared| declared.starts_with("image/")))
+        .ok_or_else(|| {
+            http::response_error(
+                provider.name(),
+                "Fireworks image response holds no image it can read",
+            )
+        })?;
+    let file = FilePart::from_bytes(bytes, Some(&media_type), None)
+        .map_err(|e| http::response_error(provider.name(), format!("image response: {e}")))?;
+    let mut item = Item::new(vec![file]);
     item.warnings = warnings;
     Ok(item)
+}
+
+/// The headers of a request whose answer is image bytes: any media type, as
+/// TypeScript's fetch asks, not the JSON the other requests ask for.
+fn any_type() -> std::collections::BTreeMap<String, String> {
+    [("accept".to_owned(), "*/*".to_owned())].into()
 }
 
 /// Download a Kontext job's sample: with the key from the base URL's
@@ -776,7 +797,7 @@ async fn download_sample(
     sample: &str,
     provider: &dyn Provider,
     model_id: &str,
-) -> Result<Vec<u8>, Error> {
+) -> Result<(Vec<u8>, Option<String>), Error> {
     let config = provider.config();
     let origin = |url: &str| url::Url::parse(url).ok().map(|url| url.origin());
     let sample_origin = origin(sample)
@@ -792,7 +813,7 @@ async fn download_sample(
             "GET",
             &[],
             None,
-            Default::default(),
+            any_type(),
             Default::default(),
         )?;
         let response = http::send(
@@ -803,9 +824,9 @@ async fn download_sample(
             Some(model_id),
         )
         .await?;
-        let (_, bytes) =
+        let (headers, bytes) =
             http::read_body_with_limit(api, provider.name(), response, DEFAULT_MAX_BYTES).await?;
-        return Ok(bytes.to_vec());
+        return Ok((bytes.to_vec(), content_type(&headers)));
     }
     let downloads = downloads.ok_or_else(|| {
         invalid(format!(
@@ -813,7 +834,7 @@ async fn download_sample(
              provider with with_download_transport to fetch it without the key"
         ))
     })?;
-    let (bytes, _) = files::download(downloads, sample, DEFAULT_MAX_BYTES)
+    let (bytes, media_type) = files::download(downloads, sample, DEFAULT_MAX_BYTES)
         .await
         .map_err(|e| {
             http::response_error(
@@ -821,5 +842,20 @@ async fn download_sample(
                 format!("could not fetch the Fireworks sample: {e}"),
             )
         })?;
-    Ok(bytes.to_vec())
+    Ok((bytes.to_vec(), media_type))
+}
+
+/// A response's `content-type`, without its parameters.
+fn content_type(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        })
 }
