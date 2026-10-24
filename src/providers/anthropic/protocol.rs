@@ -347,6 +347,7 @@ pub(crate) fn request_parts(
     add_betas(&mut betas, converted.betas.iter().map(String::as_str));
 
     // The core reasoning maps to thinking and effort the options do not set.
+    let thinking_option = o.thinking.is_some();
     if o.effort.is_none() {
         let (thinking, effort) = if (profile.always_reasons)(model) {
             always_reasoning(&core.reasoning)
@@ -370,11 +371,24 @@ pub(crate) fn request_parts(
         };
         let reasoning_off = core.reasoning == Reasoning::Disabled;
         match o.thinking.as_mut() {
+            // The display of a thinking option takes precedence (ANT-002);
+            // the display of mapped thinking is the summary's.
+            Some(t) if t.kind == Some(ThinkingType::Adaptive) => {
+                if !thinking_option || t.display.is_none() {
+                    t.display = Some(display);
+                }
+            }
             Some(t)
-                if t.kind == Some(ThinkingType::Adaptive)
-                    && (t.display.is_none() || core.reasoning != Reasoning::Default) =>
+                if !reasoning_off
+                    && matches!(
+                        t.kind,
+                        Some(ThinkingType::Enabled | ThinkingType::BetweenTools)
+                    ) =>
             {
-                t.display = Some(display);
+                notes.note(
+                    "reasoning summary",
+                    "only adaptive thinking takes a display; the summary is left out",
+                );
             }
             None if !reasoning_off && caps.adaptive_thinking => {
                 o.thinking = Some(Thinking {
