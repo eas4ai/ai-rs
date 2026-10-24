@@ -29,11 +29,22 @@ pub(crate) struct MessagesProfile {
     pub auth_token_env: Option<&'static str>,
 }
 
-pub(crate) static ANTHROPIC: MessagesProfile = MessagesProfile {
+const ANTHROPIC_RULES: MessagesProfile = MessagesProfile {
     protocol_class_id: "anthropic_messages",
     api: errors::API,
     always_reasons: |_| false,
+    auth_token_env: None,
+};
+
+/// The Messages API of any server, as `AnthropicMessagesProtocol` speaks it:
+/// no Anthropic token, whatever the configuration's `env` holds.
+pub(crate) static ANTHROPIC: MessagesProfile = ANTHROPIC_RULES;
+
+/// Anthropic's own Messages API, for the provider of Anthropic's API only:
+/// an `ANTHROPIC_AUTH_TOKEN` in `env` goes as a bearer token (ANT-001).
+pub(crate) static ANTHROPIC_OWN: MessagesProfile = MessagesProfile {
     auth_token_env: Some("ANTHROPIC_AUTH_TOKEN"),
+    ..ANTHROPIC_RULES
 };
 
 /// The Messages protocol for a host, as its profile describes it.
