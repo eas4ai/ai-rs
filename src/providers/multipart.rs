@@ -33,6 +33,8 @@ impl Multipart {
             format!("Content-Disposition: form-data; {disposition}\r\n").as_bytes(),
         );
         if let Some(media_type) = media_type {
+            // A line break in the media type would start another header.
+            let media_type = media_type.replace(|c: char| c.is_control(), " ");
             self.body
                 .extend_from_slice(format!("Content-Type: {media_type}\r\n").as_bytes());
         }

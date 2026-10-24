@@ -4033,6 +4033,24 @@ fn openai_reference() -> std::collections::BTreeMap<String, String> {
 }
 
 #[tokio::test]
+async fn oai_021_a_media_type_adds_no_header_to_its_part() {
+    use suprnova_ai::providers::operations::{UploadFile, UploadParams};
+    let transport = Recorder::new([json_reply(file_object())]);
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let file = UploadFile {
+        data: Bytes::from_static(b"%PDF"),
+        media_type: "application/pdf\r\nX-Injected: 1".into(),
+        filename: Some("r.pdf".into()),
+    };
+    suprnova_ai::ops::upload_file(&provider, file, UploadParams::default(), Default::default())
+        .await
+        .unwrap();
+    let sent = form(&transport, 0);
+    assert!(!sent.contains("\r\nX-Injected"), "{sent:?}");
+    assert!(!sent.contains("\nX-Injected"), "{sent:?}");
+}
+
+#[tokio::test]
 async fn oai_021_files_are_uploaded_read_downloaded_and_deleted() {
     use suprnova_ai::providers::operations::{UploadFile, UploadParams};
     let transport = Recorder::new([
