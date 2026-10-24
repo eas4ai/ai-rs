@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Error, Model, Provider,
     errors::{ProviderError, ProviderErrorKind},
-    models::files::{self, DEFAULT_MAX_BYTES},
+    models::files,
     providers::{
         http::{self, ApiProfile, Auth},
         operations::{
@@ -46,6 +46,9 @@ static MINIMAX_API: ApiProfile = ApiProfile {
     config_headers: &[],
 };
 
+/// The most a finished video may hold, the limit Google's videos get too
+/// (GGL-032); TypeScript's core reads a result URL without one.
+const VIDEO_MAX_BYTES: usize = 256 * 1024 * 1024;
 const RESOLUTIONS: [&str; 3] = ["480P", "768P", "2K"];
 const RATIOS: [&str; 7] = ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"];
 const DEFAULT_RESOLUTION: &str = "2K";
@@ -276,6 +279,9 @@ pub(super) async fn minimax_start(
              with register_with_downloads",
         ));
     }
+    // Polling the job needs a Tokio timer (OPS-004); check for it before the
+    // job is started and billed, as the Fireworks Kontext call does.
+    crate::models::call::require_timer()?;
     let options = Options::parse(&params)?;
     let root = root(provider)?;
     let id = model.id.as_str();
@@ -293,6 +299,14 @@ pub(super) async fn minimax_start(
             format!(
                 "The {id} API does not expose an audio parameter. The generateAudio option was ignored."
             ),
+        );
+    }
+    // ops::generate_video starts one job per video (OPS-003), so this is
+    // ops::start_video asking one job for several.
+    if params.n > 1 {
+        warn(
+            "n",
+            format!("{id} generates a single video per call. Only 1 video will be generated."),
         );
     }
 
@@ -774,7 +788,8 @@ pub(super) async fn minimax_status(
 
 /// Fetch a finished video through the download transport, which pins DNS
 /// to public addresses and sends no credentials, as TypeScript's core
-/// fetches a result URL. Bytes come back as they are.
+/// fetches a result URL, reading at most 256 MiB. Bytes come back as they
+/// are.
 pub(super) async fn minimax_download(
     video: FilePart,
     provider: &dyn Provider,
@@ -791,7 +806,7 @@ pub(super) async fn minimax_download(
              with_download_transport or register it with register_with_downloads to fetch it",
         )
     })?;
-    let (bytes, content_type) = files::download(downloads.as_ref(), url, DEFAULT_MAX_BYTES)
+    let (bytes, content_type) = files::download(downloads.as_ref(), url, VIDEO_MAX_BYTES)
         .await
         .map_err(|error| {
             let message = "MiniMax video download failed".to_owned();

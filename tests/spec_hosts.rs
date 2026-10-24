@@ -6465,3 +6465,54 @@ async fn hst_041_a_minimax_video_model_makes_one_video_per_job() {
     assert_eq!(starts, 2);
     assert_eq!(item.value.len(), 2);
 }
+
+#[test]
+fn hst_040_a_video_call_without_a_tokio_runtime_fails_before_a_request() {
+    // Polling needs a Tokio timer, so a job that could not be polled is not
+    // started and billed; the missing download transport is reported first.
+    let transport = Recorder::new([json_reply(json!({"task_id": "t1"}))]);
+    let model = minimax_video_model(
+        MINIMAX_URL,
+        "MiniMax-H3",
+        transport.clone(),
+        Some(Arc::new(Downloads::default())),
+    );
+    let error = futures::executor::block_on(suprnova_ai::ops::start_video(
+        &model,
+        video_prompt("a cat"),
+        video_params(None),
+        Default::default(),
+    ))
+    .unwrap_err();
+    assert!(matches!(error, Error::Configuration(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+    let transport = Recorder::new([json_reply(json!({"task_id": "t1"}))]);
+    let model = minimax_video_model(MINIMAX_URL, "MiniMax-H3", transport.clone(), None);
+    let error = futures::executor::block_on(suprnova_ai::ops::start_video(
+        &model,
+        video_prompt("a cat"),
+        video_params(None),
+        Default::default(),
+    ))
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+}
+
+#[tokio::test]
+async fn hst_040_a_start_asked_for_several_videos_warns_and_starts_one_job() {
+    let params = VideoParams {
+        n: 2,
+        ..video_params(None)
+    };
+    let (transport, item) = minimax_start("MiniMax-H3", video_prompt("a cat"), params).await;
+    assert_eq!(transport.count(), 1);
+    assert!(
+        warned(&item.warnings, "unsupported", Some("n")),
+        "{:?}",
+        item.warnings
+    );
+    // generate_video gives each job one video, so it never warns.
+    let (_, item) = minimax_start("MiniMax-H3", video_prompt("a cat"), video_params(None)).await;
+    assert!(item.warnings.is_empty(), "{:?}", item.warnings);
+}
