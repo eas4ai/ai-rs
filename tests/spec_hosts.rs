@@ -4951,3 +4951,199 @@ async fn hst_033_invalid_deepseek_entries_fail_before_a_request() {
         assert!(message.contains("deepseek"), "{value}: {message}");
     }
 }
+
+const DEEPSEEK_URL: &str = "https://api.deepseek.com";
+const DEEPSEEK_BETA_URL: &str = "https://api.deepseek.com/beta";
+
+/// A DeepSeek model on a base URL, since only one ending in `/beta` turns
+/// the beta features on.
+fn deepseek_model(base_url: &str, model_id: &str, transport: Arc<Recorder>) -> Model {
+    let config = ProviderConfig {
+        default_base_url: base_url.into(),
+        ..key_config()
+    };
+    Model::new(model_id, Arc::new(deepseek::provider(config, transport)))
+}
+async fn deepseek_body(base_url: &str, messages: Vec<Message>, options: StreamOptions) -> Value {
+    let transport = Recorder::new([chat_text("hi", "stop")]);
+    let model = deepseek_model(base_url, "deepseek-v4-flash", transport.clone());
+    let (_, events) = call(&model, messages, options).await;
+    ok(&events);
+    transport.body()
+}
+async fn deepseek_rejected(
+    base_url: &str,
+    messages: Vec<Message>,
+    options: StreamOptions,
+) -> Error {
+    let transport = Recorder::new([chat_text("hi", "stop")]);
+    let model = deepseek_model(base_url, "deepseek-v4-flash", transport.clone());
+    let (_, events) = call(&model, messages, options).await;
+    let error = events
+        .into_iter()
+        .find_map(Result::err)
+        .expect("the call did not fail");
+    assert_eq!(transport.count(), 0, "a request was sent");
+    error
+}
+/// The message with this `deepseek` metadata.
+fn with_deepseek(mut message: Message, metadata: Value) -> Message {
+    message.provider_metadata = Some([("deepseek".to_owned(), metadata)].into());
+    message
+}
+fn with_tools(tools: Vec<Tool>) -> StreamOptions {
+    StreamOptions {
+        tools,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn hst_034_message_names_go_on_system_user_and_assistant_messages() {
+    let png = FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap();
+    let messages = vec![
+        with_deepseek(
+            Message::new(MessageRole::System, vec![text_part("be brief")]),
+            json!({"name": "sys"}),
+        ),
+        with_deepseek(user_message("hello"), json!({"name": "usr"})),
+        with_deepseek(
+            assistant(vec![tool_call("call_1", "lookup")]),
+            json!({"name": "asst"}),
+        ),
+        with_deepseek(
+            tool_message(ToolResultPart::new(
+                "call_1",
+                "lookup",
+                ToolResultValue::Json(json!("42")),
+            )),
+            json!({"name": "tool"}),
+        ),
+        // Other metadata keys are passed over, and a user message with parts
+        // is named too.
+        with_deepseek(user_file(png), json!({"name": "usr2", "other": 1})),
+    ];
+    let body = deepseek_body(DEEPSEEK_URL, messages, Default::default()).await;
+    let sent = body["messages"].as_array().unwrap();
+    assert_eq!(sent[0]["name"], "sys", "{body}");
+    assert_eq!(sent[1]["name"], "usr", "{body}");
+    assert_eq!(sent[2]["name"], "asst", "{body}");
+    assert_eq!(sent[3]["role"], "tool", "{body}");
+    assert!(sent[3].get("name").is_none(), "{body}");
+    assert_eq!(sent[4]["name"], "usr2", "{body}");
+    assert!(sent[4]["content"].is_array(), "{body}");
+    for entry in sent {
+        assert!(entry.get("prefix").is_none(), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn hst_034_a_prefix_and_strict_tools_go_out_on_a_beta_base_url() {
+    let messages = vec![
+        user_message("hello"),
+        with_deepseek(
+            assistant(vec![text_part("The answer is")]),
+            json!({"prefix": true}),
+        ),
+    ];
+    let body = deepseek_body(DEEPSEEK_BETA_URL, messages, Default::default()).await;
+    let last = body["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["role"], "assistant", "{body}");
+    assert_eq!(last["prefix"], true, "{body}");
+    let body = deepseek_body(
+        DEEPSEEK_BETA_URL,
+        vec![user_message("hello")],
+        with_tools(vec![lookup_tool().with_strict(true)]),
+    )
+    .await;
+    assert_eq!(body["tools"][0]["function"]["strict"], true, "{body}");
+    // A tool that is not strict sends no strict, on either base URL.
+    for base_url in [DEEPSEEK_URL, DEEPSEEK_BETA_URL] {
+        let body = deepseek_body(
+            base_url,
+            vec![user_message("hello")],
+            with_tools(vec![lookup_tool()]),
+        )
+        .await;
+        assert!(
+            body["tools"][0]["function"].get("strict").is_none(),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hst_034_a_misplaced_prefix_or_strict_tool_fails_before_a_request() {
+    let prefixed = |message: Message| with_deepseek(message, json!({"prefix": true}));
+    let answer = || assistant(vec![text_part("a")]);
+    let result = || ToolResultPart::new("call_1", "lookup", ToolResultValue::Json(json!("42")));
+    let cases: Vec<(&str, Vec<Message>, StreamOptions)> = vec![
+        // A prefix on a user message, on a tool message, on an assistant
+        // message that is not last, on the default base URL, and one that is
+        // not true.
+        (
+            DEEPSEEK_BETA_URL,
+            vec![prefixed(user_message("hello"))],
+            Default::default(),
+        ),
+        (
+            DEEPSEEK_BETA_URL,
+            vec![
+                user_message("hello"),
+                assistant(vec![tool_call("call_1", "lookup")]),
+                prefixed(tool_message(result())),
+            ],
+            Default::default(),
+        ),
+        (
+            DEEPSEEK_BETA_URL,
+            vec![
+                user_message("hello"),
+                prefixed(answer()),
+                user_message("more"),
+            ],
+            Default::default(),
+        ),
+        (
+            DEEPSEEK_URL,
+            vec![user_message("hello"), prefixed(answer())],
+            Default::default(),
+        ),
+        (
+            DEEPSEEK_BETA_URL,
+            vec![
+                user_message("hello"),
+                with_deepseek(answer(), json!({"prefix": false})),
+            ],
+            Default::default(),
+        ),
+        // A name that is not a string.
+        (
+            DEEPSEEK_URL,
+            vec![with_deepseek(user_message("hello"), json!({"name": 7}))],
+            Default::default(),
+        ),
+        // A strict tool on the default base URL, and one beside a tool that
+        // is not strict.
+        (
+            DEEPSEEK_URL,
+            vec![user_message("hello")],
+            with_tools(vec![lookup_tool().with_strict(true)]),
+        ),
+        (
+            DEEPSEEK_BETA_URL,
+            vec![user_message("hello")],
+            with_tools(vec![
+                lookup_tool().with_strict(true),
+                tools(&["other"]).remove(0),
+            ]),
+        ),
+    ];
+    for (index, (base_url, messages, options)) in cases.into_iter().enumerate() {
+        let error = deepseek_rejected(base_url, messages, options).await;
+        assert!(
+            matches!(error, Error::Validation(_)),
+            "case {index}: {error:?}"
+        );
+    }
+}
