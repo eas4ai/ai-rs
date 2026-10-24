@@ -21,7 +21,7 @@ use crate::{
         operations::{EvaluationInput, EvaluationParams, Item, Question},
     },
     transport::HttpRequest,
-    types::{FileData, Message, MessageRole, Part, messages::Metadata, tools::ToolChoice},
+    types::{Event, FileData, Message, MessageRole, Part, messages::Metadata, tools::ToolChoice},
 };
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
@@ -52,6 +52,10 @@ pub(crate) struct MessagesProfile {
     pub max_temperature: fn(&str) -> f64,
     /// Whether a model keeps temperature and top-p with thinking.
     pub sampling_with_thinking: fn(&str) -> bool,
+    /// The name of the host's own options entry, read with the `anthropic`
+    /// entry's rules and over it, and of the copy of the final metadata a
+    /// call that used the entry gets (HST-038).
+    pub options_key: Option<&'static str>,
 }
 
 const ANTHROPIC_RULES: MessagesProfile = MessagesProfile {
@@ -63,6 +67,7 @@ const ANTHROPIC_RULES: MessagesProfile = MessagesProfile {
     strict_tools: true,
     max_temperature: |_| 1.0,
     sampling_with_thinking: |_| false,
+    options_key: None,
 };
 
 /// The Messages API of any server, as `AnthropicMessagesProtocol` speaks it:
@@ -285,7 +290,7 @@ pub(crate) fn request_parts(
 ) -> Result<MessagesRequest, Error> {
     let label = profile.api.label;
     let mut core = params::read(options.params.as_ref(), label)?;
-    let mut o = AnthropicOptions::parse(options.params.as_ref(), None)?;
+    let mut o = AnthropicOptions::parse(options.params.as_ref(), profile.options_key)?;
     let caps = Capabilities::of(model);
     let mut notes = Notes::new(model);
     let mut betas: Vec<String> = Vec::new();
@@ -979,6 +984,15 @@ fn start(
     let config = provider.config().clone();
     let name = provider.name().to_owned();
     let model_id = model.id.clone();
+    // A call that used the host's own entry gets its final metadata under
+    // that name too (HST-038).
+    let host_key = profile.options_key.filter(|key| {
+        options
+            .params
+            .as_ref()
+            .and_then(|p| p.provider_params.as_ref())
+            .is_some_and(|params| params.contains_key(*key))
+    });
     stream::once(async move {
         let (request, reading) = prepare(
             profile, &config, downloads, &model_id, messages, &options, true,
@@ -1006,7 +1020,24 @@ fn start(
         ))
     })
     .try_flatten()
+    .map_ok(move |event| with_host_metadata(event, host_key))
     .boxed()
+}
+
+/// The end of a stream with its `anthropic` metadata also under the host's
+/// own key, when the call used that key's entry (HST-038).
+fn with_host_metadata(event: Event, key: Option<&'static str>) -> Event {
+    match (event, key) {
+        (Event::StreamEnd(mut end), Some(key)) => {
+            if let Some(metadata) = &mut end.event.provider_metadata
+                && let Some(anthropic) = metadata.get("anthropic").cloned()
+            {
+                metadata.insert(key.to_owned(), anthropic);
+            }
+            Event::StreamEnd(end)
+        }
+        (event, _) => event,
+    }
 }
 
 async fn evaluate(

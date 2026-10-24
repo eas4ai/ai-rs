@@ -5672,3 +5672,18 @@ async fn hst_038_an_invalid_minimax_entry_fails_before_a_request() {
         assert!(message.contains("minimax"), "{value}: {message}");
     }
 }
+
+#[tokio::test]
+async fn hst_037_a_file_time_the_clock_cannot_hold_is_left_out() {
+    let transport = Recorder::new([json_reply(json!({
+        "id": "file-3", "created_at": 18446744073709551615u64, "expires_at": 1800003600
+    }))]);
+    let uploaded = deepseek_upload(transport, upload(PNG, "image/png", None), None)
+        .await
+        .unwrap();
+    assert_eq!(uploaded.value.created_at, None);
+    assert_eq!(
+        uploaded.value.expires_at.as_deref(),
+        Some("2027-01-15T09:00:00.000Z")
+    );
+}

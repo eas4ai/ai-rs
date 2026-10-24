@@ -41,6 +41,9 @@ static PROFILE: MessagesProfile = MessagesProfile {
         }
     },
     sampling_with_thinking: names_version_3_1_or_later,
+    // The `minimax` entry is read over the `anthropic` one, and a call that
+    // used it gets its final metadata under `minimax` too (HST-038).
+    options_key: Some("minimax"),
 };
 
 pub(super) static HOST: Host = Host {
