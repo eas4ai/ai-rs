@@ -238,17 +238,38 @@ fn reasoning_config(
 
 /// The effort of a host model that always reasons: disabled reasoning and
 /// `minimal` as `low`, and no thinking setting (HST-007).
-fn always_reasoning(reasoning: &Reasoning) -> (Option<Thinking>, Option<Effort>) {
+fn always_reasoning(
+    reasoning: &Reasoning,
+    notes: &mut Notes,
+) -> (Option<Thinking>, Option<Effort>) {
     let effort = match reasoning {
         Reasoning::Default => return (None, None),
-        Reasoning::Disabled => Effort::Low,
-        Reasoning::Level(level) => match level.as_str() {
-            "minimal" | "low" => Effort::Low,
-            "medium" => Effort::Medium,
-            "high" => Effort::High,
-            "xhigh" => Effort::Xhigh,
-            _ => Effort::Max,
-        },
+        Reasoning::Disabled => {
+            notes.note(
+                "reasoning",
+                "reasoning \"none\" is not taken: the model always reasons; effort \"low\" is sent",
+            );
+            Effort::Low
+        }
+        Reasoning::Level(level) => {
+            let effort = match level.as_str() {
+                "minimal" | "low" => Effort::Low,
+                "medium" => Effort::Medium,
+                "high" => Effort::High,
+                "xhigh" => Effort::Xhigh,
+                _ => Effort::Max,
+            };
+            if effort.wire() != level {
+                notes.note(
+                    "reasoning",
+                    format!(
+                        "reasoning {level:?} is not taken directly; effort {:?} is sent",
+                        effort.wire()
+                    ),
+                );
+            }
+            effort
+        }
     };
     (None, Some(effort))
 }
@@ -350,7 +371,7 @@ pub(crate) fn request_parts(
     let thinking_option = o.thinking.is_some();
     if o.effort.is_none() {
         let (thinking, effort) = if (profile.always_reasons)(model) {
-            always_reasoning(&core.reasoning)
+            always_reasoning(&core.reasoning, &mut notes)
         } else {
             reasoning_config(&core.reasoning, &caps, &mut notes)
         };

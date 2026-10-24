@@ -33,6 +33,7 @@ struct Recorder {
 }
 impl Recorder {
     fn new(replies: impl IntoIterator<Item = (u16, Vec<u8>)>) -> Arc<Self> {
+        install_capture();
         Arc::new(Self {
             requests: Mutex::default(),
             replies: Mutex::new(replies.into_iter().collect()),
@@ -221,12 +222,36 @@ impl Logs {
         std::mem::take(&mut self.0.lock().unwrap())
     }
 }
-fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
-    let events = Arc::new(Mutex::new(vec![]));
-    let guard = tracing::subscriber::set_default(Capture(events.clone()));
-    (Logs(events), guard)
+thread_local! {
+    /// Where the events of this thread's test go while it captures them.
+    static SINK: std::cell::RefCell<Option<Arc<Mutex<Vec<(String, String)>>>>> =
+        const { std::cell::RefCell::new(None) };
 }
-struct Capture(Arc<Mutex<Vec<(String, String)>>>);
+/// Install one capturing subscriber for the whole test process, before any
+/// request. tracing decides whether a log site is wanted when the site is
+/// first hit; a subscriber set on one thread later can miss the events of a
+/// site that another test's thread hit first.
+fn install_capture() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::subscriber::set_global_default(Capture)
+            .expect("the tests set no other global subscriber");
+    });
+}
+/// Stops capturing this thread's events when dropped.
+struct CaptureGuard;
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        SINK.with(|sink| *sink.borrow_mut() = None);
+    }
+}
+fn capture_logs() -> (Logs, CaptureGuard) {
+    install_capture();
+    let events = Arc::new(Mutex::new(vec![]));
+    SINK.with(|sink| *sink.borrow_mut() = Some(events.clone()));
+    (Logs(events), CaptureGuard)
+}
+struct Capture;
 impl tracing::Subscriber for Capture {
     fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
         true
@@ -243,7 +268,11 @@ impl tracing::Subscriber for Capture {
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
-        self.0.lock().unwrap().push((fields.setting, fields.model));
+        SINK.with(|sink| {
+            if let Some(events) = &*sink.borrow() {
+                events.lock().unwrap().push((fields.setting, fields.model));
+            }
+        });
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
@@ -3368,6 +3397,23 @@ struct VertexToken;
 impl suprnova_ai::providers::google_vertex::AccessTokenSource for VertexToken {
     fn access_token(&self) -> BoxFuture<'_, Result<String, suprnova_ai::Error>> {
         Box::pin(async { Ok("t1".to_owned()) })
+    }
+}
+
+#[tokio::test]
+async fn ant_016_minimax_logs_the_efforts_it_changes() {
+    // MiniMax 3.1 and later always reason: none and minimal go as effort
+    // low, with a log, as TypeScript warns; low goes unchanged.
+    for (effort, logged) in [(None, true), (Some("minimal"), true), (Some("low"), false)] {
+        let (logs, _guard) = capture_logs();
+        let body = minimax_body("MiniMax-M3.1", with_params(reasoning(effort))).await;
+        assert_eq!(body["output_config"]["effort"], "low", "{effort:?} {body}");
+        assert_eq!(
+            logs.take()
+                .contains(&("reasoning".to_owned(), "MiniMax-M3.1".to_owned())),
+            logged,
+            "{effort:?}"
+        );
     }
 }
 
