@@ -4245,3 +4245,118 @@ async fn hst_031_invalid_fireworks_entries_fail_before_a_request() {
         assert_eq!(transport.count(), 0);
     }
 }
+
+// HST-032
+
+use suprnova_ai::providers::operations::{Documents, RankedDocument, RerankParams};
+
+fn rerank_reply() -> (u16, Vec<u8>) {
+    json_reply(json!({"id": "rr-1", "model": "Salesforce/Llama-Rank-v1",
+        "results": [{"index": 1, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.2}],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 0, "total_tokens": 9}}))
+}
+async fn rerank(
+    transport: Arc<Recorder>,
+    documents: Documents,
+    params: RerankParams,
+) -> Result<suprnova_ai::providers::operations::Item<Vec<RankedDocument>>, Error> {
+    suprnova_ai::ops::rerank(
+        &model("togetherai", "Salesforce/Llama-Rank-v1", transport),
+        documents,
+        "which one".into(),
+        params,
+        Default::default(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn hst_032_together_reranks_json_documents() {
+    let transport = Recorder::new([rerank_reply()]);
+    let documents = Documents::Json(vec![
+        [("title".to_owned(), json!("a"))].into(),
+        [("title".to_owned(), json!("b"))].into(),
+    ]);
+    let item = rerank(
+        transport.clone(),
+        documents,
+        RerankParams {
+            top_n: Some(1),
+            provider_options: [("togetherai".to_owned(), json!({"rankFields": ["title"]}))].into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        "https://api.together.xyz/v1/rerank"
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"model": "Salesforce/Llama-Rank-v1", "query": "which one",
+            "documents": [{"title": "a"}, {"title": "b"}], "top_n": 1,
+            "rank_fields": ["title"], "return_documents": false})
+    );
+    assert_eq!(
+        item.value,
+        vec![
+            RankedDocument {
+                index: 1,
+                score: 0.9
+            },
+            RankedDocument {
+                index: 0,
+                score: 0.2
+            }
+        ]
+    );
+    let metadata = item.metadata.expect("metadata");
+    assert_eq!(metadata["id"], "rr-1");
+    assert_eq!(metadata["model"], "Salesforce/Llama-Rank-v1");
+}
+
+#[tokio::test]
+async fn hst_032_text_documents_go_as_texts_without_unset_fields() {
+    let transport = Recorder::new([rerank_reply()]);
+    rerank(
+        transport.clone(),
+        Documents::Text(vec!["a".into(), "b".into()]),
+        RerankParams::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.body(),
+        json!({"model": "Salesforce/Llama-Rank-v1", "query": "which one",
+            "documents": ["a", "b"], "return_documents": false})
+    );
+}
+
+#[tokio::test]
+async fn hst_032_an_unknown_option_fails_and_errors_give_their_message() {
+    let transport = Recorder::new([]);
+    let error = rerank(
+        transport.clone(),
+        Documents::Text(vec!["a".into()]),
+        RerankParams {
+            top_n: None,
+            provider_options: [("togetherai".to_owned(), json!({"rank_fields": ["x"]}))].into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+    let transport = Recorder::new([(400, br#"{"error": {"message": "bad query"}}"#.to_vec())]);
+    let error = rerank(
+        transport,
+        Documents::Text(vec!["a".into()]),
+        RerankParams::default(),
+    )
+    .await
+    .unwrap_err();
+    let Error::Provider(error) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(error.message, "bad query");
+}
