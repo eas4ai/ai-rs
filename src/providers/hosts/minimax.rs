@@ -28,6 +28,7 @@ static PROFILE: MessagesProfile = MessagesProfile {
         config_headers: &[],
     },
     always_reasons: names_version_3_1_or_later,
+    auth_token_env: None,
 };
 
 pub(super) static HOST: Host = Host {
