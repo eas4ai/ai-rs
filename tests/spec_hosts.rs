@@ -5147,3 +5147,147 @@ async fn hst_034_a_misplaced_prefix_or_strict_tool_fails_before_a_request() {
         );
     }
 }
+
+/// A file part naming an uploaded file by its id.
+fn file_id_part(id: &str, media_type: &str) -> FilePart {
+    FilePart {
+        id: format!("f-{id}"),
+        data: suprnova_ai::types::messages::FileData::Text(id.into()),
+        media_type: media_type.into(),
+        filename: None,
+        provider_metadata: None,
+    }
+}
+/// The part with this `deepseek` metadata.
+fn deepseek_file(mut file: FilePart, metadata: Value) -> FilePart {
+    file.provider_metadata = Some([("deepseek".to_owned(), metadata)].into());
+    file
+}
+fn file_result(files: Vec<FilePart>) -> ToolResultPart {
+    ToolResultPart::new(
+        "call_1",
+        "lookup",
+        ToolResultValue::Special(SpecialToolResult::Content(ContentOutput {
+            output_type: ContentOutputType::Content,
+            value: files.into_iter().map(ContentPart::File).collect(),
+        })),
+    )
+}
+fn image_url(path: &str) -> String {
+    format!("https://img.test/{path}.png")
+}
+
+#[tokio::test]
+async fn hst_035_deepseek_sends_image_parts_as_typescript_sends_them() {
+    let url = image_url(&"a".repeat(79));
+    assert_eq!(url.len(), 100);
+    let png_data_url = format!("data:image/png;base64,{}", b64(PNG));
+    let message = Message::new(
+        MessageRole::User,
+        vec![
+            text_part("look"),
+            Part::File(deepseek_file(
+                FilePart::from_url(&url, Some("image/png")).unwrap(),
+                json!({"imageDetail": "high"}),
+            )),
+            Part::File(FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap()),
+            Part::File(deepseek_file(
+                FilePart::from_bytes(PNG.to_vec(), Some("image/png"), Some("cat.png".into()))
+                    .unwrap(),
+                json!({"fileData": true}),
+            )),
+            Part::File(file_id_part("file-api-abc123", "image/png")),
+            Part::File(FilePart::from_bytes(vec![1, 2, 3], Some("image/jpg"), None).unwrap()),
+        ],
+    );
+    let body = deepseek_body(DEEPSEEK_URL, vec![message], Default::default()).await;
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content[1],
+        json!({"type": "image_url", "image_url": {"url": url, "detail": "high"}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[2],
+        json!({"type": "image_url", "image_url": {"url": png_data_url}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[3],
+        json!({"type": "file", "file_data": png_data_url, "filename": "cat.png"}),
+        "{body}"
+    );
+    assert_eq!(
+        content[4],
+        json!({"type": "file", "file_id": "file-api-abc123"}),
+        "{body}"
+    );
+    assert_eq!(
+        content[5],
+        json!({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AQID"}}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_035_deepseek_sends_tool_result_images_the_same_way_without_file_data() {
+    let url = image_url("tool");
+    let result = file_result(vec![
+        file_id_part("file-api-abc123", "image/png"),
+        deepseek_file(
+            FilePart::from_url(&url, Some("image/png")).unwrap(),
+            json!({"imageDetail": "low"}),
+        ),
+        // `fileData` is not read in a tool result.
+        deepseek_file(
+            FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap(),
+            json!({"fileData": true}),
+        ),
+    ]);
+    let body = deepseek_body(DEEPSEEK_URL, tool_round(result), Default::default()).await;
+    let content = tool_entry(&body)["content"].as_array().unwrap();
+    assert_eq!(
+        content[0],
+        json!({"type": "file", "file_id": "file-api-abc123"}),
+        "{body}"
+    );
+    assert_eq!(
+        content[1],
+        json!({"type": "image_url", "image_url": {"url": url, "detail": "low"}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[2],
+        json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", b64(PNG))}}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_035_invalid_deepseek_image_parts_fail_before_a_request() {
+    let long_url = image_url(&"a".repeat(8172));
+    assert_eq!(long_url.len(), 8193);
+    let png = || FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap();
+    let url = || FilePart::from_url(image_url("x"), Some("image/png")).unwrap();
+    let parts = [
+        FilePart::from_url(&long_url, Some("image/png")).unwrap(),
+        deepseek_file(url(), json!({"fileData": true})),
+        deepseek_file(png(), json!({"fileData": true, "imageDetail": "low"})),
+        deepseek_file(png(), json!({"fileData": false})),
+        deepseek_file(png(), json!({"imageDetail": "medium"})),
+        deepseek_file(url(), json!({"imageDetail": 2})),
+    ];
+    for (index, part) in parts.into_iter().enumerate() {
+        let error =
+            deepseek_rejected(DEEPSEEK_URL, vec![user_file(part)], Default::default()).await;
+        assert!(
+            matches!(error, Error::Validation(_)),
+            "part {index}: {error:?}"
+        );
+    }
+    let result = file_result(vec![
+        FilePart::from_url(&long_url, Some("image/png")).unwrap(),
+    ]);
+    let error = deepseek_rejected(DEEPSEEK_URL, tool_round(result), Default::default()).await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+}
