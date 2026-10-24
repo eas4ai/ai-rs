@@ -4723,6 +4723,23 @@ async fn hst_031_image_bytes_are_asked_for_as_any_type_and_must_be_an_image() {
 }
 
 #[test]
+fn hst_031_a_kontext_call_with_no_download_transport_nor_tokio_runtime_fails_as_validation() {
+    // The missing download transport is what HST-031 names, so it is what
+    // the call reports.
+    let transport = Recorder::new(kontext_replies("unused", "Ready"));
+    let error = futures::executor::block_on(image(
+        "fireworks",
+        "accounts/fireworks/models/flux-kontext-pro",
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    ))
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+}
+
+#[test]
 fn hst_031_a_kontext_call_without_a_tokio_runtime_fails_before_a_request() {
     let transport = Recorder::new(kontext_replies("unused", "Ready"));
     let error = futures::executor::block_on(kontext_image(
