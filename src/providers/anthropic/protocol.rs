@@ -394,10 +394,11 @@ pub(crate) fn request_parts(
         match o.thinking.as_mut() {
             // The display of a thinking option takes precedence (ANT-002);
             // the display of mapped thinking is the summary's.
-            Some(t) if t.kind == Some(ThinkingType::Adaptive) => {
-                if !thinking_option || t.display.is_none() {
-                    t.display = Some(display);
-                }
+            Some(t)
+                if t.kind == Some(ThinkingType::Adaptive)
+                    && (!thinking_option || t.display.is_none()) =>
+            {
+                t.display = Some(display);
             }
             Some(t)
                 if !reasoning_off

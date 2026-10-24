@@ -214,9 +214,11 @@ fn with_anthropic(params: InferenceRequestParams, options: Value) -> StreamOptio
     with_params(params.with_provider_param("anthropic", options))
 }
 
+/// The `setting` and `model` of each captured debug event.
+type Events = Arc<Mutex<Vec<(String, String)>>>;
 /// The `setting` and `model` of each debug event of target
 /// `suprnova_ai::anthropic` that a call logs while the guard lives.
-struct Logs(Arc<Mutex<Vec<(String, String)>>>);
+struct Logs(Events);
 impl Logs {
     fn take(&self) -> Vec<(String, String)> {
         std::mem::take(&mut self.0.lock().unwrap())
@@ -224,8 +226,7 @@ impl Logs {
 }
 thread_local! {
     /// Where the events of this thread's test go while it captures them.
-    static SINK: std::cell::RefCell<Option<Arc<Mutex<Vec<(String, String)>>>>> =
-        const { std::cell::RefCell::new(None) };
+    static SINK: std::cell::RefCell<Option<Events>> = const { std::cell::RefCell::new(None) };
 }
 /// Install one capturing subscriber for the whole test process, before any
 /// request. tracing decides whether a log site is wanted when the site is
