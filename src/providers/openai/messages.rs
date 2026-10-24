@@ -154,7 +154,7 @@ fn openai_file(
             }
             return Err(chat_url_error("PDF"));
         }
-        let filename = filename(format!("part-{index}.pdf"));
+        let filename = filename(format!("file-{index}.pdf"));
         let data = media::data_to_data_url(data, mt);
         return Ok(if responses {
             json!({"type": "input_file", "filename": filename, "file_data": data})

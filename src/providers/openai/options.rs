@@ -247,7 +247,7 @@ impl ResponsesOptions {
     /// The `top_logprobs` the options ask for: 20 for `true`.
     pub(crate) fn top_logprobs(&self) -> Option<Number> {
         match &self.logprobs {
-            Some(Logprobs::Flag(true)) => Some((TOP_LOGPROBS_MAX - 1).into()),
+            Some(Logprobs::Flag(true)) => Some(TOP_LOGPROBS_MAX.into()),
             Some(Logprobs::Top(n)) => Some(n.clone()),
             _ => None,
         }
