@@ -1,6 +1,10 @@
 //! DeepInfra over Chat Completions. Requests send no `stream_options`. Some
 //! DeepInfra models report reasoning tokens apart from completion tokens;
 //! when reasoning tokens exceed completion tokens, output tokens are the sum.
+//!
+//! Its models also complete text (`completion_protocol`), embed, and
+//! generate and edit images at `https://api.deepinfra.com/v1/inference`,
+//! the base URL without its last segment `openai`.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,

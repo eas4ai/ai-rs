@@ -29,8 +29,15 @@
 //! seed, fail with `Error::Validation` before any request, as the OpenAI and
 //! Anthropic adapters reject theirs; the TypeScript SDK drops them with a
 //! warning. An output schema goes to a host without JSON schema support as JSON
-//! mode, which does not enforce the schema. Hosts stream and generate only:
-//! `list_models` and `probe` return `Error::UnsupportedOperation`.
+//! mode, which does not enforce the schema.
+//!
+//! Together AI, DeepInfra and Fireworks serve every model kind of their
+//! TypeScript packages. A chat call reads the host's own options entry as
+//! the compatible chat model does (HST-026); each module's
+//! `completion_protocol` gives its completion models; and `ops::embed`,
+//! `ops::generate_image` and, for Together AI, `ops::rerank` work with the
+//! provider's models. `list_models` and `probe` return
+//! `Error::UnsupportedOperation` for every host.
 use crate::{
     Error, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     models::files::DownloadTransport,
