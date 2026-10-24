@@ -1386,7 +1386,6 @@ impl Parser {
             cache_write_tokens: self.cache_write,
             reasoning_tokens: self.thinking_tokens,
             raw: (!self.raw_usage.is_empty()).then(|| json!(self.raw_usage)),
-            ..Default::default()
         };
         let finish = self.stop_reason.as_deref().map(|r| match r {
             "end_turn" | "stop_sequence" | "pause_turn" => "stop",

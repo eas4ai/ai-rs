@@ -351,7 +351,7 @@ fn result_file(file: &FilePart, notes: &mut Notes, betas: &mut Vec<String>) -> O
     }
     notes.note(
         "tool result content",
-        &format!(
+        format!(
             "a file of media type {} cannot go in a tool result; it is left out",
             file.media_type
         ),
@@ -469,7 +469,7 @@ fn builtin_call(
             ) => (name.to_owned(), input),
             ("advisor", _) => ("advisor".to_owned(), json!({})),
             _ => {
-                notes.note("provider tool call", &format!(
+                notes.note("provider tool call", format!(
                         "a call of the provider tool {:?} cannot go back to Anthropic; it is left out",
                         call.tool_name
                     ),
@@ -593,7 +593,7 @@ fn builtin_result(
                 json!({"type": "advisor_tool_result", "tool_use_id": id, "content": content})
             }
             _ => {
-                notes.note("provider tool result", &format!(
+                notes.note("provider tool result", format!(
                         "a result of the provider tool {:?} cannot go back to Anthropic; it is left out",
                         result.tool_name
                     ),
@@ -1046,7 +1046,7 @@ fn assistant_block(
                             if action.is_none() {
                                 notes.note(
                                     "toolset call",
-                                    &format!("the toolset call of {:?} has no action", c.tool_name),
+                                    format!("the toolset call of {:?} has no action", c.tool_name),
                                 );
                             }
                             json!({"type": "tool_use", "id": c.tool_call_id,
@@ -1117,7 +1117,7 @@ fn prune_callers(messages: &mut [Value], last_user: Option<usize>, notes: &mut N
                 .to_owned();
             block.as_object_mut().map(|o| o.remove("caller"));
             if warned.insert(id.clone()) {
-                notes.note("caller", &format!(
+                notes.note("caller", format!(
                         "the caller of tool call {id} is left out: its code execution call {tool} is missing from the history"
                     ),
                 );

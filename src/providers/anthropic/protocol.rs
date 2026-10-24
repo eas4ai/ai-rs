@@ -370,10 +370,11 @@ pub(crate) fn request_parts(
         };
         let reasoning_off = core.reasoning == Reasoning::Disabled;
         match o.thinking.as_mut() {
-            Some(t) if t.kind == Some(ThinkingType::Adaptive) => {
-                if t.display.is_none() || core.reasoning != Reasoning::Default {
-                    t.display = Some(display);
-                }
+            Some(t)
+                if t.kind == Some(ThinkingType::Adaptive)
+                    && (t.display.is_none() || core.reasoning != Reasoning::Default) =>
+            {
+                t.display = Some(display);
             }
             None if !reasoning_off && caps.adaptive_thinking => {
                 o.thinking = Some(Thinking {
