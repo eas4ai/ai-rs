@@ -93,10 +93,12 @@ pub(super) async fn deepseek_upload(
     let id = response["id"]
         .as_str()
         .ok_or_else(|| http::response_error(provider.name(), "DeepSeek file response has no id"))?;
+    // A time the system clock cannot hold is left out rather than trusted.
     let time = |field: &str| {
         response[field]
             .as_u64()
-            .map(|seconds| iso_time(UNIX_EPOCH + Duration::from_secs(seconds)))
+            .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+            .map(iso_time)
     };
     let mut metadata = Map::new();
     for (from, to) in [
