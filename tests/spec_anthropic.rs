@@ -2776,6 +2776,38 @@ async fn ant_011_a_system_message_between_a_user_message_and_the_reply_stays_in_
 }
 
 #[tokio::test]
+async fn ant_011_only_the_user_messages_a_move_separated_go_as_one() {
+    // A first system message after a user message goes in the top-level
+    // system text, and an assistant turn of unsigned reasoning sends
+    // nothing; the user messages around them stay apart, as TypeScript
+    // sends them.
+    let reasoning = Part::Reasoning(suprnova_ai::types::messages::ReasoningPart::new("hmm"));
+    for history in [
+        vec![
+            user("a"),
+            system("first"),
+            user("b"),
+            assistant(vec![Part::Text(TextPart::new("c"))]),
+        ],
+        vec![
+            system("first"),
+            user("a"),
+            assistant(vec![reasoning]),
+            user("b"),
+        ],
+    ] {
+        let (body, _) = sent("claude-sonnet-4-6", history, StreamOptions::default()).await;
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "first"}]),
+            "{body}"
+        );
+        assert_eq!(body["messages"][0], text_of("user", &["a"]), "{body}");
+        assert_eq!(body["messages"][1], text_of("user", &["b"]), "{body}");
+    }
+}
+
+#[tokio::test]
 async fn ant_011_a_system_message_with_no_user_message_after_it_fails_before_a_request() {
     let error = refused(
         "claude-sonnet-4-6",
