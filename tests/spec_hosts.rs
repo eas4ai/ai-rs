@@ -4219,7 +4219,11 @@ async fn hst_031_a_failed_or_slow_kontext_job_fails_the_call() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    let Error::Provider(timeout) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(timeout.kind, ProviderErrorKind::Timeout);
+    assert!(!timeout.is_retryable);
     let waited = started.elapsed().as_secs();
     assert!((119..=121).contains(&waited), "waited {waited} s");
     assert!(fireworks_requests(&transport).len() < 400);
@@ -4682,4 +4686,19 @@ async fn hst_031_image_bytes_are_asked_for_as_any_type_and_must_be_an_image() {
     .await
     .unwrap_err();
     assert!(matches!(error, Error::Provider(_)), "{error:?}");
+}
+
+#[test]
+fn hst_031_a_kontext_call_without_a_tokio_runtime_fails_before_a_request() {
+    let transport = Recorder::new(kontext_replies("unused", "Ready"));
+    let error = futures::executor::block_on(image(
+        "fireworks",
+        "accounts/fireworks/models/flux-kontext-pro",
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    ))
+    .unwrap_err();
+    assert!(matches!(error, Error::Configuration(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
 }
