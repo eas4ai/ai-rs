@@ -2662,31 +2662,183 @@ async fn ant_010_a_tool_result_holds_its_content_parts() {
 
 // ANT-011
 
+fn text_of(role: &str, texts: &[&str]) -> Value {
+    let content: Vec<Value> = texts
+        .iter()
+        .map(|t| json!({"type": "text", "text": t}))
+        .collect();
+    json!({"role": role, "content": content})
+}
+fn moves(logs: &Logs) -> usize {
+    logs.take()
+        .iter()
+        .filter(|(setting, _)| setting == "system message")
+        .count()
+}
+
 #[tokio::test]
-async fn ant_011_a_later_system_message_goes_in_place() {
-    let transport = Recorder::new([text_reply()]);
-    run(
-        &model("claude-sonnet-4-6", transport.clone()),
-        vec![system("first"), user("a"), system("second"), user("b")],
+async fn ant_011_a_system_message_after_assistant_text_moves_after_the_next_user_message() {
+    // Anthropic refuses a system message with content that follows
+    // assistant text; it goes just after the next user message instead.
+    let (logs, _guard) = capture_logs();
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system("first"),
+            user("a"),
+            assistant(vec![Part::Text(TextPart::new("ok"))]),
+            system("second"),
+            user("b"),
+        ],
         StreamOptions::default(),
     )
     .await;
-    let body = transport.body(0);
     assert_eq!(
         body["system"],
         json!([{"type": "text", "text": "first"}]),
         "{body}"
     );
     assert_eq!(
-        body["messages"][1],
-        json!({"role": "system", "content": [{"type": "text", "text": "second"}]}),
+        body["messages"],
+        json!([
+            text_of("user", &["a"]),
+            text_of("assistant", &["ok"]),
+            text_of("user", &["b"]),
+            text_of("system", &["second"]),
+        ]),
         "{body}"
     );
     assert!(
-        transport
-            .header(0, "anthropic-beta")
-            .is_some_and(|b| b.contains("mid-conversation-system-2026-04-07"))
+        betas.iter().any(|b| b == "mid-conversation-system-2026-04-07"),
+        "{betas:?}"
     );
+    assert_eq!(moves(&logs), 1);
+}
+
+#[tokio::test]
+async fn ant_011_a_system_message_before_a_user_message_moves_after_it() {
+    // Anthropic refuses a system message with content before a user
+    // message; it goes after the last user message before the reply, and
+    // the user messages it separated go as one.
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system("first"),
+            user("a"),
+            system("second"),
+            user("b"),
+            assistant(vec![Part::Text(TextPart::new("c"))]),
+            user("d"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"],
+        json!([
+            text_of("user", &["a", "b"]),
+            text_of("system", &["second"]),
+            text_of("assistant", &["c"]),
+            text_of("user", &["d"]),
+        ]),
+        "{body}"
+    );
+    assert_eq!(moves(&logs), 1);
+}
+
+#[tokio::test]
+async fn ant_011_a_system_message_between_a_user_message_and_the_reply_stays_in_place() {
+    let (logs, _guard) = capture_logs();
+    for (history, at) in [
+        (
+            vec![
+                system("first"),
+                user("a"),
+                system("second"),
+                assistant(vec![Part::Text(TextPart::new("c"))]),
+                user("d"),
+            ],
+            1,
+        ),
+        (vec![system("first"), user("a"), system("second")], 1),
+    ] {
+        let (body, _) = sent("claude-sonnet-4-6", history, StreamOptions::default()).await;
+        assert_eq!(
+            body["messages"][at],
+            text_of("system", &["second"]),
+            "{body}"
+        );
+    }
+    assert_eq!(moves(&logs), 0);
+}
+
+#[tokio::test]
+async fn ant_011_a_system_message_with_no_user_message_after_it_fails_before_a_request() {
+    let error = refused(
+        "claude-sonnet-4-6",
+        vec![
+            system("first"),
+            user("a"),
+            assistant(vec![Part::Text(TextPart::new("ok"))]),
+            system("second"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn ant_011_a_system_message_after_a_server_tool_result_or_with_only_an_effort_stays() {
+    let (logs, _guard) = capture_logs();
+    // An assistant message that ends in a web search result.
+    let handle = streamed(
+        "claude-sonnet-4-6",
+        blocks_reply(&builtin_blocks()[..2], "end_turn"),
+        StreamOptions::default(),
+    )
+    .await;
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system("first"),
+            user("hi"),
+            handle.message().clone(),
+            system("second"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(body["messages"][1]["role"], "assistant", "{body}");
+    assert_eq!(
+        body["messages"][2],
+        text_of("system", &["second"]),
+        "{body}"
+    );
+    // An effort alone renders nothing, and Anthropic takes it anywhere.
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system("first"),
+            user("a"),
+            assistant(vec![Part::Text(TextPart::new("ok"))]),
+            system_with("", json!({"effort": "low"})),
+            user("b"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][2],
+        json!({"role": "system", "content": [], "output_config": {"effort": "low"}}),
+        "{body}"
+    );
+    assert_eq!(body["messages"][3], text_of("user", &["b"]), "{body}");
+    assert_eq!(moves(&logs), 0);
 }
 
 fn system_with(text: &str, options: Value) -> Message {
@@ -2703,6 +2855,7 @@ async fn ant_011_system_message_options_go_out_with_their_betas() {
             system("first"),
             user("a"),
             assistant(vec![Part::Text(TextPart::new("ok"))]),
+            user("b"),
             system_with("brief now", json!({"clearAt": "next_user_message", "effort": "low"})),
             system_with("", json!({"toolChanges": [{"type": "tool_addition", "toolName": "weather"}, {"type": "tool_removal", "toolName": "search"}]})),
             assistant(vec![Part::Text(TextPart::new("next"))]),
@@ -2711,13 +2864,13 @@ async fn ant_011_system_message_options_go_out_with_their_betas() {
     )
     .await;
     assert_eq!(
-        body["messages"][2],
+        body["messages"][3],
         json!({"role": "system", "content": [{"type": "text", "text": "brief now"}],
                "clear_at": "next_user_message", "output_config": {"effort": "low"}}),
         "{body}"
     );
     assert_eq!(
-        body["messages"][3],
+        body["messages"][4],
         json!({"role": "system", "content": [
             {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "weather"}},
             {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "search"}}]}),
