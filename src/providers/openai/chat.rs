@@ -103,7 +103,7 @@ impl ChatCall {
         match &o.logprobs {
             Some(Logprobs::Flag(true)) => {
                 set("logprobs", Some(json!(true)));
-                set("top_logprobs", Some(json!(1)));
+                set("top_logprobs", Some(json!(0)));
             }
             Some(Logprobs::Top(n)) => {
                 set("logprobs", Some(json!(true)));
