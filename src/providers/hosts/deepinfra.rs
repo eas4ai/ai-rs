@@ -65,7 +65,7 @@ pub fn provider(config: ProviderConfig, transport: Arc<dyn HttpTransport>) -> Ho
 /// `Model::with_protocol`; the call reads its options from the `deepinfra`
 /// entry.
 pub fn completion_protocol() -> OpenAICompletionsProtocol {
-    OpenAICompletionsProtocol::compatible(true)
+    OpenAICompletionsProtocol::compatible(false)
 }
 
 /// Register the DeepInfra provider under `deepinfra` and `@ai-sdk/deepinfra`, with
