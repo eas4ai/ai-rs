@@ -129,8 +129,9 @@ impl OpenAICompatibleProvider {
     /// Download the media URLs an API cannot fetch itself before each
     /// request. Without one, such a URL fails with `Error::Validation`.
     /// Download transports must honor the core DNS-pinning contract.
-    /// Runtime transports are not serialized; set this again after
-    /// restoring a snapshot.
+    /// Runtime transports are not serialized; a restore through a registry
+    /// takes the download transport of the provider registered under the
+    /// same name.
     #[must_use]
     pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
         self.downloads = Some(downloads);
@@ -350,23 +351,21 @@ pub fn register_factories(
             .filter(|p| !p.is_null())
             .map(|p| registry.restore_protocol(p.clone()))
             .transpose()?;
-        // The registered provider of this name decides the API, as it
-        // decides the endpoint.
-        let default_protocol = registry
-            .get_provider(&name)?
-            .default_protocol()
-            .ok_or_else(|| {
-                Error::Configuration(format!(
-                    "cannot restore provider {name:?}: the registered provider has no default protocol"
-                ))
-            })?;
+        // The registered provider of this name decides the API and the
+        // download transport, as it decides the endpoint.
+        let registered = registry.get_provider(&name)?;
+        let default_protocol = registered.default_protocol().ok_or_else(|| {
+            Error::Configuration(format!(
+                "cannot restore provider {name:?}: the registered provider has no default protocol"
+            ))
+        })?;
         Ok(Arc::new(OpenAICompatibleProvider {
             name,
             config,
             transport: transport.clone(),
             default_protocol,
             protocol_override,
-            downloads: None,
+            downloads: registered.download_transport(),
             websocket: None,
         }))
     })
