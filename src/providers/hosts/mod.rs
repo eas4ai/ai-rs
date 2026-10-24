@@ -36,8 +36,11 @@
 //! the compatible chat model does (HST-026); each module's
 //! `completion_protocol` gives its completion models; and `ops::embed`,
 //! `ops::generate_image` and, for Together AI, `ops::rerank` work with the
-//! provider's models. `list_models` and `probe` return
-//! `Error::UnsupportedOperation` for every host.
+//! provider's models. DeepSeek reads its `deepseek` options entry, message
+//! options and image parts as its package does (HST-033 to HST-036), and
+//! `ops::upload_file` uploads images to its files API (HST-037).
+//! `list_models` and `probe` return `Error::UnsupportedOperation` for every
+//! host.
 use crate::{
     Error, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     models::files::DownloadTransport,
@@ -49,6 +52,7 @@ use crate::{
             profile::{ChatProfile, ResponsesProfile},
             protocol::{HostChatProtocol, HostResponsesProtocol},
         },
+        operations::{Item, UploadFile, UploadParams, UploadedFile},
     },
     transport::HttpTransport,
 };
@@ -58,6 +62,7 @@ use std::{fmt, sync::Arc};
 pub mod cerebras;
 pub mod deepinfra;
 pub mod deepseek;
+mod files;
 pub mod fireworks;
 pub mod huggingface;
 mod images;
@@ -155,6 +160,9 @@ pub(crate) struct Models {
     pub images: Option<images::Images>,
     /// Together AI's reranking (HST-032).
     pub reranking: bool,
+    /// DeepSeek's files API, upload only (HST-037), which the provider
+    /// serves.
+    pub files: bool,
 }
 impl Models {
     /// The language model alone.
@@ -162,24 +170,33 @@ impl Models {
         embeddings: false,
         images: None,
         reranking: false,
+        files: false,
+    };
+    /// DeepSeek's: the language model and the files API.
+    pub(crate) const DEEPSEEK: Self = Self {
+        files: true,
+        ..Self::CHAT
     };
     /// DeepInfra's: embeddings and images.
     pub(crate) const DEEPINFRA: Self = Self {
         embeddings: true,
         images: Some(images::Images::DeepInfra),
         reranking: false,
+        files: false,
     };
     /// Fireworks': embeddings and images.
     pub(crate) const FIREWORKS: Self = Self {
         embeddings: true,
         images: Some(images::Images::Fireworks),
         reranking: false,
+        files: false,
     };
     /// Together AI's: embeddings, images and reranking.
     pub(crate) const TOGETHER_AI: Self = Self {
         embeddings: true,
         images: Some(images::Images::TogetherAI),
         reranking: true,
+        files: false,
     };
     /// Whether the host serves a model kind beside its language model.
     fn beside_chat(self) -> bool {
@@ -187,6 +204,14 @@ impl Models {
     }
 }
 impl Host {
+    /// The error and credential rules of the host's API.
+    fn api(&self) -> &'static ApiProfile {
+        match self.protocol {
+            HostProtocol::Chat(profile) => &profile.api,
+            HostProtocol::Responses(profile) => &profile.api,
+            HostProtocol::Messages(profile) => &profile.api,
+        }
+    }
     /// The protocol of the host's models: its language model's, with the
     /// other model kinds it serves.
     fn protocol(
@@ -303,6 +328,19 @@ impl Provider for HostProvider {
     }
     fn is_configured(&self) -> bool {
         self.api_key().is_some_and(|key| !key.is_empty()) && self.config.is_configured()
+    }
+    /// Upload a file to a host with a files API (DeepSeek, HST-037). File
+    /// info, download and delete stay unsupported, as the TypeScript package
+    /// has them.
+    async fn upload_file(
+        &self,
+        file: UploadFile,
+        params: UploadParams,
+    ) -> Result<Item<UploadedFile>, Error> {
+        if !self.host.models.files {
+            return Err(Error::UnsupportedOperation("upload_file".into()));
+        }
+        files::deepseek_upload(self.host.api(), self, file, params).await
     }
 }
 

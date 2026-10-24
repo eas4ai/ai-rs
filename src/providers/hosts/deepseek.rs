@@ -1,14 +1,22 @@
-//! DeepSeek over Chat Completions. A reasoning effort goes out as
-//! `thinking: {"type": "enabled"}` with `reasoning_effort` (`minimal` as
-//! `low`, `medium` as `high`, `xhigh` as `max`), and disabled reasoning as
-//! `thinking: {"type": "disabled"}`. V4 models reason unless reasoning is
-//! disabled, and so does `deepseek-reasoner`; while a model reasons, a
-//! temperature or top-p fails with `Error::Validation`, as do penalties,
-//! seeds and the settings DeepSeek does not take, such as a service tier. An
-//! output schema goes out as JSON mode with the schema in a first system
-//! message. V4 models get `reasoning_content` back on every assistant turn;
-//! earlier models get none from before the last user turn. User files must be
-//! GIF, JPEG, PNG or WebP images.
+//! DeepSeek over Chat Completions, as `@ai-sdk/deepseek` 3.0.70 sends it. A
+//! reasoning effort goes out as `thinking: {"type": "enabled"}` with
+//! `reasoning_effort` (`minimal` as `low`, `medium` as `high`, `xhigh` as
+//! `max`), and disabled reasoning as `thinking: {"type": "disabled"}`; the
+//! `deepseek` options entry (`thinking`, `reasoningEffort`, `logprobs`,
+//! `topLogprobs`, `userId`) wins over the core settings. V4 models reason
+//! unless reasoning is disabled, and so does `deepseek-reasoner`; while a
+//! model reasons, a temperature or top-p fails with `Error::Validation`, as
+//! do penalties, seeds and the settings DeepSeek does not take, such as a
+//! service tier. An output schema goes out as JSON mode with the schema in a
+//! first system message. V4 models get `reasoning_content` back on every
+//! assistant turn; earlier models get none from before the last user turn.
+//! User and tool-result images must be GIF, JPEG, PNG or WebP; they go as
+//! URLs or data URLs with the part's `imageDetail`, name an uploaded file by
+//! its `file-` id, or, with `fileData: true`, go as `file_data`. A message's
+//! `deepseek` metadata names it; on a base URL ending in `/beta`, the last
+//! assistant message may set `prefix: true` and function tools may be
+//! strict. The final message carries DeepSeek's `deepseek` metadata, and
+//! `ops::upload_file` uploads images to `<base>/files`.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
@@ -67,7 +75,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.deepseek.com",
     api_key_env: "DEEPSEEK_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
-    models: Models::CHAT,
+    models: Models::DEEPSEEK,
 };
 
 /// Build the DeepSeek provider. An unset base URL becomes
