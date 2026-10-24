@@ -183,6 +183,18 @@ fn message_events(response: &Value) -> Vec<Value> {
                 }
                 json!({"type": "thinking", "thinking": ""})
             }
+            "compaction" => {
+                // The summary goes as a delta, as a streamed compaction sends
+                // it, whether or not the block is signed.
+                if let Some(content) = block.get("content").filter(|c| c.is_string()) {
+                    deltas.push(json!({"type": "compaction_delta", "content": content}));
+                }
+                let mut opened = block.clone();
+                if let Some(opened) = opened.as_object_mut() {
+                    opened.remove("content");
+                }
+                opened
+            }
             "tool_use" | "server_tool_use" => {
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
                 deltas.push(json!({"type": "input_json_delta", "partial_json": input.to_string()}));
