@@ -4365,3 +4365,68 @@ async fn hst_032_an_unknown_option_fails_and_errors_give_their_message() {
     };
     assert_eq!(error.message, "bad query");
 }
+
+#[tokio::test(start_paused = true)]
+async fn hst_030_and_hst_031_a_registry_carries_the_download_transport() {
+    // A Fireworks Kontext sample on another origin.
+    let transport = Recorder::new(kontext_replies("https://cdn.fireworks.test/x.png", "Ready"));
+    let downloads = Arc::new(Downloads::default());
+    let mut registry = ProviderRegistry::new();
+    fireworks::register_with_downloads(
+        &mut registry,
+        key_config(),
+        transport.clone(),
+        downloads.clone(),
+    )
+    .unwrap();
+    let model = Model::new(
+        "accounts/fireworks/models/flux-kontext-pro",
+        registry.get_provider("fireworks").unwrap(),
+    );
+    let item = suprnova_ai::ops::generate_image(
+        &model,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(png_bytes(&item.value[0]), [1, 2, 3]);
+    assert_eq!(
+        *downloads.urls.lock().unwrap(),
+        vec!["https://cdn.fireworks.test/x.png".to_owned()]
+    );
+    // A DeepInfra edit of an image URL.
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let downloads = Arc::new(Downloads::default());
+    let mut registry = ProviderRegistry::new();
+    deepinfra::register_with_downloads(
+        &mut registry,
+        key_config(),
+        transport.clone(),
+        downloads.clone(),
+    )
+    .unwrap();
+    let model = Model::new(
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        registry.get_provider("deepinfra").unwrap(),
+    );
+    suprnova_ai::ops::generate_image(
+        &model,
+        prompt(
+            "a cat",
+            vec![MediaInput::Url("https://img.test/a.png".into())],
+            None,
+        ),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *downloads.urls.lock().unwrap(),
+        vec!["https://img.test/a.png".to_owned()]
+    );
+    let form = String::from_utf8_lossy(&transport.request().body).into_owned();
+    assert!(form.contains("image/jpeg"), "{form}");
+}
