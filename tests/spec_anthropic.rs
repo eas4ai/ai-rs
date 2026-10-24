@@ -146,6 +146,106 @@ fn metadata(value: Value) -> Option<suprnova_ai::types::messages::Metadata> {
     Some([("anthropic".to_owned(), value)].into())
 }
 
+/// The betas of recorded request `index`, in order.
+fn betas(transport: &Recorder, index: usize) -> Vec<String> {
+    transport
+        .header(index, "anthropic-beta")
+        .map(|b| b.split(',').map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+/// The body and betas of a call to `id` with these options.
+async fn sent(id: &str, messages: Vec<Message>, options: StreamOptions) -> (Value, Vec<String>) {
+    let transport = Recorder::new([text_reply()]);
+    run(&model(id, transport.clone()), messages, options).await;
+    (transport.body(0), betas(&transport, 0))
+}
+/// The error a call with these options fails with, after checking that it
+/// sent no request.
+async fn refused(id: &str, messages: Vec<Message>, options: StreamOptions) -> suprnova_ai::Error {
+    let transport = Recorder::new([]);
+    let mut handle = suprnova_ai::stream(&model(id, transport.clone()), messages, options);
+    let error = loop {
+        match handle.next().await {
+            Some(Err(error)) => break error,
+            Some(Ok(_)) => {}
+            None => panic!("the call did not fail"),
+        }
+    };
+    assert!(transport.requests.lock().unwrap().is_empty(), "{error:?}");
+    error
+}
+fn function_tool(name: &str) -> Tool {
+    Tool::function(
+        name,
+        suprnova_ai::types::tools::ToolSpec {
+            description: Some(format!("The {name} tool")),
+            params: json!({"type": "object", "properties": {}})
+                .try_into()
+                .unwrap(),
+        },
+    )
+}
+fn with_params(params: InferenceRequestParams) -> StreamOptions {
+    StreamOptions {
+        params: Some(params),
+        ..Default::default()
+    }
+}
+fn with_anthropic(params: InferenceRequestParams, options: Value) -> StreamOptions {
+    with_params(params.with_provider_param("anthropic", options))
+}
+
+/// The `setting` and `model` of each debug event of target
+/// `suprnova_ai::anthropic` that a call logs while the guard lives.
+struct Logs(Arc<Mutex<Vec<(String, String)>>>);
+impl Logs {
+    fn take(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.0.lock().unwrap())
+    }
+}
+fn capture_logs() -> (Logs, tracing::subscriber::DefaultGuard) {
+    let events = Arc::new(Mutex::new(vec![]));
+    let guard = tracing::subscriber::set_default(Capture(events.clone()));
+    (Logs(events), guard)
+}
+struct Capture(Arc<Mutex<Vec<(String, String)>>>);
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let meta = event.metadata();
+        if meta.target() != "suprnova_ai::anthropic" || *meta.level() != tracing::Level::DEBUG {
+            return;
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        self.0.lock().unwrap().push((fields.setting, fields.model));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+#[derive(Default)]
+struct Fields {
+    setting: String,
+    model: String,
+}
+impl tracing::field::Visit for Fields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "setting" => self.setting = value.into(),
+            "model" => self.model = value.into(),
+            _ => {}
+        }
+    }
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
 // ANT-001
 
 #[tokio::test]
@@ -301,6 +401,247 @@ async fn ant_002_an_option_goes_out_under_its_wire_name() {
     assert_eq!(body["output_config"]["effort"], "low", "{body}");
 }
 
+#[tokio::test]
+async fn ant_002_each_option_goes_out_with_its_beta() {
+    let cases: Vec<(Value, &str, Value, Option<&str>)> = vec![
+        (
+            json!({"thinking": {"type": "enabled", "budgetTokens": 2000}}),
+            "/thinking",
+            json!({"type": "enabled", "budget_tokens": 2000}),
+            None,
+        ),
+        (
+            json!({"thinking": {"type": "adaptive", "display": "updates"}}),
+            "/thinking",
+            json!({"type": "adaptive", "display": "updates"}),
+            Some("thinking-display-updates-2026-08-18"),
+        ),
+        (
+            json!({"thinking": {"type": "adaptive", "blockBinding": {"prefixMismatchBehavior": "drop_block"}}}),
+            "/thinking",
+            json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}),
+            Some("thinking-binding-controls-2026-08-01"),
+        ),
+        (
+            json!({"thinking": {"blockBinding": {"prefixMismatchBehavior": "error"}}}),
+            "/thinking",
+            json!({"block_binding": {"prefix_mismatch_behavior": "error"}}),
+            Some("thinking-binding-controls-2026-08-01"),
+        ),
+        (
+            json!({"effort": "low"}),
+            "/output_config/effort",
+            json!("low"),
+            None,
+        ),
+        (
+            json!({"taskBudget": {"type": "tokens", "total": 30000, "remaining": 100}}),
+            "/output_config/task_budget",
+            json!({"type": "tokens", "total": 30000, "remaining": 100}),
+            Some("task-budgets-2026-03-13"),
+        ),
+        (
+            json!({"speed": "fast"}),
+            "/speed",
+            json!("fast"),
+            Some("fast-mode-2026-02-01"),
+        ),
+        (
+            json!({"serviceTier": "standard_only"}),
+            "/service_tier",
+            json!("standard_only"),
+            None,
+        ),
+        (
+            json!({"inferenceGeo": "us"}),
+            "/inference_geo",
+            json!("us"),
+            None,
+        ),
+        (
+            json!({"fallbacks": "default"}),
+            "/fallbacks",
+            json!("default"),
+            Some("server-side-fallback-2026-07-01"),
+        ),
+        (
+            json!({"fallbacks": [{"model": "claude-sonnet-4-6", "max_tokens": 100}]}),
+            "/fallbacks",
+            json!([{"model": "claude-sonnet-4-6", "max_tokens": 100}]),
+            Some("server-side-fallback-2026-06-01"),
+        ),
+        (
+            json!({"cacheControl": {"type": "ephemeral", "ttl": "1h"}}),
+            "/cache_control",
+            json!({"type": "ephemeral", "ttl": "1h"}),
+            None,
+        ),
+        (
+            json!({"metadata": {"userId": "u1"}}),
+            "/metadata",
+            json!({"user_id": "u1"}),
+            None,
+        ),
+        (
+            json!({"mcpServers": [{"type": "url", "name": "docs", "url": "https://mcp.test", "authorizationToken": "t1", "toolConfiguration": {"enabled": true, "allowedTools": ["search"]}}]}),
+            "/mcp_servers",
+            json!([{"type": "url", "name": "docs", "url": "https://mcp.test", "authorization_token": "t1", "tool_configuration": {"allowed_tools": ["search"], "enabled": true}}]),
+            Some("mcp-client-2025-04-04"),
+        ),
+        (
+            json!({"container": {"id": "c1"}}),
+            "/container",
+            json!("c1"),
+            None,
+        ),
+        (
+            json!({"container": {"id": "c1", "skills": [{"type": "anthropic", "skillId": "pptx", "version": "latest"}]}}),
+            "/container",
+            json!({"id": "c1", "skills": [{"type": "anthropic", "skill_id": "pptx", "version": "latest"}]}),
+            Some("skills-2025-10-02"),
+        ),
+        (
+            json!({"safeguards": [{"type": "dangerous_tool_use", "classifierContext": {"mode": "auto"}}]}),
+            "/safeguards",
+            json!([{"type": "dangerous_tool_use", "classifier_context": {"mode": "auto"}}]),
+            Some("dangerous-tool-use-2026-09-03"),
+        ),
+        (
+            json!({"compaction": {"type": "summarize", "instructions": "short"}}),
+            "/compaction",
+            json!({"type": "summarize", "instructions": "short"}),
+            Some("compact-2026-09-04"),
+        ),
+        (
+            json!({"contextManagement": {"edits": [{"type": "clear_tool_uses_20250919", "trigger": {"type": "tool_uses", "value": 3}, "keep": {"type": "tool_uses", "value": 1}, "clearAtLeast": {"type": "input_tokens", "value": 5}, "clearToolInputs": true, "excludeTools": ["a"]}]}}),
+            "/context_management",
+            json!({"edits": [{"type": "clear_tool_uses_20250919", "trigger": {"type": "tool_uses", "value": 3}, "keep": {"type": "tool_uses", "value": 1}, "clear_at_least": {"type": "input_tokens", "value": 5}, "clear_tool_inputs": true, "exclude_tools": ["a"]}]}),
+            Some("context-management-2025-06-27"),
+        ),
+        (
+            json!({"contextManagement": {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 90000}, "pauseAfterCompaction": true, "instructions": "keep facts"}]}}),
+            "/context_management",
+            json!({"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 90000}, "pause_after_compaction": true, "instructions": "keep facts"}]}),
+            Some("compact-2026-01-12"),
+        ),
+        (
+            json!({"contextManagement": {"edits": [{"type": "clear_thinking_20251015", "keep": {"type": "thinking_turns", "value": 2}}]}}),
+            "/context_management",
+            json!({"edits": [{"type": "clear_thinking_20251015", "keep": {"type": "thinking_turns", "value": 2}}]}),
+            Some("context-management-2025-06-27"),
+        ),
+        (
+            json!({"anthropicBeta": ["my-beta-2026-01-01"]}),
+            "/model",
+            json!("claude-sonnet-4-6"),
+            Some("my-beta-2026-01-01"),
+        ),
+    ];
+    for (options, pointer, expected, beta) in cases {
+        let (body, betas) = sent(
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            anthropic(options.clone()),
+        )
+        .await;
+        assert_eq!(body.pointer(pointer), Some(&expected), "{options}: {body}");
+        if let Some(beta) = beta {
+            assert!(betas.iter().any(|b| b == beta), "{options}: {betas:?}");
+        }
+    }
+    // Container skills need three betas.
+    let (_, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        anthropic(json!({"container": {"skills": [{"type": "anthropic", "skillId": "pptx"}]}})),
+    )
+    .await;
+    for beta in [
+        "code-execution-2025-08-25",
+        "skills-2025-10-02",
+        "files-api-2025-04-14",
+    ] {
+        assert!(betas.iter().any(|b| b == beta), "{betas:?}");
+    }
+}
+
+#[tokio::test]
+async fn ant_002_a_custom_skill_names_its_anthropic_reference() {
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        anthropic(json!({"container": {"skills": [{"type": "custom", "providerReference": {"anthropic": "skill_01", "openai": "x"}, "version": "2"}]}})),
+    )
+    .await;
+    assert_eq!(
+        body["container"],
+        json!({"skills": [{"type": "custom", "skill_id": "skill_01", "version": "2"}]})
+    );
+}
+
+#[tokio::test]
+async fn ant_002_disabled_parallel_tool_use_sends_an_auto_choice() {
+    let mut options = anthropic(json!({"disableParallelToolUse": true}));
+    options.tools = vec![function_tool("weather")];
+    let (body, _) = sent("claude-sonnet-4-6", vec![user("hi")], options).await;
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "auto", "disable_parallel_tool_use": true})
+    );
+}
+
+#[tokio::test]
+async fn ant_002_an_option_takes_precedence_over_its_core_parameter() {
+    use suprnova_ai::models::params::ProviderServiceParams;
+    let params = InferenceRequestParams {
+        provider_service: Some(ProviderServiceParams {
+            service_tier: ProviderValue::Value("auto".into()),
+        }),
+        safety_identifier: Some("core-user".into()),
+        ..Default::default()
+    };
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_anthropic(
+            params,
+            json!({"serviceTier": "standard_only", "metadata": {"userId": "option-user"}}),
+        ),
+    )
+    .await;
+    assert_eq!(body["service_tier"], "standard_only", "{body}");
+    assert_eq!(
+        body["metadata"],
+        json!({"user_id": "option-user"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_002_unknown_and_invalid_options_fail_before_a_request() {
+    for options in [
+        json!({"reasoningEffort": "low"}),
+        json!({"effort": "huge"}),
+        json!({"effort": null}),
+        json!({"thinking": {"type": "enabled", "display": "omitted"}}),
+        json!({"taskBudget": {"type": "tokens", "total": 100}}),
+        json!({"compaction": {"type": "summarize"}, "contextManagement": {"edits": []}}),
+        json!({"contextManagement": {"edits": [{"type": "unknown_edit"}]}}),
+        json!("not an object"),
+    ] {
+        let error = refused(
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            anthropic(options.clone()),
+        )
+        .await;
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{options}: {error:?}"
+        );
+    }
+}
+
 // ANT-003
 
 #[tokio::test]
@@ -312,6 +653,234 @@ async fn ant_003_max_tokens_default_to_the_model_limit() {
     )
     .await;
     assert_eq!(body["max_tokens"], 128000, "{body}");
+}
+
+fn reasoning(effort: Option<&str>) -> InferenceRequestParams {
+    InferenceRequestParams::default()
+        .with_reasoning_effort(ProviderValue::Value(effort.map(str::to_owned)))
+}
+
+#[tokio::test]
+async fn ant_003_the_output_limit_adds_the_thinking_budget() {
+    use suprnova_ai::models::params::OutputParams;
+    let params = InferenceRequestParams {
+        output: Some(OutputParams {
+            max_tokens: Some(1000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_anthropic(
+            params,
+            json!({"thinking": {"type": "enabled", "budgetTokens": 2000}}),
+        ),
+    )
+    .await;
+    assert_eq!(body["max_tokens"], 3000, "{body}");
+}
+
+#[tokio::test]
+async fn ant_003_a_core_reasoning_effort_maps_as_typescript_maps_it() {
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_params(reasoning(Some("high"))),
+    )
+    .await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "adaptive", "display": "summarized"}),
+        "{body}"
+    );
+    assert_eq!(body["output_config"], json!({"effort": "high"}), "{body}");
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_params(reasoning(Some("minimal"))),
+    )
+    .await;
+    assert_eq!(body["output_config"], json!({"effort": "low"}), "{body}");
+    // xhigh is max where the model takes no xhigh.
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_params(reasoning(Some("xhigh"))),
+    )
+    .await;
+    assert_eq!(body["output_config"], json!({"effort": "max"}), "{body}");
+    let (body, _) = sent(
+        "claude-opus-4-8",
+        vec![user("hi")],
+        with_params(reasoning(Some("xhigh"))),
+    )
+    .await;
+    assert_eq!(body["output_config"], json!({"effort": "xhigh"}), "{body}");
+    // Budget thinking: 30 percent of a 64000 limit.
+    let (body, _) = sent(
+        "claude-sonnet-4-5",
+        vec![user("hi")],
+        with_params(reasoning(Some("medium"))),
+    )
+    .await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 19200}),
+        "{body}"
+    );
+    assert_eq!(body["max_tokens"], 64000, "{body}");
+    // At least 1024.
+    let (body, _) = sent(
+        "claude-3-haiku-20240307",
+        vec![user("hi")],
+        with_params(reasoning(Some("minimal"))),
+    )
+    .await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 1024}),
+        "{body}"
+    );
+    // Disabled reasoning.
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_params(reasoning(None)),
+    )
+    .await;
+    assert_eq!(body["thinking"], json!({"type": "disabled"}), "{body}");
+    let (body, _) = sent(
+        "claude-sonnet-5-5",
+        vec![user("hi")],
+        with_params(reasoning(None)),
+    )
+    .await;
+    assert_eq!(body["thinking"], json!({"type": "between_tools"}), "{body}");
+    let (body, _) = sent(
+        "claude-opus-5-5",
+        vec![user("hi")],
+        with_params(reasoning(None)),
+    )
+    .await;
+    assert!(body.get("thinking").is_none(), "{body}");
+    assert_eq!(body["output_config"], json!({"effort": "low"}), "{body}");
+    // An effort option wins over the core effort.
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_anthropic(reasoning(Some("high")), json!({"effort": "medium"})),
+    )
+    .await;
+    assert_eq!(body["output_config"], json!({"effort": "medium"}), "{body}");
+    assert!(body.get("thinking").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn ant_003_a_core_reasoning_summary_sets_the_display() {
+    use suprnova_ai::models::params::OutputParams;
+    let summary = |summary: Option<&str>, effort: Option<Option<&str>>| {
+        let params = InferenceRequestParams {
+            output: Some(OutputParams {
+                reasoning_summary: ProviderValue::Value(summary.map(str::to_owned)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match effort {
+            Some(effort) => with_params(
+                params.with_reasoning_effort(ProviderValue::Value(effort.map(str::to_owned))),
+            ),
+            None => with_params(params),
+        }
+    };
+    let (body, _) = sent("claude-sonnet-4-6", vec![user("hi")], summary(None, None)).await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "adaptive", "display": "omitted"}),
+        "{body}"
+    );
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        summary(Some("detailed"), Some(Some("high"))),
+    )
+    .await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "adaptive", "display": "summarized"}),
+        "{body}"
+    );
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        summary(None, Some(None)),
+    )
+    .await;
+    assert_eq!(body["thinking"], json!({"type": "disabled"}), "{body}");
+}
+
+#[tokio::test]
+async fn ant_003_core_parameters_go_out_under_their_wire_names() {
+    use suprnova_ai::models::params::{CacheParams, ContextManagementParams, TokenThreshold};
+    let params = InferenceRequestParams {
+        safety_identifier: Some("u1".into()),
+        cache: Some(CacheParams {
+            retention: ProviderValue::Value("1h".into()),
+            ..Default::default()
+        }),
+        context_management: Some(ContextManagementParams {
+            compaction: Some(TokenThreshold(80_000)),
+        }),
+        ..Default::default()
+    }
+    .with_temperature(0.4);
+    let mut options = with_params(params);
+    options.tools = vec![function_tool("weather")];
+    options.tool_choice = Some(suprnova_ai::types::tools::ToolChoice::Required);
+    let (body, _) = sent("claude-sonnet-4-6", vec![user("hi")], options).await;
+    assert_eq!(body["temperature"], 0.4, "{body}");
+    assert_eq!(body["metadata"], json!({"user_id": "u1"}), "{body}");
+    assert_eq!(
+        body["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"}),
+        "{body}"
+    );
+    assert_eq!(
+        body["context_management"],
+        json!({"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 80000}}]})
+    );
+    assert_eq!(body["tool_choice"], json!({"type": "any"}), "{body}");
+}
+
+#[tokio::test]
+async fn ant_003_settings_anthropic_never_takes_fail_before_a_request() {
+    let cases: Vec<Value> = vec![
+        json!({"sampling": {"value": {"seed": {"seed": {"value": {"value": 5}}}}}}),
+        json!({"sampling": {"value": {"min_p": {"min_p": {"value": 0.1}}}}}),
+        json!({"sampling": {"value": {"repetition_penalty": {"frequency_penalty": {"value": 0.1}, "presence_penalty": "default", "repetition_penalty": "default", "consideration_window": "default"}}}}),
+        json!({"sampling": {"value": {"repetition_penalty": {"frequency_penalty": "default", "presence_penalty": {"value": 0.1}, "repetition_penalty": "default", "consideration_window": "default"}}}}),
+        json!({"sampling": {"value": {"repetition_penalty": {"frequency_penalty": "default", "presence_penalty": "default", "repetition_penalty": {"value": 1.1}, "consideration_window": "default"}}}}),
+        json!({"sampling": {"value": {"repetition_penalty": {"frequency_penalty": "default", "presence_penalty": "default", "repetition_penalty": "default", "consideration_window": {"value": 5}}}}}),
+        json!({"tool_calling": {"tool_choice": "auto", "max_tool_calls": {"value": 1}}}),
+        json!({"output": {"text_verbosity": {"value": "high"}}}),
+        json!({"output": {"include": []}}),
+        json!({"metadata": {"a": "b"}}),
+        json!({"cache": {"key": "k"}}),
+        json!({"cache": {"mode": {"value": "auto"}}}),
+        json!({"tool_calling": {"tool_choice": {"tools": ["a", "b"], "mode": "auto"}}}),
+        json!({"reasoning": {"value": {"effort": {"value": "turbo"}}}}),
+    ];
+    for case in cases {
+        let params: InferenceRequestParams =
+            serde_json::from_value(case.clone()).unwrap_or_else(|e| panic!("{case}: {e}"));
+        let error = refused("claude-sonnet-4-6", vec![user("hi")], with_params(params)).await;
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{case}: {error:?}"
+        );
+    }
 }
 
 // ANT-004
@@ -333,6 +902,164 @@ async fn ant_004_a_temperature_on_a_model_that_rejects_sampling_is_left_out() {
     )
     .await;
     assert!(body.get("temperature").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn ant_004_settings_typescript_changes_are_changed_and_logged() {
+    use suprnova_ai::models::params::{OutputParams, SamplerParams, TopPSamplerParams};
+    let temperature = |t: f64| InferenceRequestParams::default().with_temperature(t);
+    let top_p_and_temperature = || {
+        let mut params = temperature(0.5);
+        if let ProviderValue::Value(SamplerParams { top_p, .. }) = &mut params.sampling {
+            *top_p = Some(TopPSamplerParams {
+                top_p: ProviderValue::Value(Some(0.9)),
+            });
+        }
+        params
+    };
+    let limit = |max: u64| InferenceRequestParams {
+        output: Some(OutputParams {
+            max_tokens: Some(max),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let breakpoint = |text: &str| {
+        let mut part = TextPart::new(text);
+        part.provider_metadata = metadata(json!({"cacheControl": {"type": "ephemeral"}}));
+        Part::Text(part)
+    };
+    let five = vec![Message::new(
+        MessageRole::User,
+        (1..=5).map(|i| breakpoint(&format!("part {i}"))).collect(),
+    )];
+    let mut required = with_params(InferenceRequestParams::default());
+    required.tools = vec![function_tool("weather")];
+    required.tool_choice = Some(suprnova_ai::types::tools::ToolChoice::Required);
+    let cases: Vec<(&str, Vec<Message>, StreamOptions, &str, &str, Option<Value>)> = vec![
+        (
+            "claude-opus-5",
+            vec![user("hi")],
+            with_params(temperature(0.5)),
+            "temperature",
+            "/temperature",
+            None,
+        ),
+        (
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            with_params(temperature(1.5)),
+            "temperature",
+            "/temperature",
+            Some(json!(1.0)),
+        ),
+        (
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            with_anthropic(temperature(0.5), json!({"thinking": {"type": "adaptive"}})),
+            "temperature",
+            "/temperature",
+            None,
+        ),
+        (
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            with_params(top_p_and_temperature()),
+            "topP",
+            "/top_p",
+            None,
+        ),
+        (
+            "claude-sonnet-5-5",
+            vec![user("hi")],
+            anthropic(json!({"thinking": {"type": "disabled"}})),
+            "thinking",
+            "/thinking",
+            Some(json!({"type": "between_tools"})),
+        ),
+        (
+            "claude-fable-5-1",
+            vec![user("hi")],
+            anthropic(json!({"thinking": {"type": "disabled"}})),
+            "thinking",
+            "/thinking",
+            None,
+        ),
+        (
+            "claude-opus-5-5",
+            vec![user("hi")],
+            anthropic(json!({"thinking": {"type": "enabled", "budgetTokens": 2000}})),
+            "thinking",
+            "/thinking",
+            Some(json!({"type": "adaptive"})),
+        ),
+        (
+            "claude-haiku-5-5",
+            vec![user("hi")],
+            anthropic(json!({"thinking": {"type": "disabled"}, "effort": "max"})),
+            "effort",
+            "/output_config/effort",
+            Some(json!("high")),
+        ),
+        (
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            with_params(limit(200_000)),
+            "maxOutputTokens",
+            "/max_tokens",
+            Some(json!(128000)),
+        ),
+        (
+            "claude-opus-5-5",
+            vec![user("hi")],
+            required,
+            "toolChoice",
+            "/tool_choice",
+            Some(json!({"type": "auto"})),
+        ),
+        (
+            "claude-sonnet-4-6",
+            five,
+            StreamOptions::default(),
+            "cacheControl",
+            "/messages/0/content/4/cache_control",
+            None,
+        ),
+    ];
+    for (model_id, messages, options, setting, pointer, expected) in cases {
+        let (logs, _guard) = capture_logs();
+        let (body, _) = sent(model_id, messages, options).await;
+        assert_eq!(
+            body.pointer(pointer),
+            expected.as_ref(),
+            "{model_id} {setting}: {body}"
+        );
+        let logged = logs.take();
+        assert!(
+            logged.contains(&(setting.to_owned(), model_id.to_owned())),
+            "{model_id} {setting}: {logged:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ant_004_settings_a_model_takes_are_not_changed() {
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_params(InferenceRequestParams::default().with_temperature(0.5)),
+    )
+    .await;
+    assert_eq!(body["temperature"], 0.5, "{body}");
+    let (body, _) = sent(
+        "claude-haiku-5-5",
+        vec![user("hi")],
+        anthropic(json!({"thinking": {"type": "adaptive"}, "effort": "max"})),
+    )
+    .await;
+    assert_eq!(body["output_config"]["effort"], "max", "{body}");
+    assert_eq!(logs.take(), vec![]);
 }
 
 // ANT-005
