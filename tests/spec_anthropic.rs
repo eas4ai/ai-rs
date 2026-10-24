@@ -3372,6 +3372,23 @@ impl suprnova_ai::providers::google_vertex::AccessTokenSource for VertexToken {
 }
 
 #[tokio::test]
+async fn ant_016_minimax_logs_the_efforts_it_changes() {
+    // MiniMax 3.1 and later always reason: none and minimal go as effort
+    // low, with a log, as TypeScript warns; low goes unchanged.
+    for (effort, logged) in [(None, true), (Some("minimal"), true), (Some("low"), false)] {
+        let (logs, _guard) = capture_logs();
+        let body = minimax_body("MiniMax-M3.1", with_params(reasoning(effort))).await;
+        assert_eq!(body["output_config"]["effort"], "low", "{effort:?} {body}");
+        assert_eq!(
+            logs.take()
+                .contains(&("reasoning".to_owned(), "MiniMax-M3.1".to_owned())),
+            logged,
+            "{effort:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn ant_016_vertex_uses_the_json_tool_and_no_strict_flag() {
     use suprnova_ai::providers::google_vertex;
     let transport = Recorder::new([text_reply()]);
