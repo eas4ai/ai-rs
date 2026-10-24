@@ -78,6 +78,7 @@ impl ProviderProtocol for OpenAICompletionsProtocol {
         provider: &dyn Provider,
     ) -> EventStream {
         let request = request(*self, &model.id, provider, messages, &options);
+        let api = self.api(provider);
         let provider_name = provider.name().to_owned();
         let model_id = model.id.clone();
         let transport = provider.shared_transport();
@@ -89,7 +90,7 @@ impl ProviderProtocol for OpenAICompletionsProtocol {
                 )
             })?;
             let response = http::send(
-                &errors::API,
+                api,
                 transport.as_ref(),
                 request,
                 &provider_name,
@@ -100,6 +101,20 @@ impl ProviderProtocol for OpenAICompletionsProtocol {
         })
         .try_flatten()
         .boxed()
+    }
+}
+
+impl OpenAICompletionsProtocol {
+    /// The rules of the API the protocol calls: OpenAI's; a host's, so its
+    /// errors read as its chat errors do (HST-027); or a compatible
+    /// server's, which gets no OpenAI organization or project.
+    fn api(self, provider: &dyn Provider) -> &'static http::ApiProfile {
+        match self.compatible {
+            Some(_) => {
+                crate::providers::hosts::chat_api(provider).unwrap_or(&errors::COMPATIBLE_API)
+            }
+            None => &errors::API,
+        }
     }
 }
 
@@ -396,11 +411,7 @@ fn request(
     if let Some(extra) = &p.extra_body {
         body.extend(extra.clone());
     }
-    // An OpenAI-compatible server gets no OpenAI organization or project.
-    let api = match protocol.compatible {
-        Some(_) => &errors::COMPATIBLE_API,
-        None => &errors::API,
-    };
+    let api = protocol.api(provider);
     http_request(
         api,
         "POST",

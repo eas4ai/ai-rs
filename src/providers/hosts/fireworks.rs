@@ -8,7 +8,10 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
+        openai::{
+            OpenAICompletionsProtocol,
+            profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
+        },
     },
     transport::HttpTransport,
 };
@@ -57,6 +60,14 @@ pub(super) static HOST: Host = Host {
 /// unset key variable `FIREWORKS_API_KEY`.
 pub fn provider(config: ProviderConfig, transport: Arc<dyn HttpTransport>) -> HostProvider {
     HostProvider::new(&HOST, config, transport)
+}
+
+/// The protocol of a Fireworks completion model: OAI-015's compatible
+/// completions, with streamed usage. Set it on a model of this provider with
+/// `Model::with_protocol`; the call reads its options from the `fireworks`
+/// entry.
+pub fn completion_protocol() -> OpenAICompletionsProtocol {
+    OpenAICompletionsProtocol::compatible(true)
 }
 
 /// Register the Fireworks provider under `fireworks` and `@ai-sdk/fireworks`, with

@@ -37,6 +37,7 @@ use crate::{
     providers::{
         ModelsDevProvider,
         anthropic::protocol::{HostMessagesProtocol, MessagesProfile},
+        http::ApiProfile,
         openai::{
             profile::{ChatProfile, ResponsesProfile},
             protocol::{HostChatProtocol, HostResponsesProtocol},
@@ -82,6 +83,18 @@ fn host_for(metadata: &ModelsDevProvider) -> Option<&'static Host> {
         .find(|host| metadata.npm.as_deref() == Some(host.handle))
         .or_else(|| HOSTS.iter().find(|host| host.name == metadata.id))
         .copied()
+}
+/// The error rules of the Chat Completions host a provider is, for the
+/// completion and embedding calls it makes on the compatible protocols
+/// (HST-027, HST-028).
+pub(crate) fn chat_api(provider: &dyn Provider) -> Option<&'static ApiProfile> {
+    HOSTS
+        .iter()
+        .find(|host| host.name == provider.provider_class_id())
+        .and_then(|host| match host.protocol {
+            HostProtocol::Chat(profile) => Some(&profile.api),
+            HostProtocol::Responses(_) | HostProtocol::Messages(_) => None,
+        })
 }
 /// The Chat Completions profile of the host that models.dev metadata names.
 pub(crate) fn chat_profile_for(metadata: &ModelsDevProvider) -> Option<&'static ChatProfile> {

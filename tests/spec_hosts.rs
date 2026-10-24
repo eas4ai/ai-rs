@@ -3475,3 +3475,103 @@ async fn hst_026_invalid_entries_fail_before_a_request() {
         );
     }
 }
+
+// HST-027
+
+type CompletionProtocol = fn() -> openai::OpenAICompletionsProtocol;
+
+/// The three hosts' completion protocols, completions URLs, and whether
+/// they ask for streamed usage.
+const COMPLETIONS: [(&str, CompletionProtocol, &str, bool); 3] = [
+    (
+        "togetherai",
+        togetherai::completion_protocol,
+        "https://api.together.xyz/v1/completions",
+        true,
+    ),
+    (
+        "deepinfra",
+        deepinfra::completion_protocol,
+        "https://api.deepinfra.com/v1/openai/completions",
+        false,
+    ),
+    (
+        "fireworks",
+        fireworks::completion_protocol,
+        "https://api.fireworks.ai/inference/v1/completions",
+        true,
+    ),
+];
+
+fn completion_stream(text: &str) -> (u16, Vec<u8>) {
+    chat_sse(&[
+        json!({"id": "cmpl_1", "object": "text_completion", "model": "m", "choices": [{"index": 0, "text": text, "finish_reason": null}]}),
+        json!({"id": "cmpl_1", "object": "text_completion", "model": "m", "choices": [{"index": 0, "text": "", "finish_reason": "stop"}]}),
+    ])
+}
+
+fn completions_model(name: &str, protocol: CompletionProtocol, transport: Arc<Recorder>) -> Model {
+    model(name, "some-model", transport).with_protocol(Arc::new(protocol()))
+}
+
+#[tokio::test]
+async fn hst_027_each_host_gives_its_completion_protocol() {
+    for (name, protocol, url, usage) in COMPLETIONS {
+        let transport = Recorder::new([completion_stream("hi")]);
+        let model = completions_model(name, protocol, transport.clone());
+        let (handle, events) = call(
+            &model,
+            vec![user_message("hello")],
+            entries(&[(name, json!({"echo": true, "suffix": "end"}))]),
+        )
+        .await;
+        ok(&events);
+        assert_eq!(handle.text(), "hi", "{name}");
+        let request = transport.request();
+        assert_eq!(request.url, url, "{name}");
+        assert_eq!(
+            transport.header("authorization").as_deref(),
+            Some("Bearer sk-test"),
+            "{name}"
+        );
+        let body = transport.body();
+        assert_eq!(body["stream_options"].is_object(), usage, "{name}: {body}");
+        assert_eq!(body["echo"], true, "{name}: {body}");
+        assert_eq!(body["suffix"], "end", "{name}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn hst_027_completion_errors_read_as_the_hosts_chat_errors() {
+    for (status, body, message, kind) in [
+        (
+            400,
+            json!({"error": "bad prompt"}),
+            "bad prompt",
+            ProviderErrorKind::BadRequest,
+        ),
+        (
+            503,
+            json!({"error": {"message": "busy"}}),
+            "busy",
+            ProviderErrorKind::ServiceUnavailable,
+        ),
+    ] {
+        let transport = Recorder::new([(status, body.to_string().into_bytes())]);
+        let model = completions_model("fireworks", fireworks::completion_protocol, transport);
+        let options = StreamOptions {
+            retry: suprnova_ai::RetryPolicy::none(),
+            ..Default::default()
+        };
+        let (_, events) = call(&model, vec![user_message("hello")], options).await;
+        let error = events
+            .into_iter()
+            .find_map(Result::err)
+            .expect("the call failed");
+        let Error::Provider(error) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(error.message, message);
+        assert_eq!(error.kind, kind, "HTTP {status}");
+    }
+}
