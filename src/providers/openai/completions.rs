@@ -411,9 +411,12 @@ fn request(
                 )));
             }
         }
-        // Another server takes no logprobs, and its other options as given.
+        // Another server takes no logprobs, and its other options as given,
+        // except the fields TypeScript sets after them.
         Some(_) => {
-            provider_options.remove("logprobs");
+            for kept in ["logprobs", "prompt", "stop", "stream", "stream_options"] {
+                provider_options.remove(kept);
+            }
             body.extend(provider_options);
         }
     }

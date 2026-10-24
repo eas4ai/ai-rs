@@ -4608,3 +4608,28 @@ async fn hst_029_and_hst_030_an_image_response_above_8_mib_is_read() {
     .unwrap();
     assert_eq!(png_bytes(&item.value[0]).len(), big.len());
 }
+
+#[tokio::test]
+async fn hst_027_a_completion_entry_does_not_replace_the_prompt_or_the_stream() {
+    let transport = Recorder::new([completion_stream("hi")]);
+    let model = completions_model(
+        "deepinfra",
+        deepinfra::completion_protocol,
+        transport.clone(),
+    );
+    let entry = json!({"prompt": "other", "stop": ["x"], "stream": false,
+        "stream_options": {"include_usage": true}, "repetition_penalty": 1.1});
+    let (_, events) = call(
+        &model,
+        vec![user_message("hello")],
+        entries(&[("deepinfra", entry)]),
+    )
+    .await;
+    ok(&events);
+    let body = transport.body();
+    assert_ne!(body["prompt"], "other", "{body}");
+    assert_ne!(body["stop"], json!(["x"]), "{body}");
+    assert_eq!(body["stream"], true, "{body}");
+    assert!(body.get("stream_options").is_none(), "{body}");
+    assert_eq!(body["repetition_penalty"], 1.1, "{body}");
+}
