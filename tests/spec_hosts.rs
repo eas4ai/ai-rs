@@ -5291,3 +5291,59 @@ async fn hst_035_invalid_deepseek_image_parts_fail_before_a_request() {
     let error = deepseek_rejected(DEEPSEEK_URL, tool_round(result), Default::default()).await;
     assert!(matches!(error, Error::Validation(_)), "{error:?}");
 }
+
+#[tokio::test]
+async fn hst_036_the_final_message_carries_deepseek_metadata() {
+    let logprob =
+        |token: &str| json!({"token": token, "logprob": -0.1, "bytes": null, "top_logprobs": []});
+    let transport = Recorder::new([chat_sse(&[
+        json!({"id":"r1","object":"chat.completion.chunk","model":"m","system_fingerprint":"fp_1",
+            "choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"logprobs":{"content":[logprob("h")]}}]}),
+        json!({"object":"chat.completion.chunk","system_fingerprint":"fp_1",
+            "choices":[{"index":0,"delta":{"content":"!"},"logprobs":{"content":[logprob("!")],"reasoning_content":[logprob("r")]}}]}),
+        json!({"object":"chat.completion.chunk",
+            "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}),
+        json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40}}),
+    ])]);
+    let first = model("deepseek", "deepseek-v4-flash", transport);
+    let (handle, events) = call(
+        &first,
+        vec![user_message("hello")],
+        with_tools(tools(&["lookup"])),
+    )
+    .await;
+    ok(&events);
+    let md = handle.message().provider_metadata.as_ref().unwrap()["deepseek"].clone();
+    assert_eq!(
+        md,
+        json!({
+            "promptCacheHitTokens": 60,
+            "promptCacheMissTokens": 40,
+            "responseObject": "chat.completion.chunk",
+            "choiceIndex": 0,
+            "messageRole": "assistant",
+            "toolCallTypes": ["function"],
+            "logprobs": {"content": [logprob("h"), logprob("!")], "reasoning_content": [logprob("r")]},
+            "systemFingerprint": "fp_1",
+        })
+    );
+    // Nothing the stream did not carry is reported.
+    let transport = Recorder::new([chat_text("hi", "stop")]);
+    let second = model("deepseek", "deepseek-v4-flash", transport);
+    let (handle, events) = call(&second, vec![user_message("hello")], Default::default()).await;
+    ok(&events);
+    let md = handle.message().provider_metadata.as_ref().unwrap()["deepseek"].clone();
+    for key in [
+        "logprobs",
+        "systemFingerprint",
+        "responseObject",
+        "promptCacheHitTokens",
+        "promptCacheMissTokens",
+        "toolCallTypes",
+        "messageRole",
+    ] {
+        assert!(md.get(key).is_none(), "{key} in {md}");
+    }
+    assert_eq!(md["choiceIndex"], 0, "{md}");
+}
