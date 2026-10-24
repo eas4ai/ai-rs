@@ -29,6 +29,18 @@ static PROFILE: MessagesProfile = MessagesProfile {
     },
     always_reasons: names_version_3_1_or_later,
     auth_token_env: None,
+    native_structured_output: true,
+    strict_tools: true,
+    // MiniMax 3.1 and later take a temperature up to 2 and keep sampling
+    // with thinking (ANT-016).
+    max_temperature: |model| {
+        if names_version_3_1_or_later(model) {
+            2.0
+        } else {
+            1.0
+        }
+    },
+    sampling_with_thinking: names_version_3_1_or_later,
 };
 
 pub(super) static HOST: Host = Host {

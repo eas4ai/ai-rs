@@ -9,23 +9,34 @@ use suprnova_ai::{
 };
 
 #[tokio::test]
-async fn multiple_system_messages_are_preserved_and_roles_merge() {
+async fn system_messages_go_first_or_in_place_and_roles_merge() {
+    // The first system message is the top-level system text; a later one
+    // goes in place (ANT-011). The model's limit is the default output
+    // limit (ANT-003).
     let (body, _) = capture(
         vec![
             suprnova_ai::system_message("First instruction."),
             suprnova_ai::user_message("Hi"),
-            suprnova_ai::system_message("Second instruction."),
             suprnova_ai::user_message("Again"),
+            suprnova_ai::system_message("Second instruction."),
+            suprnova_ai::user_message("Last"),
         ],
         StreamOptions::default(),
     )
     .await;
-    assert_eq!(body["system"], "First instruction.\n\nSecond instruction.");
+    assert_eq!(
+        body["system"],
+        json!([{"type":"text","text":"First instruction."}])
+    );
     assert_eq!(
         body["messages"],
-        json!([{"role":"user","content":[{"type":"text","text":"Hi"},{"type":"text","text":"Again"}]}])
+        json!([
+            {"role":"user","content":[{"type":"text","text":"Hi"},{"type":"text","text":"Again"}]},
+            {"role":"system","content":[{"type":"text","text":"Second instruction."}]},
+            {"role":"user","content":[{"type":"text","text":"Last"}]}
+        ])
     );
-    assert_eq!(body["max_tokens"], 8192);
+    assert_eq!(body["max_tokens"], 128000);
     assert_eq!(body["stream"], true);
 }
 #[tokio::test]
@@ -64,10 +75,19 @@ async fn params_translate_to_http_body_and_headers() {
         extra_query: Some([("tag".into(), json!("a b"))].into()),
         ..Default::default()
     };
+    // A tool choice goes only with tools.
+    let weather = Tool::function(
+        "weather",
+        ToolSpec {
+            description: None,
+            params: serde_json::from_value(json!({"type":"object"})).unwrap(),
+        },
+    );
     let (body, request) = capture(
         vec![suprnova_ai::user_message("Hi")],
         StreamOptions {
             params: Some(params),
+            tools: vec![weather],
             ..Default::default()
         },
     )
@@ -90,7 +110,7 @@ async fn params_translate_to_http_body_and_headers() {
     assert_eq!(body["speed"], "fast");
     assert_eq!(
         header(&request, "anthropic-beta").as_deref(),
-        Some("compact-2026-01-12,context-management-2025-06-27")
+        Some("context-management-2025-06-27,compact-2026-01-12,structured-outputs-2025-11-13")
     );
     assert_eq!(
         header(&request, "x-anthropic-feature").as_deref(),
@@ -178,7 +198,11 @@ async fn history_repair_closes_calls_and_rejects_broken_ids() {
         StreamOptions::default(),
     )
     .await;
-    assert_eq!(b["messages"][0]["content"][0]["input"], json!({}));
+    // Arguments that are not a JSON object go as raw invalid input (ANT-009).
+    assert_eq!(
+        b["messages"][0]["content"][0]["input"],
+        json!({"rawInvalidInput": "broken json"})
+    );
     assert_eq!(
         b["messages"][1]["content"][0],
         json!({"type":"tool_result","tool_use_id":"tc-1","content":"Tool result not available","is_error":true})
@@ -221,7 +245,6 @@ async fn sampling_metadata_cache_and_body_overrides() {
             }),
             ..Default::default()
         }),
-        metadata: Some([("a".into(), "b".into())].into()),
         safety_identifier: Some("user".into()),
         cache: Some(CacheParams {
             retention: ProviderValue::Value("1h".into()),
@@ -244,7 +267,7 @@ async fn sampling_metadata_cache_and_body_overrides() {
     assert_eq!(b["temperature"], 0.7);
     assert!(b["top_p"].is_null());
     assert_eq!(b["top_k"], 7);
-    assert_eq!(b["metadata"], json!({"a":"b","user_id":"user"}));
+    assert_eq!(b["metadata"], json!({"user_id":"user"}));
     assert_eq!(b["cache_control"], json!({"type":"ephemeral","ttl":"1h"}));
     assert_eq!(b["service_tier"], "auto");
     assert_eq!(b["max_tokens"], 900);
@@ -257,6 +280,8 @@ async fn unsupported_options_fail_before_http() {
         json!({"output":{"include":[]}}),
         json!({"output":{"text_verbosity":{"value":"high"}}}),
         json!({"cache":{"key":"key"}}),
+        json!({"cache":{"mode":{"value":"auto"}}}),
+        json!({"metadata":{"a":"b"}}),
         json!({"tool_calling":{"tool_choice":"auto","max_tool_calls":{"value":1}}}),
         json!({"tool_calling":{"tool_choice":"none","parallel_tool_calls":{"value":false}}}),
         json!({"tool_calling":{"tool_choice":{"tools":["a","b"],"mode":"auto"}}}),
@@ -301,10 +326,18 @@ async fn tool_choices_reasoning_disabled_and_provider_tool_rejection() {
             json!({"type":"tool","name":"weather"}),
         ),
     ] {
+        let weather = Tool::function(
+            "weather",
+            ToolSpec {
+                description: None,
+                params: serde_json::from_value(json!({"type":"object"})).unwrap(),
+            },
+        );
         let (b, _) = capture(
             vec![],
             StreamOptions {
                 tool_choice: Some(choice),
+                tools: vec![weather],
                 ..Default::default()
             },
         )

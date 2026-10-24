@@ -18,15 +18,22 @@ pub(crate) const API: http::ApiProfile = http::ApiProfile {
     config_headers: &[],
 };
 
-/// An `error` event inside a Messages stream.
+/// An `error` event inside a Messages stream, with the kind of the status
+/// and the retry flag its type gives (ANT-013).
 pub(super) fn stream_error(api: &http::ApiProfile, provider: &str, body: Value) -> Error {
+    let kind = http::error_field(api, &body, "type");
+    let (kind, retryable) = match kind.as_deref().and_then(super::stream::error_status) {
+        Some((status, retryable)) => (ProviderErrorKind::from_status(status), retryable),
+        None => (ProviderErrorKind::Response, false),
+    };
     let mut error = ProviderError::new(
-        ProviderErrorKind::Api,
+        kind,
         http::error_message(api, &body)
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{} stream failed", api.label)),
     )
-    .with_provider(provider);
+    .with_provider(provider)
+    .with_retryable(retryable);
     error.code = http::error_field(api, &body, "code");
     error.param = http::error_field(api, &body, "param");
     error.error_type = http::error_field(api, &body, "type");

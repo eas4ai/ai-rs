@@ -28,8 +28,8 @@ use crate::{
         EventStream,
         anthropic::{
             errors,
-            protocol::{MessagesProfile, SchemaMode, request_parts},
-            stream as messages_stream,
+            protocol::{MessagesProfile, request_parts},
+            stream::{self as messages_stream, Reading},
         },
         http::{self, ApiProfile},
     },
@@ -72,6 +72,11 @@ static PROFILE: MessagesProfile = MessagesProfile {
     },
     always_reasons: |_| false,
     auth_token_env: None,
+    // Vertex AI takes no output format and no strict tools (VTX-013).
+    native_structured_output: false,
+    strict_tools: false,
+    max_temperature: |_| 1.0,
+    sampling_with_thinking: |_| false,
 };
 
 /// The Anthropic tools Vertex AI takes, in the versions it lists.
@@ -493,17 +498,14 @@ fn build(
     options: &StreamOptions,
     config: &ProviderConfig,
     streaming: bool,
-) -> Result<HttpRequest, Error> {
+) -> Result<(HttpRequest, Reading), Error> {
     let base = base_url(config)?;
     check_tools(options)?;
-    let mut parts = request_parts(&PROFILE, &model.id, messages, options, SchemaMode::JsonTool)?;
+    let mut parts = request_parts(&PROFILE, &model.id, messages, options, streaming)?;
     parts.body.remove("model");
     parts
         .body
         .insert("anthropic_version".into(), json!(ANTHROPIC_VERSION));
-    if !streaming {
-        parts.body.remove("stream");
-    }
     let mut headers = parts.headers(config);
     if let Some(labels) = labels(options)?
         && !has_header(config.headers.keys(), LABELS_HEADER)
@@ -516,7 +518,7 @@ fn build(
     } else {
         "rawPredict"
     };
-    http::request_to(
+    let request = http::request_to(
         &API,
         &base,
         config,
@@ -525,7 +527,8 @@ fn build(
         Some(Value::Object(parts.body)),
         headers,
         parts.query,
-    )
+    )?;
+    Ok((request, parts.reading))
 }
 
 impl VertexAnthropicProtocol {
@@ -537,7 +540,7 @@ impl VertexAnthropicProtocol {
         options: &StreamOptions,
         config: &ProviderConfig,
         streaming: bool,
-    ) -> Result<HttpRequest, Error> {
+    ) -> Result<(HttpRequest, Reading), Error> {
         // Check before any download, with each file URL as empty bytes, so
         // that a call that fails validation fetches nothing.
         build(model, &without_urls(&messages), options, config, streaming)?;
@@ -572,17 +575,12 @@ impl ProviderProtocol for VertexAnthropicProtocol {
         let transport = transport_of(provider);
         stream::once(async move {
             let transport = transport?;
-            let request = protocol
+            let (request, reading) = protocol
                 .prepare(&model, messages, &options, &config, true)
                 .await?;
             let response =
                 http::send(&API, transport.as_ref(), request, &name, Some(&model.id)).await?;
-            Ok::<_, Error>(messages_stream::parse(
-                response.body,
-                name,
-                &API,
-                options.output_schema.is_some(),
-            ))
+            Ok::<_, Error>(messages_stream::parse(response.body, name, &API, reading))
         })
         .try_flatten()
         .boxed()
@@ -597,7 +595,7 @@ impl ProviderProtocol for VertexAnthropicProtocol {
     ) -> Result<Message, Error> {
         let transport = transport_of(provider)?;
         let config = provider.config().clone();
-        let request = self
+        let (request, reading) = self
             .prepare(model, messages, &options, &config, false)
             .await?;
         let response = http::json(
@@ -608,14 +606,10 @@ impl ProviderProtocol for VertexAnthropicProtocol {
             Some(&model.id),
         )
         .await?;
-        let events: Vec<_> = messages_stream::parse_message(
-            &response,
-            provider.name().to_owned(),
-            &API,
-            options.output_schema.is_some(),
-        )
-        .try_collect()
-        .await?;
+        let events: Vec<_> =
+            messages_stream::parse_message(&response, provider.name().to_owned(), &API, reading)
+                .try_collect()
+                .await?;
         let (message, _) = crate::providers::google::language::hydrate(provider.name(), events)?;
         Ok(message)
     }

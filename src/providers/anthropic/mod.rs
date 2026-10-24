@@ -29,8 +29,10 @@
 //! constraints become description text, matching the Python SDK's schema helper.
 //! Schemars nullable type arrays become `anyOf`. The core decodes the resulting
 //! assistant text through `StreamHandle::output`.
+mod capabilities;
 pub(crate) mod errors;
 pub(crate) mod messages;
+mod options;
 mod params;
 pub mod protocol;
 mod provider;
@@ -39,3 +41,22 @@ pub(crate) mod stream;
 pub mod tools;
 pub use protocol::AnthropicMessagesProtocol;
 pub use provider::{AnthropicCompatibleProvider, register};
+
+use crate::types::Message;
+
+/// The container id of the latest message whose final metadata holds one,
+/// to pass on as the next call's `container` option
+/// (`forwardAnthropicContainerIdFromLastStep`, ANT-014).
+pub fn container_id(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        message
+            .provider_metadata
+            .as_ref()?
+            .get("anthropic")?
+            .get("container")?
+            .get("id")?
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    })
+}

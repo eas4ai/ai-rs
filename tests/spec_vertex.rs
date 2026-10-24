@@ -1784,9 +1784,12 @@ async fn vtx_013_an_output_schema_uses_the_json_tool_and_tools_are_never_strict(
     );
     let tools = body["tools"].as_array().unwrap();
     assert!(tools[0].get("strict").is_none(), "{}", tools[0]);
+    // A streamed call streams each function tool's input, the JSON tool's
+    // too (ANT-006, ANT-016).
     assert_eq!(
         tools[1],
-        json!({"name": "json", "description": "Respond with a JSON object.", "input_schema": schema})
+        json!({"name": "json", "description": "Respond with a JSON object.", "input_schema": schema,
+               "eager_input_streaming": true})
     );
 }
 

@@ -54,6 +54,11 @@ async fn multipart_text_images_bytes_documents_and_urls() {
         ]);
         let blocks = result_content(content.into(), None).await;
         assert_eq!(blocks[0], json!({"type":"text","text":"Image loaded"}));
+        // A text file cannot go in a tool result; it is left out (ANT-010).
+        if mt == "text/plain" {
+            assert_eq!(blocks.as_array().unwrap().len(), 1, "{blocks}");
+            continue;
+        }
         assert_eq!(
             blocks[1]["type"],
             if mt.starts_with("image/") {
@@ -62,9 +67,6 @@ async fn multipart_text_images_bytes_documents_and_urls() {
                 "document"
             }
         );
-        if mt == "text/plain" {
-            assert_eq!(blocks[1]["source"]["data"], "plain text");
-        }
         if let FileData::Text(url) = data {
             assert_eq!(blocks[1]["source"]["url"], url);
         }

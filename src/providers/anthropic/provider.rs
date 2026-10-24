@@ -1,7 +1,12 @@
-use super::{AnthropicMessagesProtocol, errors::API, protocol};
+use super::{
+    AnthropicMessagesProtocol,
+    errors::API,
+    protocol::{self, HostMessagesProtocol, MessagesProfile},
+};
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     errors::{ProviderError, ProviderErrorKind},
+    models::files::DownloadTransport,
     providers::{ModelsDevProvider, base::provider_config, http},
     transport::HttpTransport,
 };
@@ -16,6 +21,10 @@ pub struct AnthropicCompatibleProvider {
     transport: Arc<dyn HttpTransport>,
     protocol_override: Option<Arc<dyn ProviderProtocol>>,
     anthropic_version: String,
+    /// Whether this provider is for Anthropic's own API, which alone gets
+    /// Anthropic's key and token names by default (ANT-001).
+    anthropic_api: bool,
+    downloads: Option<Arc<dyn DownloadTransport>>,
 }
 impl fmt::Debug for AnthropicCompatibleProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -28,16 +37,29 @@ impl fmt::Debug for AnthropicCompatibleProvider {
 }
 impl AnthropicCompatibleProvider {
     pub const HANDLES: &[&str] = &["anthropic", "@ai-sdk/anthropic"];
-    /// Build a provider without reading process environment variables.
-    pub fn new(mut config: ProviderConfig, transport: Arc<dyn HttpTransport>) -> Self {
-        if config.default_base_url.is_empty() {
-            config.default_base_url = "https://api.anthropic.com".into();
-            if config.base_url_env.is_none() {
-                config.base_url_env = Some("ANTHROPIC_BASE_URL".into());
+    /// Build a provider of Anthropic's API without reading process
+    /// environment variables.
+    pub fn new(config: ProviderConfig, transport: Arc<dyn HttpTransport>) -> Self {
+        Self::build(config, transport, true)
+    }
+    /// A provider of Anthropic's own API defaults to Anthropic's base URL
+    /// and key names and takes its auth token; another server gets none of
+    /// them.
+    fn build(
+        mut config: ProviderConfig,
+        transport: Arc<dyn HttpTransport>,
+        anthropic_api: bool,
+    ) -> Self {
+        if anthropic_api {
+            if config.default_base_url.is_empty() {
+                config.default_base_url = "https://api.anthropic.com".into();
+                if config.base_url_env.is_none() {
+                    config.base_url_env = Some("ANTHROPIC_BASE_URL".into());
+                }
             }
-        }
-        if config.api_key_env.is_none() {
-            config.api_key_env = Some("ANTHROPIC_API_KEY".into());
+            if config.api_key_env.is_none() {
+                config.api_key_env = Some("ANTHROPIC_API_KEY".into());
+            }
         }
         Self {
             name: "anthropic".into(),
@@ -45,8 +67,28 @@ impl AnthropicCompatibleProvider {
             transport,
             protocol_override: None,
             anthropic_version: "2023-06-01".into(),
+            anthropic_api,
+            downloads: None,
         }
         .with_anthropic_version("2023-06-01")
+    }
+    /// The Messages rules of this provider's API.
+    fn profile(&self) -> &'static MessagesProfile {
+        if self.anthropic_api {
+            &protocol::ANTHROPIC_OWN
+        } else {
+            &protocol::ANTHROPIC
+        }
+    }
+    /// Download the user files that Anthropic does not take by URL, such as
+    /// a text file, before each request (ANT-010). Without one, such a URL
+    /// fails with `Error::Validation`. Download transports must honor the
+    /// core DNS-pinning contract. Runtime transports are not serialized; set
+    /// this again after restoring a snapshot.
+    #[must_use]
+    pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
+        self.downloads = Some(downloads);
+        self
     }
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -96,7 +138,7 @@ impl AnthropicCompatibleProvider {
             config.api_key_env = key;
             config.config_envs = envs;
         }
-        Ok(Self::new(config, transport).with_name(&metadata.id))
+        Ok(Self::build(config, transport, metadata.id == "anthropic").with_name(&metadata.id))
     }
 }
 #[async_trait]
@@ -111,7 +153,11 @@ impl Provider for AnthropicCompatibleProvider {
         "anthropic-compatible"
     }
     fn default_protocol(&self) -> Option<Arc<dyn ProviderProtocol>> {
-        Some(Arc::new(AnthropicMessagesProtocol))
+        Some(if self.anthropic_api {
+            Arc::new(HostMessagesProtocol(&protocol::ANTHROPIC_OWN))
+        } else {
+            Arc::new(AnthropicMessagesProtocol)
+        })
     }
     fn protocol_override(&self) -> Option<Arc<dyn ProviderProtocol>> {
         self.protocol_override.clone()
@@ -122,11 +168,14 @@ impl Provider for AnthropicCompatibleProvider {
     fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
         Some(self.transport.clone())
     }
+    fn download_transport(&self) -> Option<Arc<dyn DownloadTransport>> {
+        self.downloads.clone()
+    }
     fn is_configured(&self) -> bool {
         let token = self
-            .config
-            .env
-            .get("ANTHROPIC_AUTH_TOKEN")
+            .profile()
+            .auth_token_env
+            .and_then(|env| self.config.env.get(env))
             .is_some_and(|token| !token.is_empty());
         (token || self.api_key().is_some_and(|key| !key.is_empty())) && self.config.is_configured()
     }
@@ -135,6 +184,7 @@ impl Provider for AnthropicCompatibleProvider {
         value["name"] = json!(self.name);
         value["provider_class_id"] = json!(self.provider_class_id());
         value["anthropic_version"] = json!(self.anthropic_version);
+        value["anthropic_api"] = json!(self.anthropic_api);
         if let Some(protocol) = &self.protocol_override {
             value["protocol_override"] = protocol.to_value()?;
         }
@@ -150,7 +200,7 @@ impl Provider for AnthropicCompatibleProvider {
             Default::default(),
             Default::default(),
         )?;
-        protocol::authorize(&protocol::ANTHROPIC, &self.config, &mut request)?;
+        protocol::authorize(self.profile(), &self.config, &mut request)?;
         let data = http::json(&API, self.transport.as_ref(), request, &self.name, None).await?;
         let models = data.get("data").and_then(Value::as_array).ok_or_else(|| {
             http::response_error(&self.name, "Anthropic model list is missing data")
@@ -187,7 +237,7 @@ impl Provider for AnthropicCompatibleProvider {
             Default::default(),
             Default::default(),
         )?;
-        protocol::authorize(&protocol::ANTHROPIC, &self.config, &mut request)?;
+        protocol::authorize(self.profile(), &self.config, &mut request)?;
         http::json(
             &API,
             self.transport.as_ref(),
@@ -227,9 +277,16 @@ pub fn register(
             .get("anthropic_version")
             .and_then(Value::as_str)
             .unwrap_or("2023-06-01");
-        let mut provider = AnthropicCompatibleProvider::new(config, transport.clone())
-            .with_name(name)
-            .with_anthropic_version(version);
+        // A snapshot from before the field was kept is Anthropic's own API
+        // only when it has Anthropic's name.
+        let anthropic_api = value
+            .get("anthropic_api")
+            .and_then(Value::as_bool)
+            .unwrap_or(name == "anthropic");
+        let mut provider =
+            AnthropicCompatibleProvider::build(config, transport.clone(), anthropic_api)
+                .with_name(name)
+                .with_anthropic_version(version);
         if let Some(protocol) = value.get("protocol_override").filter(|v| !v.is_null()) {
             provider = provider.with_protocol(registry.restore_protocol(protocol.clone())?);
         }
