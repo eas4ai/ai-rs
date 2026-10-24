@@ -687,9 +687,9 @@ async fn fireworks(
         )
     };
     let (bytes, declared) = if kontext {
-        // The poll needs a timer, and the sample, usually on a CDN, the
-        // download transport; check both before a job is started and billed.
-        crate::models::call::require_timer()?;
+        // The sample, usually on a CDN, needs the download transport, and
+        // the poll a timer; check both before a job is started and billed,
+        // the transport that HST-031 names first.
         let downloads = downloads.ok_or_else(|| {
             invalid(
                 "a Fireworks Kontext model's result is fetched through the download transport; \
@@ -697,6 +697,7 @@ async fn fireworks(
                  register_with_downloads",
             )
         })?;
+        crate::models::call::require_timer()?;
         let submitted = http::json(
             api,
             transport,
