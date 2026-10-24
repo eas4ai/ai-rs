@@ -60,7 +60,7 @@ MUST list `Shawn McAllister <@eas4ai>` in `authors`, and the first paragraph
 of `README.md` after its title MUST say that the crate began as a port of the
 AI SDK for Python and follows the AI SDK for TypeScript, and has changed from
 both, and that it is licensed under the Apache License, Version 2.0.
-Falsifier: The `sha256sum` of `LICENSE` is not `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`, the hash of the text at `https://www.apache.org/licenses/LICENSE-2.0.txt`; a file under `src/`, `tests/` or `scripts/`, other than `scripts/check-identity.sh`, holds `Licensed under the Apache License` or a comment line that starts with `Copyright`; the `authors` of `Cargo.toml` lack `Shawn McAllister <@eas4ai>`; or the first paragraph of `README.md` after its title lacks `AI SDK for Python`, `AI SDK for TypeScript` or `Apache License, Version 2.0`.
+Falsifier: The `sha256sum` of `LICENSE` is not `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`, the hash of the text at `https://www.apache.org/licenses/LICENSE-2.0.txt`; a file under `src/`, `tests/` or `scripts/`, other than `scripts/check-identity.sh`, holds `Licensed under the Apache License`, an `SPDX-License-Identifier` or `SPDX-FileCopyrightText` line, or a line on which `Copyright` comes after one or more comment marks and nothing else but spaces; the `authors` of `Cargo.toml` lack `Shawn McAllister <@eas4ai>`; or the first paragraph of `README.md` after its title lacks `AI SDK for Python`, `AI SDK for TypeScript` or `Apache License, Version 2.0`.
 Mechanism: identity
 Rationale: Neither upstream repository puts a header in its source files; both keep the license and notice at the root, and Shawn asked for the same (2026-10-23).
-Status: Agreed 2026-10-23
+Status: Agreed 2026-10-24

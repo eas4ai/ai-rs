@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: openai-whole
+Current: anthropic-whole
 
 ## rename-to-suprnova-ai
 
@@ -242,5 +242,34 @@ Each requirement's tests in `tests/spec_openai.rs` and
 use only the calls the developer approves: OpenAI has no free tier.
 
 Done when the openai, operations, identity and checks mechanisms pass for
+every requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## anthropic-whole
+
+Requirements: ANT-001, ANT-002, ANT-003, ANT-004, ANT-005, ANT-006, ANT-007, ANT-008, ANT-009, ANT-010, ANT-011, ANT-012, ANT-013, ANT-014, ANT-015, ANT-016, ANT-017, ANT-018, ANT-019, ANT-020, OAI-004, OAI-007, OAI-014, PKG-002, PKG-006, PKG-007
+
+Port Anthropic whole: every model kind of the AI SDK for TypeScript 7.0.148
+package `@ai-sdk/anthropic` 4.0.85. Give the Messages protocol the
+TypeScript provider options, the core parameter and reasoning mapping, model
+capabilities, structured output, function and provider tools with the
+application's tool names, user files, system messages, history, stream items,
+sources, usage, final metadata and prompt caching; deliver the provider tools
+the application runs as tool calls and the ones Anthropic runs as built-in
+calls; add `AnthropicCompatibleProvider::with_download_transport`, the bearer
+token, `anthropic::tools` for every tool version and
+`anthropic::container_id`; and add Anthropic's files, skills, batches and
+evaluation. MiniMax and Vertex AI's Anthropic models take the shared rules
+with their TypeScript settings and keep HST-001, HST-007 and VTX-013. Log the
+settings TypeScript changes with a warning at debug through the `tracing`
+crate. Fix the wording of OAI-004, OAI-007, OAI-014 and PKG-007 that the
+openai-whole and license-attribution reviews left for this spec change.
+Update `README.md`, `docs/PORT.md` and the provider docs. Each
+requirement's tests in `tests/spec_anthropic.rs` are named after it, and
+`scripts/check-anthropic.sh` reports one result per requirement. Live tests
+use only `claude-haiku-5-5`, with few and small calls (the developer,
+2026-10-24: "Just use haiku 5.5").
+
+Done when the anthropic, openai, identity and checks mechanisms pass for
 every requirement above, their receipts are current, and the review and the
 adversary report have no open findings.

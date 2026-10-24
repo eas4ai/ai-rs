@@ -87,10 +87,10 @@ option MUST take precedence over the core parameter it duplicates. A call MUST
 fail with `Error::Validation` before any request is sent when it sets both
 `conversation` and `previousResponseId`, or sets top-k, a seed, a frequency or
 presence penalty, or stop sequences.
-Falsifier: A recorded `gpt-4.1` body for each option set alone lacks it under its wire name or changes its value; `logprobs: true` sends other than `top_logprobs: 20`; `compactionTrigger: true` does not end `input` with the trigger item; an output schema sends `strict` other than true without the option, or other than false with `strictJsonSchema: false`; `allowedTools {toolNames: ["a"]}` does not send `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"a"}]}`; an option `serviceTier: "flex"` with a core service tier `priority` sends `priority`; or an unknown option, `logprobs: 21`, `conversation` with `previousResponseId`, or a seed sends a request or fails with another error kind.
+Falsifier: A recorded body for each option set alone on a model that takes it, `gpt-4.1`, or `gpt-4.1` with `forceReasoning: true` for `reasoningEffort`, `reasoningSummary`, `reasoningMode` and `reasoningContext`, lacks it under its wire name or changes its value; `logprobs: true` sends other than `top_logprobs: 20`; `compactionTrigger: true` does not end `input` with the trigger item; an output schema sends `strict` other than true without the option, or other than false with `strictJsonSchema: false`; `allowedTools {toolNames: ["a"]}` does not send `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"a"}]}`; an option `serviceTier: "flex"` with a core service tier `priority` sends `priority`; or an unknown option, `logprobs: 21`, `conversation` with `previousResponseId`, or a seed sends a request or fails with another error kind.
 Mechanism: openai
 Rationale: TypeScript drops the core settings it does not send with a warning; this crate reports them as validation errors (HST-002).
-Status: Agreed 2026-10-23
+Status: Agreed 2026-10-24
 
 [OAI-005] On the Responses and Chat Completions APIs, a model MUST be a
 reasoning model by OAI-002's rule, or when the option `forceReasoning` is
@@ -150,19 +150,20 @@ as `input_image` or `input_file` with that `file_id`, each image with the
 `detail` of the part's `openai` metadata `imageDetail`; a PDF given as a URL
 as `input_file` with `file_url`; a PDF given as bytes as `input_file` with its
 filename, or `part-<n>.pdf`, and a data URL. A `text/*` file MUST go as
-`input_text` with its text, as before. Other media types MUST fail with
-`Error::Validation` unless the option `passThroughUnsupportedFiles` is true,
-which sends them as `input_file` with `file_url`, or with their filename, or
+`input_text` with its text, as before, unless the option
+`passThroughUnsupportedFiles` is true. Other media types MUST fail with
+`Error::Validation` unless that option is true, which sends them, and a
+`text/*` file, as `input_file` with `file_url`, or with their filename, or
 `part-<n>`, and a data URL. On Chat Completions a file id MUST be sent as
 `{"type": "file", "file": {"file_id"}}`, an image as `image_url` with its
 detail, WAV and MP3 bytes as `input_audio` with format `wav` or `mp3`, and a
 PDF given as bytes as `file` with its filename and data; an audio or PDF URL
 without a download transport, and other media types, MUST fail with
 `Error::Validation`.
-Falsifier: A recorded Responses body sends a PNG URL, PNG bytes with `imageDetail: "low"`, the file id `file-abc` of a PDF part, a PDF URL or PDF bytes in another shape; `text/csv` bytes do not fail without the option, or are not `input_file` with it; a Chat Completions body sends `file-abc`, WAV bytes or PDF bytes in another shape; or a Chat Completions `audio/flac` part sends a request or fails with another error kind.
+Falsifier: A recorded Responses body sends a PNG URL, PNG bytes with `imageDetail: "low"`, the file id `file-abc` of a PDF part, a PDF URL or PDF bytes in another shape; `text/csv` bytes are not `input_text` without the option, or are not `input_file` with it; a Chat Completions body sends `file-abc`, WAV bytes or PDF bytes in another shape; or a Chat Completions `audio/flac` part sends a request or fails with another error kind.
 Mechanism: openai
 Rationale: `responses/convert-to-openai-responses-input.ts` and `chat/convert-to-openai-chat-messages.ts`; the crate names an uploaded file by its id as file data, as `fileIdPrefixes` does, and passes another media type's URL on where the TypeScript core would download it first.
-Status: Agreed 2026-10-23
+Status: Agreed 2026-10-24
 
 [OAI-008] The Responses history MUST follow
 `convert-to-openai-responses-input.ts` beyond OAI-001 and OAI-002: with the
@@ -294,10 +295,10 @@ out a temperature and log it as OAI-005 says. A message with audio and no
 content MUST give its transcript as text. URL citations in a message or delta
 MUST become sources in the final `openai.sources`; the final metadata MUST
 hold `acceptedPredictionTokens`, `rejectedPredictionTokens` and the logprobs.
-Falsifier: A recorded `gpt-4.1` Chat Completions body for each option lacks it under its wire name or changes it; `logprobs: true` sends other than `top_logprobs: 0`; `gpt-5.4` with an output limit sends `max_tokens`; a `reasoningSummary` option sends a request; a temperature on `gpt-4o-search-preview` is sent or fails the call; or a stream with a `url_citation` delta and prediction token counts lacks them in the final metadata.
+Falsifier: A recorded Chat Completions body for each option on a model that takes it, `gpt-4.1`, or `gpt-4.1` with `forceReasoning: true` for `reasoningEffort`, lacks it under its wire name or changes it; `logprobs: true` sends other than `top_logprobs: 0`; `gpt-5.4` with an output limit sends `max_tokens`; a `reasoningSummary` option sends a request; a temperature on `gpt-4o-search-preview` is sent or fails the call; or a stream with a `url_citation` delta and prediction token counts lacks them in the final metadata.
 Mechanism: openai
 Rationale: `chat/openai-chat-language-model.ts`.
-Status: Agreed 2026-10-23
+Status: Agreed 2026-10-24
 
 [OAI-015] `OpenAICompletionsProtocol` MUST stream `POST <base>/completions`
 with `stream_options.include_usage`, a prompt that starts with the first
