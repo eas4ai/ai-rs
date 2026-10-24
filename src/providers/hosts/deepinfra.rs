@@ -6,7 +6,7 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, JsonSchemaModels, ReasoningTokens},
+        openai::profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
     },
     transport::HttpTransport,
 };
@@ -40,6 +40,7 @@ static PROFILE: ChatProfile = ChatProfile {
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
     openai_own: false,
+    host_options: HostOptions::Compatible("deepinfra"),
 };
 
 pub(super) static HOST: Host = Host {

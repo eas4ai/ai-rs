@@ -43,6 +43,31 @@ pub(crate) struct ChatProfile {
     /// OpenAI's own Chat Completions API, which takes OpenAI's file shapes
     /// (OAI-007); other servers take the OpenAI-compatible ones.
     pub openai_own: bool,
+    /// The provider options entries the host reads (HST-026).
+    pub host_options: HostOptions,
+}
+
+/// The provider options entries a host reads beside the core settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostOptions {
+    /// None.
+    NotRead,
+    /// The `openaiCompatible` entry and the entry under this name, as
+    /// `OpenAICompatibleChatLanguageModel` reads them.
+    Compatible(&'static str),
+    /// The compatible reading of the `fireworks` entry, with the options
+    /// Fireworks renames (`fireworks-provider.ts`).
+    Fireworks,
+}
+impl HostOptions {
+    /// The name of the host's own entry.
+    pub(crate) fn key(self) -> Option<&'static str> {
+        match self {
+            Self::NotRead => None,
+            Self::Compatible(key) => Some(key),
+            Self::Fireworks => Some("fireworks"),
+        }
+    }
 }
 
 /// How a server's `completion_tokens` relates to its reasoning tokens.
@@ -196,6 +221,7 @@ const COMPATIBLE_RULES: ChatProfile = ChatProfile {
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
     openai_own: false,
+    host_options: HostOptions::NotRead,
 };
 
 /// Whether OpenAI treats a model as a reasoning model: `o` and digits,

@@ -1,13 +1,14 @@
 //! Fireworks over Chat Completions. Fireworks takes the reasoning efforts
 //! low, medium and high, so `minimal` goes out as `low` and `xhigh` and `max`
-//! as `high`. Fireworks-only fields, such as a thinking budget, go in
-//! `InferenceRequestParams::extra_body`.
+//! as `high`. The `fireworks` provider options entry takes `promptCacheKey`,
+//! `serviceTier`, `thinking` and `reasoningHistory`, sent under Fireworks'
+//! names, and any other Fireworks field as it is.
 use super::{Host, HostProtocol, HostProvider};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, JsonSchemaModels, ReasoningTokens},
+        openai::profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
     },
     transport::HttpTransport,
 };
@@ -41,6 +42,7 @@ static PROFILE: ChatProfile = ChatProfile {
     dialect: Dialect::OpenAI,
     stream_error_kinds: false,
     openai_own: false,
+    host_options: HostOptions::Fireworks,
 };
 
 pub(super) static HOST: Host = Host {
