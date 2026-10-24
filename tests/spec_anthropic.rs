@@ -3715,6 +3715,67 @@ async fn ant_019_result_lines_give_each_outcome() {
 }
 
 #[tokio::test]
+async fn ant_019_a_buffered_compaction_keeps_its_summary() {
+    use suprnova_ai::providers::operations::BatchOutcome;
+    // Automatic compaction returns a block without a signature, as
+    // TypeScript's fixture anthropic-compaction.1.json shows; an on-demand one
+    // is signed. Both keep their summary, once.
+    let results_url = "https://api.anthropic.com/v1/messages/batches/msgbatch_1/results";
+    let message = json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
+        "content": [
+            {"type": "compaction", "content": "## Summary of Conversation"},
+            {"type": "compaction", "content": "signed summary", "signature": "sig_1"},
+            {"type": "text", "text": "done"}
+        ],
+        "stop_reason": "end_turn", "usage": {"input_tokens": 2, "output_tokens": 1}});
+    let line = json!({"custom_id": "ok", "result": {"type": "succeeded", "message": message}});
+    let transport = Recorder::new([
+        json_reply(batch_object("ended", json!({"results_url": results_url}))),
+        (200, line.to_string().into_bytes()),
+    ]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let results: Vec<_> =
+        suprnova_ai::ops::batch::results(&provider, "msgbatch_1", Default::default())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await;
+    let BatchOutcome::Message(message) = &results[0].outcome else {
+        panic!("{:?}", results[0].outcome)
+    };
+    let texts: Vec<(String, Value)> = message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text(t) => Some((
+                t.text.clone(),
+                t.provider_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("anthropic"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            (
+                "## Summary of Conversation".to_owned(),
+                json!({"type": "compaction"})
+            ),
+            (
+                "signed summary".to_owned(),
+                json!({"type": "compaction", "signature": "sig_1"})
+            ),
+            ("done".to_owned(), Value::Null),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn ant_019_results_a_batch_cannot_give_fail() {
     for (batch, kind) in [
         (batch_object("in_progress", json!({})), "validation"),
