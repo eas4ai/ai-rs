@@ -153,15 +153,18 @@ struct Parser {
     file_results: bool,
     /// A terminal response event arrived.
     terminal: bool,
-    /// The logprobs of the text deltas, which OpenAI sends when the call
-    /// asks for them (OAI-013, OAI-014).
+    /// The logprobs of the text deltas, kept when the call asks for them
+    /// (OAI-013, OAI-014); OpenAI sends an empty list on every delta.
     logprobs: Vec<Value>,
+    asks_logprobs: bool,
     /// The prediction token counts of OpenAI's own Chat Completions.
     chat_metadata: serde_json::Map<String, Value>,
 }
 /// `hold_reasoning` keeps each reasoning block open until its item ends, so
 /// that every block carries the item's final encrypted content; an unstored
-/// OpenAI response needs it to send the reasoning back.
+/// OpenAI response needs it to send the reasoning back. `asks_logprobs` keeps
+/// the logprobs of OpenAI's Responses text deltas.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn parse(
     body: Body,
     provider: String,
@@ -169,6 +172,7 @@ pub(super) fn parse(
     image_type: String,
     json_output: bool,
     hold_reasoning: bool,
+    asks_logprobs: bool,
     host: CallTools,
 ) -> EventStream {
     let api = wire.api();
@@ -225,6 +229,7 @@ pub(super) fn parse(
         file_results: false,
         terminal: false,
         logprobs: Vec::new(),
+        asks_logprobs,
         chat_metadata: serde_json::Map::new(),
     };
     stream::try_unfold(state, |mut p| async move {
@@ -727,7 +732,7 @@ impl Parser {
                         chunk: text.into(),
                     }));
                 }
-                if self.openai_responses() && data["logprobs"].is_array() {
+                if self.openai_responses() && self.asks_logprobs && data["logprobs"].is_array() {
                     self.logprobs.push(data["logprobs"].clone());
                 }
             }
