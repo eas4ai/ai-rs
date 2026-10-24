@@ -1077,6 +1077,124 @@ async fn ant_005_the_json_tool_mode_sends_the_json_tool() {
     assert!(body["output_config"].get("format").is_none(), "{body}");
 }
 
+fn output_schema() -> schemars::Schema {
+    json!({"type": "object", "properties": {"a": {"type": "number"}}, "required": ["a"]})
+        .try_into()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn ant_005_an_output_schema_goes_as_the_model_takes_it() {
+    let with_schema = |options: StreamOptions| StreamOptions {
+        output_schema: Some(output_schema()),
+        ..options
+    };
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_schema(StreamOptions::default()),
+    )
+    .await;
+    assert_eq!(
+        body["output_config"]["format"],
+        json!({"type": "json_schema", "schema": {"type": "object", "properties": {"a": {"type": "number"}},
+               "additionalProperties": false, "required": ["a"]}}),
+        "{body}"
+    );
+    assert!(body.get("tools").is_none(), "{body}");
+    // A model without structured output gets the JSON tool.
+    let (body, _) = sent(
+        "claude-3-haiku-20240307",
+        vec![user("hi")],
+        with_schema(StreamOptions::default()),
+    )
+    .await;
+    assert!(body.get("output_config").is_none(), "{body}");
+    assert_eq!(body["tools"][0]["name"], "json", "{body}");
+    assert_eq!(
+        body["tools"][0]["description"], "Respond with a JSON object.",
+        "{body}"
+    );
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "any", "disable_parallel_tool_use": true}),
+        "{body}"
+    );
+    // A model that rejects forced tool use takes the output format instead.
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-opus-5-5",
+        vec![user("hi")],
+        with_schema(anthropic(json!({"structuredOutputMode": "jsonTool"}))),
+    )
+    .await;
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(body["output_config"].get("format").is_some(), "{body}");
+    assert!(logs.take().contains(&(
+        "structuredOutputMode".to_owned(),
+        "claude-opus-5-5".to_owned()
+    )));
+}
+
+#[tokio::test]
+async fn ant_005_the_json_tool_answer_is_the_text() {
+    let transport = Recorder::new([message(
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ignored"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_j", "name": "json", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"a\":1}"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+        ],
+        json!({"output_tokens": 3}),
+        "tool_use",
+    )]);
+    let mut handle = suprnova_ai::stream(
+        &model("claude-sonnet-4-6", transport),
+        vec![user("hi")],
+        StreamOptions {
+            output_schema: Some(output_schema()),
+            ..anthropic(json!({"structuredOutputMode": "jsonTool"}))
+        },
+    );
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    assert_eq!(handle.text(), "{\"a\":1}");
+    assert_eq!(handle.finish_reason(), Some("stop"));
+    assert!(handle.message().tool_calls().is_empty());
+}
+
+#[tokio::test]
+async fn ant_005_the_output_schema_is_sanitized_as_typescript_does() {
+    let schema = json!({"type": "object", "properties": {
+        "n": {"type": "integer", "minimum": 1},
+        "s": {"type": "string", "pattern": "^a", "format": "email"},
+        "r": {"type": "string", "format": "regex", "description": "A pattern"},
+        "u": {"oneOf": [{"type": "string"}, {"type": "null"}]}
+    }});
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        StreamOptions {
+            output_schema: Some(schema.try_into().unwrap()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        body["output_config"]["format"]["schema"],
+        json!({"type": "object", "additionalProperties": false, "properties": {
+            "n": {"type": "integer", "description": "minimum: 1."},
+            "s": {"type": "string", "format": "email", "description": "pattern: ^a."},
+            "r": {"type": "string", "description": "A pattern\nformat: regex."},
+            "u": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+        }}),
+        "{body}"
+    );
+}
+
 // ANT-006
 
 #[tokio::test]
@@ -1101,6 +1219,301 @@ async fn ant_006_a_provider_tool_goes_under_its_anthropic_name() {
     assert_eq!(
         body["tools"][0],
         json!({"type": "web_search_20250305", "name": "web_search"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_006_each_tool_version_goes_out_with_its_beta() {
+    use suprnova_ai::providers::anthropic::tools::*;
+    let computer = |zoom| ComputerUseOptions {
+        display_width_px: 1024,
+        display_height_px: 768,
+        display_number: Some(1),
+        enable_zoom: zoom,
+    };
+    let fetch = WebFetchOptions {
+        max_uses: Some(1),
+        citations: Some(true.into()),
+        max_content_tokens: Some(100),
+        use_cache: Some(false),
+        response_inclusion: Some(ResponseInclusion::Excluded),
+        ..Default::default()
+    };
+    let search = WebSearchOptions {
+        max_uses: Some(2),
+        allowed_domains: Some(vec!["a.test".into()]),
+        user_location: Some(UserLocation {
+            city: Some("SF".into()),
+            ..Default::default()
+        }),
+        response_inclusion: Some(ResponseInclusion::Full),
+        ..Default::default()
+    };
+    let cases: Vec<(Tool, Value, Option<&str>)> = vec![
+        (
+            advisor_20260301(AdvisorOptions {
+                model: "claude-opus-5".into(),
+                max_uses: Some(2),
+                max_tokens: Some(2048),
+                caching: Some(AdvisorCacheTtl::OneHour),
+            })
+            .unwrap(),
+            json!({"type": "advisor_20260301", "name": "advisor", "model": "claude-opus-5", "max_uses": 2, "max_tokens": 2048, "caching": {"type": "ephemeral", "ttl": "1h"}}),
+            Some("advisor-tool-2026-03-01"),
+        ),
+        (
+            bash_20241022(),
+            json!({"type": "bash_20241022", "name": "bash"}),
+            Some("computer-use-2024-10-22"),
+        ),
+        (
+            bash_20250124(),
+            json!({"type": "bash_20250124", "name": "bash"}),
+            Some("computer-use-2025-01-24"),
+        ),
+        (
+            code_execution_20250522(),
+            json!({"type": "code_execution_20250522", "name": "code_execution"}),
+            Some("code-execution-2025-05-22"),
+        ),
+        (
+            code_execution_20250825(),
+            json!({"type": "code_execution_20250825", "name": "code_execution"}),
+            Some("code-execution-2025-08-25"),
+        ),
+        (
+            code_execution_20260120(),
+            json!({"type": "code_execution_20260120", "name": "code_execution"}),
+            None,
+        ),
+        (
+            computer_20241022(computer(Some(true))),
+            json!({"type": "computer_20241022", "name": "computer", "display_width_px": 1024, "display_height_px": 768, "display_number": 1}),
+            Some("computer-use-2024-10-22"),
+        ),
+        (
+            computer_20250124(computer(None)),
+            json!({"type": "computer_20250124", "name": "computer", "display_width_px": 1024, "display_height_px": 768, "display_number": 1}),
+            Some("computer-use-2025-01-24"),
+        ),
+        (
+            computer_20251124(computer(Some(true))),
+            json!({"type": "computer_20251124", "name": "computer", "display_width_px": 1024, "display_height_px": 768, "display_number": 1, "enable_zoom": true}),
+            Some("computer-use-2025-11-24"),
+        ),
+        (
+            computer_toolset_20260801(
+                [(
+                    "left_click".to_owned(),
+                    ToolsetMember {
+                        enabled: Some(true),
+                        defer_loading: Some(false),
+                    },
+                )]
+                .into(),
+            )
+            .unwrap(),
+            json!({"type": "computer_toolset_20260801", "configs": {"left_click": {"enabled": true, "defer_loading": false}}}),
+            None,
+        ),
+        (
+            memory_20250818(),
+            json!({"type": "memory_20250818", "name": "memory"}),
+            Some("context-management-2025-06-27"),
+        ),
+        (
+            text_editor_20241022(),
+            json!({"type": "text_editor_20241022", "name": "str_replace_editor"}),
+            Some("computer-use-2024-10-22"),
+        ),
+        (
+            text_editor_20250124(),
+            json!({"type": "text_editor_20250124", "name": "str_replace_editor"}),
+            Some("computer-use-2025-01-24"),
+        ),
+        (
+            text_editor_20250429(),
+            json!({"type": "text_editor_20250429", "name": "str_replace_based_edit_tool"}),
+            Some("computer-use-2025-01-24"),
+        ),
+        (
+            text_editor_20250728(Some(500)),
+            json!({"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": 500}),
+            None,
+        ),
+        (
+            web_fetch_20250910(fetch.clone()).unwrap(),
+            json!({"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 1, "citations": {"enabled": true}, "max_content_tokens": 100}),
+            Some("web-fetch-2025-09-10"),
+        ),
+        (
+            web_fetch_20260209(fetch.clone()).unwrap(),
+            json!({"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 1, "citations": {"enabled": true}, "max_content_tokens": 100}),
+            Some("code-execution-web-tools-2026-02-09"),
+        ),
+        (
+            web_fetch_20260318(fetch).unwrap(),
+            json!({"type": "web_fetch_20260318", "name": "web_fetch", "max_uses": 1, "citations": {"enabled": true}, "max_content_tokens": 100, "use_cache": false, "response_inclusion": "excluded"}),
+            None,
+        ),
+        (
+            web_search_20250305(search.clone()).unwrap(),
+            json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 2, "allowed_domains": ["a.test"], "user_location": {"type": "approximate", "city": "SF"}}),
+            None,
+        ),
+        (
+            web_search_20260209(search.clone()).unwrap(),
+            json!({"type": "web_search_20260209", "name": "web_search", "max_uses": 2, "allowed_domains": ["a.test"], "user_location": {"type": "approximate", "city": "SF"}}),
+            Some("code-execution-web-tools-2026-02-09"),
+        ),
+        (
+            web_search_20260318(search).unwrap(),
+            json!({"type": "web_search_20260318", "name": "web_search", "max_uses": 2, "allowed_domains": ["a.test"], "user_location": {"type": "approximate", "city": "SF"}, "response_inclusion": "full"}),
+            None,
+        ),
+        (
+            tool_search_regex_20251119(),
+            json!({"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}),
+            None,
+        ),
+        (
+            tool_search_bm25_20251119(),
+            json!({"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"}),
+            None,
+        ),
+    ];
+    assert_eq!(cases.len(), 23);
+    for (tool, expected, beta) in cases {
+        let (body, betas) = sent(
+            "claude-sonnet-4-6",
+            vec![user("hi")],
+            StreamOptions {
+                tools: vec![tool],
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(body["tools"], json!([expected]), "{body}");
+        match beta {
+            Some(beta) => assert_eq!(betas, [beta], "{expected}"),
+            None => assert!(betas.is_empty(), "{expected}: {betas:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn ant_006_function_tools_take_strict_streaming_and_their_arguments() {
+    let strict = || function_tool("weather").with_strict(true);
+    let options = |tools: Vec<Tool>, extra: Value| StreamOptions {
+        tools,
+        ..anthropic(extra)
+    };
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        options(vec![strict()], json!({})),
+    )
+    .await;
+    assert_eq!(
+        body["tools"][0],
+        json!({"name": "weather", "description": "The weather tool", "input_schema": {"type": "object", "properties": {}},
+               "eager_input_streaming": true, "strict": true}),
+        "{body}"
+    );
+    assert_eq!(betas, ["structured-outputs-2025-11-13"]);
+    let (body, _) = sent(
+        "claude-3-haiku-20240307",
+        vec![user("hi")],
+        options(vec![strict()], json!({})),
+    )
+    .await;
+    assert!(body["tools"][0].get("strict").is_none(), "{body}");
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        options(vec![strict()], json!({"toolStreaming": false})),
+    )
+    .await;
+    assert!(
+        body["tools"][0].get("eager_input_streaming").is_none(),
+        "{body}"
+    );
+    let mut tool = function_tool("lookup");
+    let config = tool.tool_config.get_or_insert_with(Default::default);
+    config
+        .args
+        .insert("input_examples".into(), json!([{"q": "a"}]));
+    config.args.insert("defer_loading".into(), json!(true));
+    config
+        .args
+        .insert("allowed_callers".into(), json!(["code_execution_20260120"]));
+    config
+        .args
+        .insert("eager_input_streaming".into(), json!(false));
+    config
+        .args
+        .insert("cache_control".into(), json!({"type": "ephemeral"}));
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        options(vec![tool], json!({})),
+    )
+    .await;
+    assert_eq!(
+        body["tools"][0],
+        json!({"name": "lookup", "description": "The lookup tool", "input_schema": {"type": "object", "properties": {}},
+               "cache_control": {"type": "ephemeral"}, "defer_loading": true,
+               "allowed_callers": ["code_execution_20260120"], "input_examples": [{"q": "a"}]}),
+        "{body}"
+    );
+    assert!(
+        betas.iter().any(|b| b == "advanced-tool-use-2025-11-20"),
+        "{betas:?}"
+    );
+}
+
+#[tokio::test]
+async fn ant_006_a_renamed_provider_tool_comes_back_under_its_name() {
+    use suprnova_ai::providers::anthropic::tools::web_search_20250305;
+    let mut search = web_search_20250305(Default::default()).unwrap();
+    search.name = "search".into();
+    let transport = Recorder::new([message(
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"rust\"}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result", "url": "https://rust.test", "title": "Rust", "encrypted_content": "e1", "page_age": "1 day"}]}}),
+            json!({"type": "content_block_stop", "index": 1}),
+        ],
+        json!({"output_tokens": 1}),
+        "end_turn",
+    )]);
+    let options = StreamOptions {
+        tools: vec![search.clone()],
+        ..Default::default()
+    };
+    let mut handle = suprnova_ai::stream(
+        &model("claude-sonnet-4-6", transport.clone()),
+        vec![user("hi")],
+        options.clone(),
+    );
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    assert_eq!(transport.body(0)["tools"][0]["name"], "web_search");
+    let message = handle.message().clone();
+    assert_eq!(message.builtin_tool_calls()[0].tool_name, "search");
+    assert_eq!(message.builtin_tool_returns()[0].tool_name, "search");
+    // In history the call goes back under Anthropic's name.
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi"), message, user("more")],
+        options,
+    )
+    .await;
+    assert_eq!(
+        body["messages"][1]["content"][0]["name"], "web_search",
         "{body}"
     );
 }
@@ -1147,6 +1560,140 @@ async fn ant_007_a_toolset_member_call_is_a_call_of_the_toolset_tool() {
         serde_json::from_str::<Value>(&call.tool_args).unwrap(),
         json!({"action": "left_click", "coordinate": [1, 2]})
     );
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct BashInput {
+    #[allow(dead_code)]
+    command: String,
+}
+
+#[tokio::test]
+async fn ant_007_an_agent_runs_a_provider_declared_tool() {
+    use suprnova_ai::agents::{Agent, AgentTool};
+    let bash = AgentTool::new::<BashInput, Value, _, _>("bash", "Run a command", |_, _| async {
+        Ok(json!("a.txt"))
+    })
+    .unwrap()
+    .with_provider_declaration(suprnova_ai::providers::anthropic::tools::bash_20250124())
+    .unwrap();
+    let transport = Recorder::new([
+        message(
+            vec![
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_b", "name": "bash", "input": {}}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"command\": \"ls\"}"}}),
+                json!({"type": "content_block_stop", "index": 0}),
+            ],
+            json!({"output_tokens": 1}),
+            "tool_use",
+        ),
+        text_reply(),
+    ]);
+    let mut run = Agent::new(vec![bash]).run(
+        model("claude-sonnet-4-6", transport.clone()),
+        vec![user("list files")],
+    );
+    while let Some(event) = run.next().await {
+        event.unwrap();
+    }
+    assert_eq!(
+        transport.body(0)["tools"],
+        json!([{"type": "bash_20250124", "name": "bash"}])
+    );
+    let body = transport.body(1);
+    assert_eq!(
+        body["messages"][2]["content"][0],
+        json!({"type": "tool_result", "tool_use_id": "toolu_b", "content": "a.txt"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_007_a_toolset_call_goes_back_as_its_member() {
+    let computer =
+        suprnova_ai::providers::anthropic::tools::computer_toolset_20260801(Default::default())
+            .unwrap();
+    let mut call = ToolCallPart::new(
+        "toolu_1",
+        "computer",
+        r#"{"action": "left_click", "coordinate": [1, 2]}"#,
+    );
+    call.provider_metadata = metadata(json!({"toolsetName": "computer"}));
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("click"),
+            assistant(vec![Part::ToolCall(call)]),
+            Message::new(
+                MessageRole::Tool,
+                vec![Part::ToolResult(
+                    suprnova_ai::types::messages::ToolResultPart::new(
+                        "toolu_1",
+                        "computer",
+                        json!("done"),
+                    ),
+                )],
+            ),
+        ],
+        StreamOptions {
+            tools: vec![computer],
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        body["messages"][1]["content"][0],
+        json!({"type": "tool_use", "id": "toolu_1", "name": "left_click", "toolset_name": "computer",
+               "input": {"action": "left_click", "coordinate": [1, 2]}}),
+        "{body}"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][0],
+        json!({"type": "tool_result", "tool_use_id": "toolu_1", "toolset_name": "computer", "content": "done"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn ant_007_a_renamed_application_tool_comes_back_under_its_name() {
+    let mut shell = suprnova_ai::providers::anthropic::tools::bash_20250124();
+    shell.name = "shell".into();
+    let transport = Recorder::new([message(
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_s", "name": "bash", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"command\": \"ls\"}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+        ],
+        json!({"output_tokens": 1}),
+        "tool_use",
+    )]);
+    let options = StreamOptions {
+        tools: vec![shell],
+        ..Default::default()
+    };
+    let mut handle = suprnova_ai::stream(
+        &model("claude-sonnet-4-6", transport),
+        vec![user("ls")],
+        options.clone(),
+    );
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    let message = handle.message().clone();
+    assert_eq!(message.tool_calls()[0].tool_name, "shell");
+    let result = Message::new(
+        MessageRole::Tool,
+        vec![Part::ToolResult(
+            suprnova_ai::types::messages::ToolResultPart::new("toolu_s", "shell", json!("a.txt")),
+        )],
+    );
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user("ls"), message, result],
+        options,
+    )
+    .await;
+    assert_eq!(body["messages"][1]["content"][0]["name"], "bash", "{body}");
 }
 
 // ANT-008

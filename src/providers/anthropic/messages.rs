@@ -1031,7 +1031,8 @@ fn assistant_block(
                                 "name": action.unwrap_or(&toolset), "toolset_name": toolset, "input": input})
                         }
                         None => {
-                            json!({"type": "tool_use", "id": c.tool_call_id, "name": c.tool_name, "input": input})
+                            json!({"type": "tool_use", "id": c.tool_call_id,
+                                "name": context.names.provider(&c.tool_name), "input": input})
                         }
                     };
                     if let Some(caller) = caller(md) {

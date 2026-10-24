@@ -444,7 +444,7 @@ impl Parser {
                 continue;
             }
             let id = self.text(part, "id")?;
-            let name = self.text(part, "name")?;
+            let name = self.custom(&self.text(part, "name")?);
             let input = part
                 .get("input")
                 .cloned()
@@ -730,7 +730,7 @@ impl Parser {
                     .map(|toolset| (toolset.to_owned(), name.clone()));
                 let tool_name = match &toolset {
                     Some((toolset, _)) => self.custom(toolset),
-                    None => name.clone(),
+                    None => self.custom(&name),
                 };
                 self.push(Event::ToolStart(ToolStart {
                     tool_call_id: id.clone(),
