@@ -68,6 +68,18 @@ impl HttpTransport for Recorder {
     }
 }
 
+impl Recorder {
+    fn form(&self, index: usize) -> String {
+        String::from_utf8_lossy(&self.requests.lock().unwrap()[index].body).into_owned()
+    }
+    fn method(&self, index: usize) -> String {
+        self.requests.lock().unwrap()[index].method.clone()
+    }
+    fn count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
 fn config() -> ProviderConfig {
     ProviderConfig {
         api_key_value: Some("sk-ant-test".into()),
@@ -3167,6 +3179,98 @@ async fn ant_017_files_are_uploaded() {
     );
 }
 
+#[tokio::test]
+async fn ant_017_an_upload_sends_its_form_and_reads_the_file() {
+    use suprnova_ai::providers::operations::{UploadFile, UploadParams};
+    let reply = json!({"id": "file_1", "type": "file", "filename": "r.pdf", "mime_type": "application/pdf",
+        "size_bytes": 4, "created_at": "2026-10-24T00:00:00Z", "downloadable": false});
+    let transport = Recorder::new([json_reply(reply.clone()), json_reply(reply)]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let file = |filename: Option<&str>| UploadFile {
+        data: Bytes::from_static(b"%PDF"),
+        media_type: "application/pdf".into(),
+        filename: filename.map(str::to_owned),
+    };
+    let uploaded = suprnova_ai::ops::upload_file(
+        &provider,
+        file(Some("r.pdf")),
+        UploadParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transport.method(0), "POST");
+    let form = transport.form(0);
+    assert!(
+        form.contains(
+            "name=\"file\"; filename=\"r.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF"
+        ),
+        "{form}"
+    );
+    assert_eq!(betas(&transport, 0), ["files-api-2025-04-14"]);
+    let value = &uploaded.value;
+    assert_eq!(
+        (
+            value.media_type.as_deref(),
+            value.filename.as_deref(),
+            value.size_bytes,
+            value.created_at.as_deref()
+        ),
+        (
+            Some("application/pdf"),
+            Some("r.pdf"),
+            Some(4),
+            Some("2026-10-24T00:00:00Z")
+        )
+    );
+    assert_eq!(
+        uploaded.provider_metadata.unwrap()["anthropic"],
+        json!({"filename": "r.pdf", "mimeType": "application/pdf", "sizeBytes": 4,
+               "createdAt": "2026-10-24T00:00:00Z", "downloadable": false})
+    );
+    suprnova_ai::ops::upload_file(
+        &provider,
+        file(None),
+        UploadParams::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        transport
+            .form(1)
+            .contains("name=\"file\"; filename=\"blob\""),
+        "{}",
+        transport.form(1)
+    );
+}
+
+#[tokio::test]
+async fn ant_017_file_info_download_and_delete_are_not_offered() {
+    let transport = Recorder::new([]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let reference: std::collections::BTreeMap<String, String> =
+        [("anthropic".to_owned(), "file_1".to_owned())].into();
+    let errors = [
+        suprnova_ai::ops::file_info(&provider, &reference, Default::default())
+            .await
+            .err(),
+        suprnova_ai::ops::download_file(&provider, &reference, Default::default())
+            .await
+            .err(),
+        suprnova_ai::ops::delete_file(&provider, &reference, Default::default())
+            .await
+            .err(),
+    ];
+    for error in errors {
+        assert!(
+            matches!(error, Some(suprnova_ai::Error::UnsupportedOperation(_))),
+            "{error:?}"
+        );
+    }
+    assert_eq!(transport.count(), 0);
+}
+
 // ANT-018
 
 #[tokio::test]
@@ -3191,6 +3295,81 @@ async fn ant_018_skills_are_uploaded() {
     .unwrap();
     assert_eq!(transport.url(0), "https://api.anthropic.com/v1/skills");
     assert_eq!(uploaded.value.name.as_deref(), Some("notes"));
+}
+
+#[tokio::test]
+async fn ant_018_a_skill_upload_reads_its_latest_version() {
+    use suprnova_ai::providers::operations::{SkillFile, SkillParams};
+    let transport = Recorder::new([
+        json_reply(
+            json!({"id": "skill_1", "display_title": "Notes", "name": "old", "description": "Old",
+            "latest_version": "v2", "source": "custom", "created_at": "c", "updated_at": "u"}),
+        ),
+        json_reply(
+            json!({"type": "skill_version", "skill_id": "skill_1", "name": "notes", "description": "Takes notes"}),
+        ),
+    ]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let files = vec![
+        SkillFile {
+            path: "notes/SKILL.md".into(),
+            data: Bytes::from_static(b"# Notes"),
+        },
+        SkillFile {
+            path: "notes/run.py".into(),
+            data: Bytes::from_static(b"print(1)"),
+        },
+    ];
+    let params = SkillParams {
+        display_title: Some("Notes".into()),
+        ..Default::default()
+    };
+    let uploaded = suprnova_ai::ops::upload_skill(&provider, files, params, Default::default())
+        .await
+        .unwrap();
+    let form = transport.form(0);
+    assert!(
+        form.contains("name=\"display_title\"\r\n\r\nNotes"),
+        "{form}"
+    );
+    assert!(
+        form.contains("name=\"files[]\"; filename=\"notes/SKILL.md\""),
+        "{form}"
+    );
+    assert!(
+        form.contains("name=\"files[]\"; filename=\"notes/run.py\""),
+        "{form}"
+    );
+    assert_eq!(betas(&transport, 0), ["skills-2025-10-02"]);
+    assert_eq!(transport.method(1), "GET");
+    assert_eq!(
+        transport.url(1),
+        "https://api.anthropic.com/v1/skills/skill_1/versions/v2"
+    );
+    assert_eq!(betas(&transport, 1), ["skills-2025-10-02"]);
+    let value = &uploaded.value;
+    assert_eq!(
+        value.provider_reference,
+        [("anthropic".to_owned(), "skill_1".to_owned())].into()
+    );
+    assert_eq!(
+        (
+            value.display_title.as_deref(),
+            value.name.as_deref(),
+            value.description.as_deref(),
+            value.latest_version.as_deref()
+        ),
+        (
+            Some("Notes"),
+            Some("notes"),
+            Some("Takes notes"),
+            Some("v2")
+        )
+    );
+    assert_eq!(
+        uploaded.provider_metadata.unwrap()["anthropic"],
+        json!({"source": "custom", "createdAt": "c", "updatedAt": "u"})
+    );
 }
 
 // ANT-019
@@ -3224,6 +3403,347 @@ async fn ant_019_a_batch_sends_its_requests() {
         "https://api.anthropic.com/v1/messages/batches"
     );
     assert_eq!(transport.body(0)["requests"][0]["custom_id"], "r1");
+}
+
+fn text_request(
+    id: &str,
+    model: &str,
+    options: StreamOptions,
+) -> suprnova_ai::providers::operations::BatchRequest {
+    suprnova_ai::providers::operations::BatchRequest {
+        id: id.into(),
+        model_id: model.into(),
+        kind: suprnova_ai::providers::operations::BatchRequestKind::Text {
+            messages: vec![user("hi")],
+            options,
+        },
+    }
+}
+fn batch_object(status: &str, extra: Value) -> Value {
+    let mut batch = json!({"id": "msgbatch_1", "type": "message_batch", "processing_status": status,
+        "request_counts": {"processing": 1, "succeeded": 2, "errored": 1, "canceled": 0, "expired": 1},
+        "created_at": "2026-10-24T00:00:00Z", "expires_at": "2026-10-25T00:00:00Z",
+        "archived_at": null, "cancel_initiated_at": null, "ended_at": null, "results_url": null});
+    for (key, value) in extra.as_object().unwrap() {
+        batch[key] = value.clone();
+    }
+    batch
+}
+
+#[tokio::test]
+async fn ant_019_a_batch_sends_buffered_bodies_and_returns_warnings() {
+    use suprnova_ai::providers::operations::{BatchParams, BatchState};
+    let transport = Recorder::new([json_reply(batch_object("in_progress", json!({})))]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let hot = with_params(InferenceRequestParams::default().with_temperature(1.5));
+    let mut search = text_request("r2", "claude-sonnet-4-6", StreamOptions::default());
+    if let suprnova_ai::providers::operations::BatchRequestKind::Text { options, .. } =
+        &mut search.kind
+    {
+        options.tools = vec![
+            suprnova_ai::providers::anthropic::tools::web_search_20260209(Default::default())
+                .unwrap(),
+        ];
+    }
+    let params = BatchParams {
+        webhook_url: Some("https://hook.test".into()),
+        provider_options: [(
+            "anthropic".to_owned(),
+            json!({"anthropicBeta": ["batch-beta"]}),
+        )]
+        .into(),
+    };
+    let started = suprnova_ai::ops::batch::start(
+        &provider,
+        vec![text_request("r1", "claude-sonnet-4-6", hot), search],
+        params,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.url(0),
+        "https://api.anthropic.com/v1/messages/batches"
+    );
+    let body = transport.body(0);
+    let requests = body["requests"].as_array().unwrap();
+    assert_eq!(requests[0]["custom_id"], "r1");
+    assert_eq!(requests[0]["params"]["temperature"], 1.0, "{body}");
+    assert!(requests[0]["params"].get("stream").is_none(), "{body}");
+    assert_eq!(requests[0]["params"]["model"], "claude-sonnet-4-6");
+    let betas = betas(&transport, 0);
+    for beta in ["code-execution-web-tools-2026-02-09", "batch-beta"] {
+        assert!(betas.iter().any(|b| b == beta), "{betas:?}");
+    }
+    let warnings: Vec<(Option<&str>, Option<&str>)> = started
+        .warnings
+        .iter()
+        .map(|w| (w.request_id.as_deref(), w.warning.feature.as_deref()))
+        .collect();
+    assert!(
+        warnings.contains(&(Some("r1"), Some("temperature"))),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.contains(&(None, Some("webhookUrl"))),
+        "{warnings:?}"
+    );
+    assert_eq!(started.status.state, BatchState::Pending);
+    assert_eq!(started.status.batch_id, "msgbatch_1");
+}
+
+#[tokio::test]
+async fn ant_019_requests_a_batch_cannot_take_fail_before_a_request() {
+    use suprnova_ai::providers::operations::{
+        BatchParams, BatchRequest, BatchRequestKind, ImagePrompt,
+    };
+    let request = |id: &str, options: StreamOptions| text_request(id, "claude-sonnet-4-6", options);
+    let mut aliased =
+        suprnova_ai::providers::anthropic::tools::web_search_20260209(Default::default()).unwrap();
+    aliased.name = "search".into();
+    let image = BatchRequest {
+        id: "img".into(),
+        model_id: "claude-sonnet-4-6".into(),
+        kind: BatchRequestKind::Image {
+            prompt: ImagePrompt {
+                text: Some("a cat".into()),
+                images: vec![],
+                mask: None,
+            },
+            params: Default::default(),
+        },
+    };
+    let cases: Vec<Vec<BatchRequest>> = vec![
+        vec![request("bad id!", StreamOptions::default())],
+        vec![request(&"x".repeat(65), StreamOptions::default())],
+        vec![
+            request("r1", StreamOptions::default()),
+            request("r1", StreamOptions::default()),
+        ],
+        vec![image],
+        vec![request("r1", anthropic(json!({"anthropicBeta": ["x"]})))],
+        vec![text_request(
+            "r1",
+            "claude-3-haiku-20240307",
+            StreamOptions {
+                output_schema: Some(output_schema()),
+                ..Default::default()
+            },
+        )],
+        vec![request(
+            "r1",
+            StreamOptions {
+                tools: vec![aliased],
+                ..Default::default()
+            },
+        )],
+        vec![request("r1", anthropic(json!({"speed": "fast"})))],
+        vec![request(
+            "r1",
+            anthropic(json!({"fallbacks": [{"model": "claude-sonnet-4-6", "speed": "fast"}]})),
+        )],
+    ];
+    for requests in cases {
+        let transport = Recorder::new([]);
+        let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+        let error = suprnova_ai::ops::batch::start(
+            &provider,
+            requests,
+            BatchParams::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, suprnova_ai::Error::Validation(_)),
+            "{error:?}"
+        );
+        assert_eq!(transport.count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn ant_019_statuses_cancels_and_lists_map_as_typescript_maps_them() {
+    use suprnova_ai::providers::operations::BatchState;
+    let transport = Recorder::new([
+        json_reply(batch_object("in_progress", json!({}))),
+        json_reply(batch_object(
+            "ended",
+            json!({"ended_at": "2026-10-24T01:00:00Z", "results_url": "https://api.anthropic.com/v1/messages/batches/msgbatch_1/results"}),
+        )),
+        json_reply(batch_object("canceling", json!({}))),
+        json_reply(
+            json!({"data": [batch_object("ended", json!({}))], "has_more": true, "last_id": "msgbatch_1"}),
+        ),
+        json_reply(json!({"data": [], "has_more": false, "last_id": null})),
+    ]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let status = suprnova_ai::ops::batch::status(&provider, "msgbatch_1", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.url(0),
+        "https://api.anthropic.com/v1/messages/batches/msgbatch_1"
+    );
+    assert_eq!(status.state, BatchState::Pending);
+    assert_eq!(status.raw_status.as_deref(), Some("in_progress"));
+    let counts = status.request_counts.unwrap();
+    assert_eq!(
+        (
+            counts.total,
+            counts.pending,
+            counts.completed,
+            counts.failed
+        ),
+        (5, 1, 2, 2)
+    );
+    assert_eq!(status.created_at.as_deref(), Some("2026-10-24T00:00:00Z"));
+    assert_eq!(status.expires_at.as_deref(), Some("2026-10-25T00:00:00Z"));
+    let status = suprnova_ai::ops::batch::status(&provider, "msgbatch_1", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(status.state, BatchState::Completed);
+    assert_eq!(
+        status.provider_metadata.unwrap()["anthropic"],
+        json!({"archivedAt": null, "cancelInitiatedAt": null, "endedAt": "2026-10-24T01:00:00Z",
+               "requestCounts": {"processing": 1, "succeeded": 2, "errored": 1, "canceled": 0, "expired": 1},
+               "resultsUrl": "https://api.anthropic.com/v1/messages/batches/msgbatch_1/results"})
+    );
+    suprnova_ai::ops::batch::cancel(&provider, "msgbatch_1", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        (transport.method(2).as_str(), transport.url(2).as_str()),
+        (
+            "POST",
+            "https://api.anthropic.com/v1/messages/batches/msgbatch_1/cancel"
+        )
+    );
+    let page = suprnova_ai::ops::batch::list(
+        &provider,
+        Some(10),
+        Some("msgbatch_0".into()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.url(3),
+        "https://api.anthropic.com/v1/messages/batches?after_id=msgbatch_0&limit=10"
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("msgbatch_1"));
+    assert_eq!(page.batches.len(), 1);
+    let page = suprnova_ai::ops::batch::list(&provider, None, None, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(page.next_cursor, None);
+}
+
+#[tokio::test]
+async fn ant_019_result_lines_give_each_outcome() {
+    use suprnova_ai::providers::operations::BatchOutcome;
+    let results_url = "https://api.anthropic.com/v1/messages/batches/msgbatch_1/results";
+    let message = json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
+        "content": [{"type": "text", "text": "done"}, {"type": "future_block", "x": 1}],
+        "stop_reason": "end_turn", "usage": {"input_tokens": 2, "output_tokens": 1}});
+    let lines = [
+        json!({"custom_id": "ok", "result": {"type": "succeeded", "message": message}}),
+        json!({"custom_id": "bad", "result": {"type": "errored", "error": {"type": "error", "error": {"type": "invalid_request_error", "message": "nope"}, "request_id": "req_1"}}}),
+        json!({"custom_id": "c", "result": {"type": "canceled"}}),
+        json!({"custom_id": "e", "result": {"type": "expired"}}),
+        json!({"custom_id": "w", "result": {"type": "mystery"}}),
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let transport = Recorder::new([
+        json_reply(batch_object("ended", json!({"results_url": results_url}))),
+        (200, lines.into_bytes()),
+    ]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+    let results: Vec<_> =
+        suprnova_ai::ops::batch::results(&provider, "msgbatch_1", Default::default())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await;
+    assert_eq!(transport.url(1), results_url);
+    assert_eq!(
+        transport.header(1, "x-api-key").as_deref(),
+        Some("sk-ant-test")
+    );
+    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["ok", "bad", "c", "e", "w"]);
+    let BatchOutcome::Message(message) = &results[0].outcome else {
+        panic!("{:?}", results[0].outcome)
+    };
+    assert_eq!(message.text(), "done");
+    let BatchOutcome::Failed {
+        error,
+        provider_metadata,
+    } = &results[1].outcome
+    else {
+        panic!("{:?}", results[1].outcome)
+    };
+    assert_eq!(
+        (error.message.as_str(), error.error_type.as_deref()),
+        ("nope", Some("invalid_request_error"))
+    );
+    assert_eq!(
+        provider_metadata.as_ref().unwrap()["anthropic"],
+        json!({"requestId": "req_1"})
+    );
+    assert!(matches!(results[2].outcome, BatchOutcome::Cancelled { .. }));
+    assert!(matches!(results[3].outcome, BatchOutcome::Expired { .. }));
+    let BatchOutcome::Failed { error, .. } = &results[4].outcome else {
+        panic!("{:?}", results[4].outcome)
+    };
+    assert_eq!(error.code.as_deref(), Some("invalid_response"));
+}
+
+#[tokio::test]
+async fn ant_019_results_a_batch_cannot_give_fail() {
+    for (batch, kind) in [
+        (batch_object("in_progress", json!({})), "validation"),
+        (
+            batch_object(
+                "ended",
+                json!({"archived_at": "2026-10-30T00:00:00Z", "results_url": "https://api.anthropic.com/r"}),
+            ),
+            "validation",
+        ),
+        (batch_object("ended", json!({})), "response"),
+        (
+            batch_object(
+                "ended",
+                json!({"results_url": "https://elsewhere.test/results"}),
+            ),
+            "response",
+        ),
+    ] {
+        let transport = Recorder::new([json_reply(batch.clone())]);
+        let provider = AnthropicCompatibleProvider::new(config(), transport.clone());
+        let error =
+            match suprnova_ai::ops::batch::results(&provider, "msgbatch_1", Default::default())
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("{batch}"),
+            };
+        match kind {
+            "validation" => assert!(
+                matches!(error, suprnova_ai::Error::Validation(_)),
+                "{error:?}"
+            ),
+            _ => assert!(
+                matches!(&error, suprnova_ai::Error::Provider(e) if e.kind == suprnova_ai::errors::ProviderErrorKind::Response),
+                "{error:?}"
+            ),
+        }
+        assert_eq!(transport.count(), 1, "{batch}");
+    }
 }
 
 // ANT-020

@@ -97,33 +97,41 @@ pub(crate) struct MessagesRequest {
 }
 
 impl MessagesRequest {
-    /// The request's headers with one `anthropic-beta` header: its betas,
-    /// then those the configuration's and the call's own `anthropic-beta`
-    /// headers name, once each.
+    /// The request's headers with one `anthropic-beta` header (ANT-001).
     pub(crate) fn headers(&self, config: &ProviderConfig) -> BTreeMap<String, String> {
-        let named = |headers: &BTreeMap<String, String>| {
-            headers
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
-                .flat_map(|(_, value)| value.split(','))
-                .map(|beta| beta.trim().to_ascii_lowercase())
-                .filter(|beta| !beta.is_empty())
-                .collect::<Vec<_>>()
-        };
-        let mut betas = self.betas.clone();
-        let user = [named(&config.headers), named(&self.headers)].concat();
-        add_betas(&mut betas, user.iter().map(String::as_str));
-        let mut headers: BTreeMap<String, String> = self
-            .headers
-            .iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case("anthropic-beta"))
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        if !betas.is_empty() {
-            headers.insert("anthropic-beta".into(), betas.join(","));
-        }
-        headers
+        with_betas(config, &self.headers, &self.betas)
     }
+}
+
+/// Headers with one `anthropic-beta` header: these betas, then those the
+/// configuration's and these headers' own `anthropic-beta` headers name,
+/// once each (ANT-001).
+pub(crate) fn with_betas(
+    config: &ProviderConfig,
+    headers: &BTreeMap<String, String>,
+    betas: &[String],
+) -> BTreeMap<String, String> {
+    let named = |headers: &BTreeMap<String, String>| {
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .flat_map(|(_, value)| value.split(','))
+            .map(|beta| beta.trim().to_ascii_lowercase())
+            .filter(|beta| !beta.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let mut all = betas.to_vec();
+    let user = [named(&config.headers), named(headers)].concat();
+    add_betas(&mut all, user.iter().map(String::as_str));
+    let mut out: BTreeMap<String, String> = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("anthropic-beta"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    if !all.is_empty() {
+        out.insert("anthropic-beta".into(), all.join(","));
+    }
+    out
 }
 
 /// Send the profile's bearer token, when the configuration holds one, in

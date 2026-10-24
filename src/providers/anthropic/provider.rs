@@ -7,7 +7,15 @@ use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     errors::{ProviderError, ProviderErrorKind},
     models::files::DownloadTransport,
-    providers::{ModelsDevProvider, base::provider_config, http},
+    providers::{
+        ModelsDevProvider,
+        base::provider_config,
+        http,
+        operations::{
+            BatchPage, BatchParams, BatchRequest, BatchResults, BatchStarted, BatchStatus, Item,
+            SkillFile, SkillParams, UploadFile, UploadParams, UploadedFile, UploadedSkill,
+        },
+    },
     transport::HttpTransport,
 };
 use async_trait::async_trait;
@@ -71,6 +79,18 @@ impl AnthropicCompatibleProvider {
             downloads: None,
         }
         .with_anthropic_version("2023-06-01")
+    }
+    /// Anthropic's files, skills and batches, which only Anthropic's own
+    /// API has.
+    fn files(&self, operation: &str) -> Result<super::files::Files<'_>, Error> {
+        if !self.anthropic_api {
+            return Err(Error::UnsupportedOperation(operation.to_owned()));
+        }
+        Ok(super::files::Files {
+            config: &self.config,
+            transport: self.transport.as_ref(),
+            provider: &self.name,
+        })
     }
     /// The Messages rules of this provider's API.
     fn profile(&self) -> &'static MessagesProfile {
@@ -170,6 +190,51 @@ impl Provider for AnthropicCompatibleProvider {
     }
     fn download_transport(&self) -> Option<Arc<dyn DownloadTransport>> {
         self.downloads.clone()
+    }
+    async fn upload_file(
+        &self,
+        file: UploadFile,
+        _params: UploadParams,
+    ) -> Result<Item<UploadedFile>, Error> {
+        self.files("upload_file")?.upload(file).await
+    }
+    async fn upload_skill(
+        &self,
+        files: Vec<SkillFile>,
+        params: SkillParams,
+    ) -> Result<Item<UploadedSkill>, Error> {
+        self.files("upload_skill")?
+            .upload_skill(files, params)
+            .await
+    }
+    async fn batch_start(
+        &self,
+        requests: Vec<BatchRequest>,
+        params: BatchParams,
+    ) -> Result<BatchStarted, Error> {
+        self.files("batch_start")?
+            .batch_start(requests, params)
+            .await
+    }
+    async fn batch_status(&self, batch_id: &str) -> Result<BatchStatus, Error> {
+        self.files("batch_status")?.batch_status(batch_id).await
+    }
+    async fn batch_cancel(&self, batch_id: &str) -> Result<(), Error> {
+        self.files("batch_cancel")?.batch_cancel(batch_id).await
+    }
+    async fn batch_list(
+        &self,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> Result<BatchPage, Error> {
+        self.files("batch_list")?
+            .batch_list(page_size, cursor)
+            .await
+    }
+    async fn batch_results(&self, batch_id: &str) -> Result<BatchResults, Error> {
+        self.files("batch_results")?
+            .batch_results(batch_id, self.transport.clone())
+            .await
     }
     fn is_configured(&self) -> bool {
         let token = self
