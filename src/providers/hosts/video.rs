@@ -9,15 +9,22 @@
 //! its `webhookUrl` has no core counterpart. Warnings that TypeScript
 //! returns come back in `Item.warnings`.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     Error, Model, Provider,
+    errors::{ProviderError, ProviderErrorKind},
+    models::files::{self, DEFAULT_MAX_BYTES},
     providers::{
         http::{self, ApiProfile, Auth},
-        operations::{CallLimits, FrameType, Item, MediaInput, VideoParams, VideoPrompt, Warning},
+        operations::{
+            CallLimits, FrameType, Item, MediaInput, VideoParams, VideoPrompt, VideoStatus, Warning,
+        },
     },
-    types::{media, messages::FileData},
+    types::{
+        media,
+        messages::{FileData, FilePart, generate_id},
+    },
 };
 
 /// A host's video model.
@@ -650,4 +657,159 @@ pub(super) async fn minimax_start(
         .into(),
     );
     Ok(item)
+}
+
+/// A task id as a URL path segment: one that names no segment or holds a
+/// control character would send the check elsewhere.
+fn task_id(operation: &Value) -> Result<&str, Error> {
+    operation
+        .as_str()
+        .filter(|id| {
+            !id.trim().is_empty() && *id != "." && *id != ".." && !id.chars().any(char::is_control)
+        })
+        .ok_or_else(|| {
+            invalid(format!(
+                "a MiniMax video job is its task id, which {operation} is not"
+            ))
+        })
+}
+
+/// Check a MiniMax video job once (`doStatus`): `succeeded` completes with
+/// the video's URL, `failed`, `cancelled` and `expired` fail, and any other
+/// status is pending.
+pub(super) async fn minimax_status(
+    model: &Model,
+    operation: &Value,
+    provider: &dyn Provider,
+) -> Result<VideoStatus, Error> {
+    let task_id = task_id(operation)?;
+    let root = root(provider)?;
+    let request = http::request_to(
+        &MINIMAX_API,
+        &root,
+        provider.config(),
+        "GET",
+        &["v2", "query", "video_generation", task_id],
+        None,
+        Default::default(),
+        Default::default(),
+    )?;
+    let response = http::json(
+        &MINIMAX_API,
+        transport(provider)?,
+        request,
+        provider.name(),
+        Some(&model.id),
+    )
+    .await?;
+    let task = &response["task"];
+    match task["status"].as_str() {
+        Some("succeeded") => {
+            let url = task["content"]["url"]
+                .as_str()
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| {
+                    http::response_error(
+                        provider.name(),
+                        format!(
+                            "MiniMax video generation completed but no video URL was returned. Task ID: {task_id}"
+                        ),
+                    )
+                })?;
+            let video = FilePart {
+                id: generate_id("part"),
+                data: FileData::Text(url.to_owned()),
+                media_type: "video/mp4".into(),
+                filename: None,
+                provider_metadata: None,
+            };
+            let mut metadata = json!({"taskId": task_id, "videoUrl": url});
+            for key in ["duration", "ratio", "resolution"] {
+                if !task[key].is_null() {
+                    metadata[key] = task[key].clone();
+                }
+            }
+            if let Some(usage) = task["usage"].as_object() {
+                let mut seconds = Map::new();
+                for (from, to) in [
+                    ("total_seconds", "totalSeconds"),
+                    ("input_seconds", "inputSeconds"),
+                    ("output_seconds", "outputSeconds"),
+                ] {
+                    if let Some(value) = usage.get(from).filter(|value| !value.is_null()) {
+                        seconds.insert(to.into(), value.clone());
+                    }
+                }
+                metadata["usage"] = Value::Object(seconds);
+            }
+            let mut item = Item::new(vec![video]);
+            item.provider_metadata = Some([("minimax".to_owned(), metadata)].into());
+            Ok(VideoStatus::Completed(item))
+        }
+        Some("failed") => {
+            let message = task["error"]["message"]
+                .as_str()
+                .map(|message| format!(": {message}"))
+                .unwrap_or_default();
+            let code = match &task["error"]["code"] {
+                Value::String(code) => format!(" ({code})"),
+                Value::Number(code) => format!(" ({code})"),
+                _ => String::new(),
+            };
+            Ok(VideoStatus::Failed {
+                message: format!(
+                    "MiniMax video generation failed{message}{code}. Task ID: {task_id}"
+                ),
+            })
+        }
+        Some("cancelled") => Ok(VideoStatus::Failed {
+            message: format!("MiniMax video generation was cancelled. Task ID: {task_id}"),
+        }),
+        Some("expired") => Ok(VideoStatus::Failed {
+            message: format!("MiniMax video generation request expired. Task ID: {task_id}"),
+        }),
+        _ => Ok(VideoStatus::Pending),
+    }
+}
+
+/// Fetch a finished video through the download transport, which pins DNS
+/// to public addresses and sends no credentials, as TypeScript's core
+/// fetches a result URL. Bytes come back as they are.
+pub(super) async fn minimax_download(
+    video: FilePart,
+    provider: &dyn Provider,
+) -> Result<FilePart, Error> {
+    let FileData::Text(url) = &video.data else {
+        return Ok(video);
+    };
+    if !media::is_downloadable_url(url) {
+        return Ok(video);
+    }
+    let downloads = provider.download_transport().ok_or_else(|| {
+        invalid(
+            "a MiniMax video comes from another origin; build the provider with \
+             with_download_transport or register it with register_with_downloads to fetch it",
+        )
+    })?;
+    let (bytes, content_type) = files::download(downloads.as_ref(), url, DEFAULT_MAX_BYTES)
+        .await
+        .map_err(|error| {
+            let message = "MiniMax video download failed".to_owned();
+            let failed = match error.status_code {
+                Some(status) => {
+                    ProviderError::from_status(message, status, Some(provider.name().to_owned()))
+                }
+                None => ProviderError::new(ProviderErrorKind::Response, message)
+                    .with_provider(provider.name()),
+            };
+            Error::from(failed.with_source(error))
+        })?;
+    let media_type = content_type
+        .filter(|value| value.starts_with("video/"))
+        .unwrap_or_else(|| video.media_type.clone());
+    Ok(FilePart {
+        data: FileData::Bytes(bytes.to_vec()),
+        media_type,
+        ..video
+    })
 }

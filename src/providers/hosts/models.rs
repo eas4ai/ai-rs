@@ -13,6 +13,7 @@ use crate::{
         operations::{
             CallLimits, Documents, EmbedParams, EvaluationInput, EvaluationParams, ImageParams,
             ImagePrompt, Item, Question, RankedDocument, RerankParams, VideoParams, VideoPrompt,
+            VideoStatus,
         },
     },
     types::{
@@ -184,6 +185,26 @@ impl ProviderProtocol for MessagesModels {
     ) -> Result<Item<Value>, Error> {
         match self.videos("start_video")? {
             video::Videos::MiniMax => video::minimax_start(model, prompt, params, provider).await,
+        }
+    }
+    async fn video_status(
+        &self,
+        model: &Model,
+        operation: &Value,
+        provider: &dyn Provider,
+    ) -> Result<VideoStatus, Error> {
+        match self.videos("video_status")? {
+            video::Videos::MiniMax => video::minimax_status(model, operation, provider).await,
+        }
+    }
+    async fn download_video(
+        &self,
+        _model: &Model,
+        video: FilePart,
+        provider: &dyn Provider,
+    ) -> Result<FilePart, Error> {
+        match self.videos("download_video")? {
+            video::Videos::MiniMax => video::minimax_download(video, provider).await,
         }
     }
 }
