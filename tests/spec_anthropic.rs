@@ -3759,18 +3759,19 @@ async fn ant_019_results_a_batch_cannot_give_fail() {
 
 // ANT-020
 
+/// A buffered Messages response whose text is this decision answer.
+fn decision_reply(text: &str) -> (u16, Vec<u8>) {
+    json_reply(json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn", "usage": {"input_tokens": 3, "output_tokens": 1}
+    }))
+}
+
 #[tokio::test]
 async fn ant_020_evaluation_makes_one_messages_call() {
     use suprnova_ai::providers::operations::{EvaluationInput, Question};
-    let transport = Recorder::new([message(
-        vec![
-            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "{\"q0\": 0.5}"}}),
-            json!({"type": "content_block_stop", "index": 0}),
-        ],
-        json!({"output_tokens": 1}),
-        "end_turn",
-    )]);
+    let transport = Recorder::new([decision_reply("{\"q0\": 0.5}")]);
     let questions = [(
         "urgent".to_owned(),
         Question::Noul {
@@ -3788,21 +3789,17 @@ async fn ant_020_evaluation_makes_one_messages_call() {
     )
     .await
     .unwrap();
+    assert_eq!(transport.count(), 1);
     assert_eq!(transport.url(0), "https://api.anthropic.com/v1/messages");
+    // One buffered call: the body asks for no stream.
+    let body = transport.body(0);
+    assert!(body.get("stream").is_none(), "{body}");
 }
 
 #[tokio::test]
 async fn ant_020_evaluation_sends_the_decision_prompt_and_reads_the_answer() {
     use suprnova_ai::providers::operations::{EvaluationInput, Question};
-    let transport = Recorder::new([message(
-        vec![
-            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "{\"q0\": 0.25}"}}),
-            json!({"type": "content_block_stop", "index": 0}),
-        ],
-        json!({"output_tokens": 1}),
-        "end_turn",
-    )]);
+    let transport = Recorder::new([decision_reply("{\"q0\": 0.25}")]);
     let questions = [(
         "urgent".to_owned(),
         Question::Noul {
