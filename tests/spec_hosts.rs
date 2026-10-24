@@ -4633,3 +4633,53 @@ async fn hst_027_a_completion_entry_does_not_replace_the_prompt_or_the_stream() 
     assert!(body.get("stream_options").is_none(), "{body}");
     assert_eq!(body["repetition_penalty"], 1.1, "{body}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn hst_031_image_bytes_are_asked_for_as_any_type_and_must_be_an_image() {
+    let accept = |request: &HttpRequest| {
+        request
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("accept"))
+            .map(|(_, v)| v.clone())
+    };
+    let transport = Recorder::new([(200, PNG.to_vec())]);
+    image(
+        "fireworks",
+        "accounts/fireworks/models/flux-1-dev-fp8",
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(accept(&transport.request()).as_deref(), Some("*/*"));
+    let transport = Recorder::new(kontext_replies(
+        "https://api.fireworks.ai/inference/v1/samples/x.png",
+        "Ready",
+    ));
+    image(
+        "fireworks",
+        "accounts/fireworks/models/flux-kontext-pro",
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap();
+    let requests = fireworks_requests(&transport);
+    assert_eq!(accept(&requests[0]).as_deref(), Some("application/json"));
+    assert_eq!(accept(&requests[3]).as_deref(), Some("*/*"));
+    // A body that is not an image is an error, not a PNG.
+    let transport = Recorder::new([json_reply(json!({"error": "not an image"}))]);
+    let error = image(
+        "fireworks",
+        "accounts/fireworks/models/flux-1-dev-fp8",
+        transport,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+}
