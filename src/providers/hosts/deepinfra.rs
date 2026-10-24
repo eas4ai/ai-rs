@@ -6,7 +6,10 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
+        openai::{
+            OpenAICompletionsProtocol,
+            profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
+        },
     },
     transport::HttpTransport,
 };
@@ -55,6 +58,14 @@ pub(super) static HOST: Host = Host {
 /// unset key variable `DEEPINFRA_API_KEY`.
 pub fn provider(config: ProviderConfig, transport: Arc<dyn HttpTransport>) -> HostProvider {
     HostProvider::new(&HOST, config, transport)
+}
+
+/// The protocol of a DeepInfra completion model: OAI-015's compatible
+/// completions, without streamed usage, which DeepInfra does not take. Set it on a model of this provider with
+/// `Model::with_protocol`; the call reads its options from the `deepinfra`
+/// entry.
+pub fn completion_protocol() -> OpenAICompletionsProtocol {
+    OpenAICompletionsProtocol::compatible(false)
 }
 
 /// Register the DeepInfra provider under `deepinfra` and `@ai-sdk/deepinfra`, with
