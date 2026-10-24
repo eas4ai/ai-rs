@@ -416,3 +416,132 @@ Falsifier: An OpenAI or xAI stream that sends `response.failed` with `{"error": 
 Mechanism: hosts
 Rationale: The crate read `response.failed` as metadata only, so a failed OpenAI response ended with no error (`openai-responses-language-model.ts` raises one).
 Status: Agreed 2026-10-22
+
+## Together AI, DeepInfra and Fireworks, whole
+
+The model kinds `@ai-sdk/togetherai` 3.0.76, `@ai-sdk/deepinfra` 3.0.75 and
+`@ai-sdk/fireworks` 3.0.78 ship beside chat: completions and embeddings on
+the OpenAI-compatible protocols, images, and Together AI's reranking. A
+host's own options are the entry under its name (`togetherai`, `deepinfra`
+or `fireworks`). An image call returns the warnings of TypeScript in
+`Item.warnings`, and makes one image per call, so `ops::generate_image`
+makes one call per image (OPS-003).
+
+[HST-026] A Together AI, DeepInfra or Fireworks chat call MUST read the
+`openaiCompatible` entry and the host's entry as
+`openai-compatible-chat-language-model.ts` reads them: `user` as `user`,
+`reasoningEffort` as `reasoning_effort` in place of the core effort,
+`textVerbosity` as `verbosity`, and `strictJsonSchema` as the `strict` of a
+JSON schema response format, true when unset. Every other key of the host's
+entry MUST go into the body as given, in place of a core setting of the
+same name, but MUST NOT replace `messages`, `tools`, `tool_choice`,
+`reasoning_effort`, `verbosity` or the stream fields. A Fireworks call MUST send `promptCacheKey` as
+`prompt_cache_key`, `serviceTier` as `service_tier`, `thinking` as
+`thinking` with `budgetTokens` as `budget_tokens`, and `reasoningHistory` as
+`reasoning_history`, and MUST map an effort from its options as HST-003 maps
+the core effort. An entry that is not an object, a Fireworks `serviceTier`
+other than `priority`, a `thinking.type` other than `enabled` or
+`disabled`, a `budgetTokens` below 1024, or a `reasoningHistory` other than
+`disabled`, `interleaved` or `preserved` MUST fail with `Error::Validation`
+before any request.
+Falsifier: A recorded body for each host with the host's entry `{"user": "u", "reasoningEffort": "low", "textVerbosity": "low", "repetition_penalty": 1.1, "temperature": 0.3, "messages": []}` and a core temperature of 0.7 lacks `user`, `reasoning_effort: "low"`, `verbosity: "low"` or `repetition_penalty: 1.1`, sends a temperature other than 0.3, or sends the entry's `messages`; `strictJsonSchema: false` under an output schema on a model that takes JSON schemas sends `strict` true; a Fireworks body for `{"promptCacheKey": "k", "serviceTier": "priority", "thinking": {"type": "enabled", "budgetTokens": 2048}, "reasoningHistory": "preserved", "reasoningEffort": "xhigh"}` sends another field name, keeps the option names, or sends an effort other than `high`; or one of the invalid entries sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: TypeScript spreads the host's entry into the body, so an application reaches a host's own settings this way; Fireworks renames its four options in `transformRequestBody`.
+Status: Agreed 2026-10-24
+
+[HST-027] `togetherai::completion_protocol`, `deepinfra::completion_protocol`
+and `fireworks::completion_protocol` MUST return the compatible completions
+protocol of OAI-015 for the host: with `stream_options.include_usage` for
+Together AI and Fireworks and without it for DeepInfra. A model with that
+protocol on the host's provider MUST stream `POST <base>/completions` with
+the host's key, take its options from the host's entry, and read an error
+body as HST-005 says.
+Falsifier: A recorded completions call for each host goes to another URL or credential, sends `stream_options` for DeepInfra or lacks it for Together AI or Fireworks, or drops the host entry's `echo` or `suffix`; or a Fireworks error body `{"error": "bad prompt"}` with HTTP 400 gives another message or a kind other than `BadRequest`.
+Mechanism: hosts
+Rationale: `togetherai-provider.ts`, `deepinfra-provider.ts` and `fireworks-provider.ts` build their completion models on `OpenAICompatibleCompletionLanguageModel`, with `includeUsage` for Together AI and Fireworks.
+Status: Agreed 2026-10-24
+
+[HST-028] `ops::embed` with a Together AI, DeepInfra or Fireworks model
+MUST embed as OAI-016's compatible protocol does: `POST <base>/embeddings`
+with the host's key, `model`, `input`, `encoding_format: "float"`, and
+`dimensions` and `user` from the host's entry, 2048 values per call with
+parallel calls, and an error body read as HST-005 says.
+Falsifier: A recorded call for each host with two values and the entry `{"dimensions": 256}` differs from the stated body or URL; 2049 values are split other than 2048 and 1; or the call fails with `UnsupportedOperation`.
+Mechanism: hosts
+Rationale: `OpenAICompatibleEmbeddingModel` with its defaults of 2048 values and parallel calls.
+Status: Agreed 2026-10-24
+
+[HST-029] Together AI image generation MUST send `POST
+<base>/images/generations` with `model`, `prompt`, `seed`, `width` and
+`height` from the size as numbers, the first input image as `image_url` (a
+URL as given, bytes or a file as a data URL), `response_format: "base64"`
+and the `togetherai` entry as given, and return the images of
+`data[].b64_json`. For `google/gemini-3-pro-image` it MUST leave out `seed`
+with a warning, and leave out the entry's `steps`, `guidance`,
+`negative_prompt` and `disable_safety_checker`. An aspect ratio MUST be left
+out with an `unsupported` warning for `aspectRatio`, and input images after
+the first MUST be left out with a warning. A mask MUST fail with
+`Error::Validation` before any request. An error body's `error.message` MUST
+be the error's message.
+Falsifier: A recorded call with size `1024x768`, seed 7, the entry `{"steps": 4}` and one PNG image sends another URL or body, or returns other images than the response's; `google/gemini-3-pro-image` sends `seed` or `steps`, or lacks the seed warning; an aspect ratio is sent or not warned; a second image is sent or not warned; or a mask sends a request.
+Mechanism: hosts
+Rationale: `togetherai-image-model.ts`. Its `aspectRatio` warning is pushed when a size is set, which its own message contradicts; the crate warns for the aspect ratio it leaves out.
+Status: Agreed 2026-10-24
+
+[HST-030] DeepInfra image generation without input images MUST send `POST
+<root>/inference/<model>` with `prompt`, `num_images`, `aspect_ratio`,
+`width` and `height` from the size as strings, `seed` and the `deepinfra`
+entry as given, where `<root>` is the base URL without its last path
+segment `openai`; a base URL whose last segment is not `openai` MUST fail
+with `Error::Configuration` before any request. It MUST return the images
+of `images[]` with a leading `data:image/<type>;base64,` removed. With input
+images it MUST send `POST <base>/images/edits` as a multipart form with
+`model`, `prompt`, each image as an `image` part (a URL fetched through the
+download transport), the mask as `mask`, `n`, `size` and the entry's values
+as text fields, and return the images of `data[].b64_json`. An error body's
+`detail.error`, or for an edit its `error.message`, MUST be the error's
+message.
+Falsifier: A recorded call with size `1024x768`, aspect ratio `16:9` and seed 7 for `black-forest-labs/FLUX-1-schnell` sends another URL or body, or returns an image that keeps the data URL prefix; a call with two images and a mask sends another URL or form; an image URL without a download transport sends a request; or a base URL ending in `/v1` sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `deepinfra-image-model.ts`; TypeScript's base URL is the root that the crate's DeepInfra base URL (`https://api.deepinfra.com/v1/openai`, HST-001) extends with `openai`.
+Status: Agreed 2026-10-24
+
+[HST-031] Fireworks image generation MUST send `POST` with `prompt`,
+`aspect_ratio`, `seed`, `samples`, the first input image as `input_image`
+(a URL as given, bytes or a file as a data URL), `width` and `height` from
+the size as strings, and the `fireworks` entry as given, to
+`<base>/image_generation/<model>` for the size models
+(`accounts/fireworks/models/` followed by
+`playground-v2-5-1024px-aesthetic`, `japanese-stable-diffusion-xl`,
+`playground-v2-1024px-aesthetic`, `stable-diffusion-xl-1024-v1-0` or
+`SSD-1B`), to `<base>/workflows/<model>` for the Kontext models
+(`accounts/fireworks/models/flux-kontext-pro` and `flux-kontext-max`), and
+to `<base>/workflows/<model>/text_to_image` for every other model, and
+return the response bytes as the image. For the two Kontext models it MUST
+read `request_id`, then `POST <base>/workflows/<model>/get_result` with
+`{"id"}` every 500 ms until `status` is `Ready`, when it MUST download
+`result.sample` with the key only from the base URL's origin and through the
+download transport without it from another, failing with
+`Error::Validation` when there is none; `Error` or `Failed`, or 120 s
+without `Ready`, MUST fail the call. A size on a model that is not a size
+model, an aspect ratio on a size model, input images after the first and a
+mask MUST be warned and left out. The entry's `output_format` other than
+`jpeg` or `png`, or a `safety_tolerance` outside 0 to 6, MUST fail with
+`Error::Validation` before any request.
+Falsifier: A recorded call for a size model, for `accounts/fireworks/models/flux-1-dev-fp8` and for `accounts/fireworks/models/flux-kontext-pro` goes to another URL or sends another body; the Kontext call does not poll `get_result` until `Ready`, downloads the sample from another origin with the key or from the base origin without it, downloads one from another origin without a download transport, or does not fail on `Failed` or after 120 s; a stated warning is missing or its setting is sent; or an invalid entry sends a request.
+Mechanism: hosts
+Rationale: `fireworks-image-model.ts`, whose `getFromApi` sends the headers only to the credentialed origin; the crate fetches other origins through the download transport, as GGL-019 does for Veo videos.
+Status: Agreed 2026-10-24
+
+[HST-032] Together AI reranking MUST send `POST <base>/rerank` with
+`model`, `query`, `documents` as the texts or JSON objects given, `top_n`,
+`rank_fields` from the `togetherai` option `rankFields` and
+`return_documents: false`, and return each result's `index` and
+`relevance_score` in the response's order, with the response `id` and
+`model` in the metadata. An unknown `togetherai` option MUST fail with
+`Error::Validation` before any request, and an error body's `error.message`
+MUST be the error's message.
+Falsifier: A recorded call with two JSON documents, `top_n` 1 and `rankFields: ["title"]` sends another URL or body; the result has another order, index or score, or lacks the id or model; or an unknown option sends a request.
+Mechanism: hosts
+Rationale: `reranking/togetherai-reranking-model.ts`.
+Status: Agreed 2026-10-24

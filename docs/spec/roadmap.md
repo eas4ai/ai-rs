@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: anthropic-system-placement
+Current: compatible-hosts-whole
 
 ## rename-to-suprnova-ai
 
@@ -292,5 +292,29 @@ messages, and update the system message departure in `docs/PORT.md`. Check
 the fix with at most two calls on `claude-haiku-5-5`.
 
 Done when the anthropic, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## compatible-hosts-whole
+
+Requirements: HST-026, HST-027, HST-028, HST-029, HST-030, HST-031, HST-032, PKG-002, PKG-006
+
+Port Together AI (`@ai-sdk/togetherai` 3.0.76), DeepInfra
+(`@ai-sdk/deepinfra` 3.0.75) and Fireworks (`@ai-sdk/fireworks` 3.0.78)
+whole: read each host's own options on chat calls, give each host its
+completion protocol, embed through the host's chat model, and add Together
+AI's images and reranking, DeepInfra's images and edits, and Fireworks'
+images with the Kontext polling. Image calls return TypeScript's warnings
+in `Item.warnings`. Update `README.md`, `docs/PORT.md` and the host module
+docs. The tests of each requirement in `tests/spec_hosts.rs` are named after
+it, and `scripts/check-hosts.sh` reports one result per requirement. Live
+calls run only on Together AI's free models
+(`meta-llama/Llama-3.3-70B-Instruct-Turbo-Free` and
+`black-forest-labs/FLUX.1-schnell-Free`), at most four; every other model
+kind is checked with recorded requests only. This is the first of four
+commitments that port the remaining hosts whole; DeepSeek and MiniMax,
+Mistral, and xAI follow.
+
+Done when the hosts, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the
 adversary report have no open findings.
