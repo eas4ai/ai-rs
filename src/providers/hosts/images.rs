@@ -258,12 +258,14 @@ async fn together(
         Default::default(),
         Default::default(),
     )?;
-    let response = http::json(
+    // The images come inside the JSON, so it is read up to the media limit.
+    let (_, response) = http::json_with_limit(
         api,
         transport(provider)?,
         request,
         provider.name(),
         Some(&model.id),
+        DEFAULT_MAX_BYTES,
     )
     .await?;
     let images = response["data"]
@@ -499,12 +501,14 @@ async fn deepinfra(
         )?;
         (form.into_request(request), true)
     };
-    let response = http::json(
+    // The images come inside the JSON, so it is read up to the media limit.
+    let (_, response) = http::json_with_limit(
         api,
         transport(provider)?,
         request,
         provider.name(),
         Some(&model.id),
+        DEFAULT_MAX_BYTES,
     )
     .await?;
     let bad = |what: &str| {
