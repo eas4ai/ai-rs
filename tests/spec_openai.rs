@@ -2586,6 +2586,59 @@ async fn oai_011_a_stream_cut_after_text_fails_as_incomplete() {
     );
 }
 
+#[test]
+fn oai_011_a_program_call_goes_back_with_its_caller_and_async() {
+    // A call that a program made, as the crate's reader keeps it (the raw
+    // item) and as TypeScript keeps it (camelCase metadata).
+    let mut raw = raw_call();
+    raw["caller"] = json!({"type": "program", "caller_id": "ptc_1"});
+    raw["async"] = json!(true);
+    let shapes = [
+        json!({"item_id": "fc_1", "raw_item": raw}),
+        json!({"itemId": "fc_1", "caller": {"type": "program", "callerId": "ptc_1"}, "async": true}),
+    ];
+    for metadata in shapes {
+        let body = body(history_with(metadata.clone()), &store(Some(false)));
+        let input = items(&body);
+        let call = input
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap_or_else(|| panic!("no function_call: {body}"));
+        let caller = json!({"type": "program", "caller_id": "ptc_1"});
+        assert_eq!(call["caller"], caller, "{metadata}: {body}");
+        assert_eq!(call["async"], true, "{metadata}: {body}");
+        let output = input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap_or_else(|| panic!("no function_call_output: {body}"));
+        assert_eq!(output["caller"], caller, "{metadata}: {body}");
+    }
+    // A custom tool call keeps its async too.
+    let mut call = ToolCallPart::new("call_ct", "sql", r#""select 1""#);
+    call.provider_metadata = Some(
+        [(
+            "openai".to_owned(),
+            json!({"item_id": "ct_1", "raw_item": {"type": "custom_tool_call", "id": "ct_1", "call_id": "call_ct", "name": "sql", "input": "select 1", "async": true}}),
+        )]
+        .into(),
+    );
+    let mut options = with_tools(host_tools());
+    options.params = store(Some(false)).params;
+    let body = body_for(
+        "gpt-5.4",
+        vec![
+            user("rows?"),
+            Message::new(MessageRole::Assistant, vec![Part::ToolCall(call)]),
+        ],
+        &options,
+    );
+    let custom = items(&body)
+        .iter()
+        .find(|item| item["type"] == "custom_tool_call")
+        .unwrap_or_else(|| panic!("no custom_tool_call: {body}"));
+    assert_eq!(custom["async"], true, "{body}");
+}
+
 // OAI-012
 
 #[tokio::test]
