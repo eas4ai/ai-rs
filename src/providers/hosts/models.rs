@@ -1,15 +1,16 @@
 //! The model kinds a host serves beside chat, on the protocol its provider
 //! gives every model: Together AI's, DeepInfra's and Fireworks' embeddings
-//! on the compatible embedding protocol (HST-028).
-use super::Models;
+//! on the compatible embedding protocol (HST-028) and their image models
+//! (HST-029 to HST-031).
+use super::{Models, images};
 use crate::{
     Error, Model, Provider, ProviderProtocol, StreamOptions,
     providers::{
         EventStream,
         openai::{OpenAIEmbeddingProtocol, protocol::HostChatProtocol},
-        operations::{CallLimits, EmbedParams, Item},
+        operations::{CallLimits, EmbedParams, ImageParams, ImagePrompt, Item},
     },
-    types::Message,
+    types::{Message, messages::FilePart},
 };
 use async_trait::async_trait;
 
@@ -66,5 +67,24 @@ impl ProviderProtocol for HostModels {
     fn embed_limits(&self, model: &Model) -> CallLimits {
         self.embeddings()
             .map_or_else(|_| CallLimits::default(), |e| e.embed_limits(model))
+    }
+    async fn generate_image(
+        &self,
+        model: &Model,
+        prompt: ImagePrompt,
+        params: ImageParams,
+        provider: &dyn Provider,
+    ) -> Result<Item<Vec<FilePart>>, Error> {
+        let Some(kind) = self.models.images else {
+            return Err(Error::UnsupportedOperation("generate_image".into()));
+        };
+        images::generate(kind, &self.chat.0.api, model, prompt, params, provider).await
+    }
+    /// Each host's image model makes one image per call.
+    fn image_limits(&self, _model: &Model) -> CallLimits {
+        CallLimits {
+            max_per_call: Some(1),
+            parallel: true,
+        }
     }
 }

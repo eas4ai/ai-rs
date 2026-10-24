@@ -53,6 +53,7 @@ pub mod deepinfra;
 pub mod deepseek;
 pub mod fireworks;
 pub mod huggingface;
+mod images;
 pub mod minimax;
 pub mod mistral;
 mod models;
@@ -133,12 +134,29 @@ pub(crate) struct Host {
 pub(crate) struct Models {
     /// Embeddings on OAI-016's compatible protocol (HST-028).
     pub embeddings: bool,
+    /// The host's image model (HST-029 to HST-031).
+    pub images: Option<images::Images>,
 }
 impl Models {
     /// The language model alone.
-    pub(crate) const CHAT: Self = Self { embeddings: false };
+    pub(crate) const CHAT: Self = Self {
+        embeddings: false,
+        images: None,
+    };
     /// Embeddings on the compatible protocol.
-    pub(crate) const EMBEDDINGS: Self = Self { embeddings: true };
+    pub(crate) const EMBEDDINGS: Self = Self {
+        embeddings: true,
+        images: None,
+    };
+    /// Together AI's: embeddings and images.
+    pub(crate) const TOGETHER_AI: Self = Self {
+        embeddings: true,
+        images: Some(images::Images::TogetherAI),
+    };
+    /// Whether the host serves a model kind beside its language model.
+    fn beside_chat(self) -> bool {
+        self.embeddings || self.images.is_some()
+    }
 }
 impl Host {
     /// The protocol of the host's models: its language model's, with the
@@ -148,7 +166,7 @@ impl Host {
         downloads: Option<Arc<dyn DownloadTransport>>,
     ) -> Arc<dyn ProviderProtocol> {
         match self.protocol {
-            HostProtocol::Chat(profile) if self.models.embeddings => Arc::new(
+            HostProtocol::Chat(profile) if self.models.beside_chat() => Arc::new(
                 models::HostModels::new(HostChatProtocol(profile, downloads), self.models),
             ),
             _ => self.protocol.protocol(downloads),
