@@ -1399,13 +1399,15 @@ impl Parser {
             reasoning_tokens: self.thinking_tokens,
             raw: (!self.raw_usage.is_empty()).then(|| json!(self.raw_usage)),
         };
-        let finish = self.stop_reason.as_deref().map(|r| match r {
-            "end_turn" | "stop_sequence" | "pause_turn" => "stop",
-            "max_tokens" | "model_context_window_exceeded" => "length",
+        // A message without a stop reason finishes as other, as TypeScript
+        // maps a null stop reason.
+        let finish = Some(match self.stop_reason.as_deref() {
+            Some("end_turn" | "stop_sequence" | "pause_turn") => "stop",
+            Some("max_tokens" | "model_context_window_exceeded") => "length",
             // The JSON tool's call is the answer, not a tool call.
-            "tool_use" if self.json_answer => "stop",
-            "tool_use" => "tool_call",
-            "refusal" => "content_filter",
+            Some("tool_use") if self.json_answer => "stop",
+            Some("tool_use") => "tool_call",
+            Some("refusal") => "content_filter",
             _ => "other",
         });
         let iterations = self.iterations.as_ref().map(|iterations| {

@@ -143,7 +143,8 @@ async fn finish_reasons_response_identity_and_unknown_reason_metadata() {
         (Some("tool_use"), Some("tool_call")),
         (Some("refusal"), Some("content_filter")),
         (Some("pause_turn"), Some("stop")),
-        (None, None),
+        // A message without a stop reason finishes as other (ANT-014).
+        (None, Some("other")),
     ] {
         let m = model(ScriptedTransport::events(complete(vec![], reason)));
         let events = m
