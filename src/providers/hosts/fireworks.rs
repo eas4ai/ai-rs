@@ -8,6 +8,7 @@
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
+    models::files::DownloadTransport,
     providers::{
         http::{ApiProfile, Auth},
         openai::{
@@ -81,4 +82,16 @@ pub fn register(
     transport: Arc<dyn HttpTransport>,
 ) -> Result<(), Error> {
     super::register(&HOST, registry, config, transport, None)
+}
+
+/// Register the Fireworks provider as `register` does, with a download
+/// transport that fetches Kontext results on another origin than the base URL, also for a provider restored from a
+/// snapshot.
+pub fn register_with_downloads(
+    registry: &mut ProviderRegistry,
+    config: ProviderConfig,
+    transport: Arc<dyn HttpTransport>,
+    downloads: Arc<dyn DownloadTransport>,
+) -> Result<(), Error> {
+    super::register(&HOST, registry, config, transport, Some(downloads))
 }
