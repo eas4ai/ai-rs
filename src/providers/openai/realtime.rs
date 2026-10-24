@@ -788,6 +788,17 @@ pub(super) async fn create_token(
             "OpenAI realtime client secret response has no value",
         )
     })?;
+    Ok(RealtimeToken {
+        token: token.to_owned(),
+        url: realtime_url(model, provider)?,
+        expires_at: response["expires_at"].as_u64(),
+    })
+}
+
+/// The realtime socket URL, `wss://<host>/v1/realtime?model=<id>`: the base
+/// URL's host and port with a fixed path, as TypeScript's token names it. A
+/// token and a server connection open this same URL (OAI-024).
+fn realtime_url(model: &Model, provider: &dyn Provider) -> Result<String, Error> {
     let base = url::Url::parse(&provider.config().base_url())
         .map_err(|_| Error::Configuration("OpenAI base URL is invalid".into()))?;
     let host = base
@@ -800,11 +811,7 @@ pub(super) async fn create_token(
     let mut url = url::Url::parse(&format!("wss://{host}/v1/realtime"))
         .map_err(|_| Error::Configuration("OpenAI realtime URL is invalid".into()))?;
     url.query_pairs_mut().append_pair("model", &model.id);
-    Ok(RealtimeToken {
-        token: token.to_owned(),
-        url: url.into(),
-        expires_at: response["expires_at"].as_u64(),
-    })
+    Ok(url.into())
 }
 
 /// The socket a client opens with a token; it sends the session update
@@ -829,34 +836,33 @@ pub(super) fn token_connection(
 
 /// The socket a server opens with the provider's key: `<base as
 /// wss>/live/sessions` for the Live API, which starts with a session start,
-/// and `<base as wss>/realtime?model=<id>` otherwise, which takes a session
-/// update.
+/// and otherwise the URL a token names, which takes a session update.
 pub(super) fn server_connection(
     model: &Model,
     provider: &dyn Provider,
 ) -> Result<(WebSocketRequest, RealtimeStartup), Error> {
-    let (path, query, startup): (&[&str], Vec<(String, Value)>, _) = if live(&model.id) {
-        (&["live", "sessions"], vec![], RealtimeStartup::SessionStart)
-    } else {
-        (
-            &["realtime"],
-            vec![("model".into(), json!(model.id))],
-            RealtimeStartup::SessionUpdate,
-        )
-    };
+    // The request gives the key's headers, and the Live API its URL.
     let request = http::request(
         &errors::API,
         provider.config(),
         "GET",
-        path,
+        &["live", "sessions"],
         None,
         Default::default(),
-        query.into_iter().collect(),
+        Default::default(),
     )?;
-    let url = match request.url.split_once("://") {
-        Some(("http", rest)) => format!("ws://{rest}"),
-        Some((_, rest)) => format!("wss://{rest}"),
-        None => request.url.clone(),
+    let (url, startup) = if live(&model.id) {
+        let url = match request.url.split_once("://") {
+            Some(("http", rest)) => format!("ws://{rest}"),
+            Some((_, rest)) => format!("wss://{rest}"),
+            None => request.url.clone(),
+        };
+        (url, RealtimeStartup::SessionStart)
+    } else {
+        (
+            realtime_url(model, provider)?,
+            RealtimeStartup::SessionUpdate,
+        )
     };
     let headers = request
         .headers
