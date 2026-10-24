@@ -52,7 +52,7 @@ fn file(part: &FilePart, index: usize, wire: Wire, history: &History<'_>) -> Res
     }
     match dialect_of(wire) {
         Dialect::OpenAI | Dialect::VertexXai => {}
-        Dialect::DeepSeek => return deepseek_file(part, mt),
+        Dialect::DeepSeek => return super::deepseek::image(part, mt, true),
         Dialect::Moonshot => return moonshot_file(part, mt),
         Dialect::Mistral => return mistral_file(part, mt),
         // The TypeScript provider downloads every file URL for MaaS.
@@ -221,26 +221,6 @@ fn fetch_url(part: &FilePart) -> Option<&str> {
         .as_text()
         .filter(|s| media::is_downloadable_url(s))
 }
-/// DeepSeek takes GIF, JPEG, PNG and WebP images only
-/// (`convert-to-deepseek-chat-messages.ts`).
-fn deepseek_file(part: &FilePart, mt: &str) -> Result<Value, Error> {
-    if ![
-        "image/gif",
-        "image/jpeg",
-        "image/jpg",
-        "image/png",
-        "image/webp",
-    ]
-    .contains(&mt)
-    {
-        return Err(invalid(format!(
-            "DeepSeek takes only GIF, JPEG, PNG and WebP images, not {mt}"
-        )));
-    }
-    let mt = if mt == "image/jpg" { "image/jpeg" } else { mt };
-    let url = media::data_to_data_url(media_ref(&part.data), mt);
-    Ok(json!({"type":"image_url","image_url":{"url":url}}))
-}
 /// Moonshot AI takes images, videos and text, inline: it does not fetch
 /// URLs, so a provider downloads them first when it has a download transport
 /// (`convert-to-moonshotai-chat-messages.ts`).
@@ -348,6 +328,19 @@ fn tool_result(value: &ToolResultValue, wire: Wire) -> Result<Value, Error> {
                 parts.push(match p {
                     ContentPart::Text(t) => {
                         json!({"type":if responses {"input_text"}else {"text"},"text":t.text})
+                    }
+                    // DeepSeek takes a result's images as a user's, without
+                    // `fileData` (HST-035).
+                    ContentPart::File(f)
+                        if dialect_of(wire) == Dialect::DeepSeek
+                            && f.media_type.starts_with("image/") =>
+                    {
+                        let mt = if f.media_type == "image/*" {
+                            "image/jpeg"
+                        } else {
+                            &f.media_type
+                        };
+                        super::deepseek::image(f, mt, false)?
                     }
                     ContentPart::File(f) => {
                         let url = media::data_to_data_url(media_ref(&f.data), &f.media_type);

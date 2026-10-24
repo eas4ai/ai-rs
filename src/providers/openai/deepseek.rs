@@ -1,12 +1,13 @@
 //! DeepSeek's own request rules beyond the dialect's field names, as
 //! `@ai-sdk/deepseek` 3.0.70 sends them: the `deepseek` options entry of a
-//! chat call (HST-033), and the message names, the assistant prefix and the
-//! strict tools that a base URL ending in `/beta` turns on (HST-034). A
-//! value outside an option's schema, or an option name the call's entry does
-//! not take, fails with `Error::Validation` before any request, as the
-//! OpenAI and Anthropic option entries do; TypeScript's schema strips an
-//! unknown name. A message's metadata may carry other keys, which are passed
-//! over.
+//! chat call (HST-033), the message names, the assistant prefix and the
+//! strict tools that a base URL ending in `/beta` turns on (HST-034), and
+//! the image parts of user messages and tool results (HST-035). A value
+//! outside an option's schema, or an option name the call's entry does not
+//! take, fails with `Error::Validation` before any request, as the OpenAI
+//! and Anthropic option entries do; TypeScript's schema strips an unknown
+//! name. A message's or part's metadata may carry other keys, which are
+//! passed over.
 
 use serde_json::{Map, Value, json};
 
@@ -17,7 +18,11 @@ use super::{
 use crate::{
     Error, ProviderConfig,
     models::params::InferenceRequestParams,
-    types::{Message, MessageRole, Tool, tools::ToolKind},
+    types::{
+        Message, MessageRole, Tool, media,
+        messages::{FileData, FilePart},
+        tools::ToolKind,
+    },
 };
 
 /// The `deepseek` entry of a chat call (`deepseekLanguageModelChatOptions`).
@@ -297,4 +302,117 @@ pub(super) fn strict_tools(
         }
     }
     Ok(())
+}
+
+/// The media types DeepSeek takes for an image (HST-010).
+const IMAGE_TYPES: [&str; 5] = [
+    "image/gif",
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+];
+
+/// An image part as DeepSeek takes it (`convert-to-deepseek-chat-messages.ts`,
+/// HST-035): text data `file-…` names an uploaded file; a URL goes as given
+/// with the part's `imageDetail`; bytes go as a data URL, or, with
+/// `fileData: true` in a user message, as a `file` part with `file_data` and
+/// the filename. A tool result does not read `fileData`.
+pub(super) fn image(part: &FilePart, mt: &str, read_file_data: bool) -> Result<Value, Error> {
+    let text = part.data.as_text();
+    if let Some(id) = text.filter(|text| text.starts_with("file-")) {
+        return Ok(json!({"type": "file", "file_id": id}));
+    }
+    if !IMAGE_TYPES.contains(&mt) {
+        return Err(invalid(format!(
+            "DeepSeek takes only GIF, JPEG, PNG and WebP images, not {mt}"
+        )));
+    }
+    let options = ImageOptions::parse(part, read_file_data)?;
+    let mt = if mt == "image/jpg" { "image/jpeg" } else { mt };
+    if let Some(url) = text.filter(|text| media::is_downloadable_url(text)) {
+        if url.chars().count() > 8192 {
+            return Err(invalid(
+                "DeepSeek image URLs must not exceed 8192 characters",
+            ));
+        }
+        if options.file_data {
+            return Err(invalid(
+                "DeepSeek fileData image parts require inline data, not a URL",
+            ));
+        }
+        return Ok(image_url(url, options.detail));
+    }
+    let data_url = match &part.data {
+        FileData::Text(text) => media::data_to_data_url(text.as_str(), mt),
+        FileData::Bytes(bytes) => media::data_to_data_url(bytes.as_slice(), mt),
+    };
+    if options.file_data {
+        if options.detail.is_some() {
+            return Err(invalid(
+                "DeepSeek imageDetail cannot be combined with fileData",
+            ));
+        }
+        let mut file = json!({"type": "file", "file_data": data_url});
+        if let Some(name) = &part.filename {
+            file["filename"] = json!(name);
+        }
+        return Ok(file);
+    }
+    Ok(image_url(&data_url, options.detail))
+}
+
+fn image_url(url: &str, detail: Option<&str>) -> Value {
+    let mut image = json!({"url": url});
+    if let Some(detail) = detail {
+        image["detail"] = json!(detail);
+    }
+    json!({"type": "image_url", "image_url": image})
+}
+
+/// The `deepseek` metadata of an image part (`deepseekFilePartProviderOptions`).
+#[derive(Debug, Default)]
+struct ImageOptions {
+    detail: Option<&'static str>,
+    file_data: bool,
+}
+
+impl ImageOptions {
+    fn parse(part: &FilePart, read_file_data: bool) -> Result<Self, Error> {
+        let Some(entry) = part
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("deepseek"))
+        else {
+            return Ok(Self::default());
+        };
+        let Value::Object(entry) = entry else {
+            return Err(invalid("deepseek file part metadata must be an object"));
+        };
+        let detail = match entry.get("imageDetail") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(match value.as_str() {
+                Some("low") => "low",
+                Some("high") => "high",
+                Some("original") => "original",
+                Some("auto") => "auto",
+                _ => {
+                    return Err(invalid(format!(
+                        "deepseek file part option imageDetail must be low, high, original or auto, not {value}"
+                    )));
+                }
+            }),
+        };
+        let file_data = match entry.get("fileData") {
+            None | Some(Value::Null) => false,
+            Some(_) if !read_file_data => false,
+            Some(Value::Bool(true)) => true,
+            Some(other) => {
+                return Err(invalid(format!(
+                    "deepseek file part option fileData must be true, not {other}"
+                )));
+            }
+        };
+        Ok(Self { detail, file_data })
+    }
 }
