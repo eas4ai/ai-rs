@@ -687,6 +687,8 @@ async fn fireworks(
         )
     };
     let (bytes, declared) = if kontext {
+        // The poll needs a timer; check before a job is started and billed.
+        crate::models::call::require_timer()?;
         let submitted = http::json(
             api,
             transport,
@@ -738,14 +740,17 @@ async fn fireworks(
         let sample = match polled {
             Ok(sample) => sample?,
             Err(_) => {
+                // A retry would start and bill a new job, so it must not
+                // retry, as other poll timeouts do not.
                 return Err(crate::errors::ProviderError::new(
-                    crate::errors::ProviderErrorKind::DeadlineExceeded,
+                    crate::errors::ProviderErrorKind::Timeout,
                     format!(
                         "Fireworks image generation timed out after {} ms",
                         FIREWORKS_POLL_TIMEOUT.as_millis()
                     ),
                 )
                 .with_provider(provider.name())
+                .with_retryable(false)
                 .into());
             }
         };
