@@ -488,6 +488,7 @@ pub(crate) fn wire_request(
             previous_response: call.options.previous_response_id.is_some(),
             quoted_results: &quoted_results,
             host_tools: &host_tools,
+            deepseek_beta: false,
         },
         None => match &chat_call {
             Some(chat_call) => messages::History {
@@ -498,6 +499,9 @@ pub(crate) fn wire_request(
             None => messages::History::plain(model, use_references),
         },
     };
+    let deepseek = chat.filter(|profile| profile.dialect == Dialect::DeepSeek);
+    let mut history = history;
+    history.deepseek_beta = deepseek.is_some() && super::deepseek::beta(config);
     let mut converted = messages::convert(messages, wire, history)?;
     if let Some(call) = &call {
         call.finish(model, &mut body, &mut converted, &options.tools)?;
@@ -547,6 +551,9 @@ pub(crate) fn wire_request(
             "tools".into(),
             super::tools::convert(&options.tools, wire, model)?.into(),
         );
+    }
+    if deepseek.is_some() {
+        super::deepseek::strict_tools(&options.tools, &mut body, history.deepseek_beta)?;
     }
     if send_tools && let Some(choice) = &options.tool_choice {
         body.insert("tool_choice".into(), params::tool_choice(choice, wire)?);
