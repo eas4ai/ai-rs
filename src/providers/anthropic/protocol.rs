@@ -26,7 +26,7 @@ use crate::{
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AnthropicMessagesProtocol;
@@ -901,6 +901,29 @@ pub(crate) fn http_request(
     Ok((request, parts.reading))
 }
 
+/// The request of one call and how to read its reply, after the files it
+/// sends by URL are downloaded. The request is checked before any download,
+/// so that a call that fails validation fetches nothing.
+async fn prepare(
+    profile: &'static MessagesProfile,
+    config: &ProviderConfig,
+    downloads: Option<Arc<dyn DownloadTransport>>,
+    model_id: &str,
+    messages: Vec<Message>,
+    options: &StreamOptions,
+    streaming: bool,
+) -> Result<(HttpRequest, Reading), Error> {
+    let messages = match (&downloads, without_downloads(&messages)) {
+        (Some(downloads), Some(inline)) => {
+            request_parts(profile, model_id, &inline, options, streaming)?;
+            download_files(messages, downloads.as_ref(), profile.api.label).await?
+        }
+        _ => messages,
+    };
+    let parts = request_parts(profile, model_id, &messages, options, streaming)?;
+    http_request(profile, config, parts)
+}
+
 fn start(
     profile: &'static MessagesProfile,
     model: &Model,
@@ -914,17 +937,10 @@ fn start(
     let name = provider.name().to_owned();
     let model_id = model.id.clone();
     stream::once(async move {
-        // Check the request before any download, so that a call that fails
-        // validation fetches nothing.
-        let messages = match (&downloads, without_downloads(&messages)) {
-            (Some(downloads), Some(inline)) => {
-                request_parts(profile, &model_id, &inline, &options, true)?;
-                download_files(messages, downloads.as_ref(), profile.api.label).await?
-            }
-            _ => messages,
-        };
-        let parts = request_parts(profile, &model_id, &messages, &options, true)?;
-        let (request, reading) = http_request(profile, &config, parts)?;
+        let (request, reading) = prepare(
+            profile, &config, downloads, &model_id, messages, &options, true,
+        )
+        .await?;
         let transport = transport.ok_or_else(|| {
             Error::Configuration(format!(
                 "{} streams require an owned HttpTransport handle (Provider::shared_transport)",
@@ -965,9 +981,29 @@ async fn evaluate(
         questions,
         params,
         |messages, options| async move {
-            let events: Vec<_> = start(profile, model, messages, options, provider)
-                .try_collect()
-                .await?;
+            // One buffered call, as TypeScript's decision model makes.
+            let (request, reading) = prepare(
+                profile,
+                provider.config(),
+                provider.download_transport(),
+                &model.id,
+                messages,
+                &options,
+                false,
+            )
+            .await?;
+            let transport = provider.transport().ok_or_else(|| {
+                Error::Configuration(format!(
+                    "{} calls require an HttpTransport (Provider::transport)",
+                    profile.api.label
+                ))
+            })?;
+            let response =
+                http::json(&profile.api, transport, request, &name, Some(&model.id)).await?;
+            let events: Vec<_> =
+                super::stream::parse_message(&response, name.clone(), &profile.api, reading)
+                    .try_collect()
+                    .await?;
             crate::providers::google::language::hydrate(&name, events)
         },
     )
