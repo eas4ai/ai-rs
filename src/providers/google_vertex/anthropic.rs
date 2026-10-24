@@ -77,6 +77,7 @@ static PROFILE: MessagesProfile = MessagesProfile {
     strict_tools: false,
     max_temperature: |_| 1.0,
     sampling_with_thinking: |_| false,
+    options_key: None,
 };
 
 /// The Anthropic tools Vertex AI takes, in the versions it lists.

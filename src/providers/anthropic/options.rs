@@ -554,10 +554,14 @@ impl AnthropicOptions {
     ) -> Result<Self, Error> {
         let params = p.and_then(|p| p.provider_params.as_ref());
         let mut merged = Map::new();
+        let mut read = Vec::new();
         for key in std::iter::once("anthropic").chain(extra_key) {
             match params.and_then(|params| params.get(key)) {
                 None | Some(Value::Null) => {}
-                Some(Value::Object(options)) => merged.extend(options.clone()),
+                Some(Value::Object(options)) => {
+                    merged.extend(options.clone());
+                    read.push(key);
+                }
                 Some(_) => {
                     return Err(invalid(format!(
                         "the {key} provider options must be an object"
@@ -565,8 +569,15 @@ impl AnthropicOptions {
                 }
             }
         }
-        let options: Self = serde_json::from_value(Value::Object(merged))
-            .map_err(|e| invalid(format!("invalid anthropic provider options: {e}")))?;
+        if read.is_empty() {
+            read.push("anthropic");
+        }
+        let options: Self = serde_json::from_value(Value::Object(merged)).map_err(|e| {
+            invalid(format!(
+                "invalid {} provider options: {e}",
+                read.join(" and ")
+            ))
+        })?;
         options.validate()?;
         Ok(options)
     }
