@@ -65,6 +65,7 @@ mod dialect;
 mod embedding;
 pub mod errors;
 mod files;
+mod host_options;
 mod images;
 mod messages;
 mod options;

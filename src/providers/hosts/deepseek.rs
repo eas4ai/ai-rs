@@ -14,7 +14,9 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, JsonSchemaModels, ReasoningTokens, Setting},
+        openai::profile::{
+            ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens, Setting,
+        },
     },
     transport::HttpTransport,
 };
@@ -56,6 +58,7 @@ static PROFILE: ChatProfile = ChatProfile {
     dialect: Dialect::DeepSeek,
     stream_error_kinds: true,
     openai_own: false,
+    host_options: HostOptions::NotRead,
 };
 
 pub(super) static HOST: Host = Host {

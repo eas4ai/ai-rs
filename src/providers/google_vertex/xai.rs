@@ -14,7 +14,7 @@ use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
         http::{ApiProfile, Auth},
-        openai::profile::{ChatProfile, Dialect, JsonSchemaModels, ReasoningTokens},
+        openai::profile::{ChatProfile, Dialect, HostOptions, JsonSchemaModels, ReasoningTokens},
     },
     transport::HttpTransport,
 };
@@ -47,6 +47,7 @@ static PROFILE: ChatProfile = ChatProfile {
     dialect: Dialect::VertexXai,
     stream_error_kinds: false,
     openai_own: false,
+    host_options: HostOptions::NotRead,
 };
 
 fn base_url(config: &ProviderConfig) -> Result<String, Error> {

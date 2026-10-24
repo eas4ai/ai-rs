@@ -439,6 +439,12 @@ pub(crate) fn wire_request(
         Wire::Chat(profile) => dialect::check(profile, model, &p, options)?,
         Wire::Responses(profile) => dialect::check_responses(profile, model, &p, options)?,
     }
+    // A host's own entries (HST-026), read before the request is built so an
+    // invalid one sends nothing.
+    let host_entry = match chat {
+        Some(profile) => super::host_options::HostEntry::read(profile, &p)?,
+        None => None,
+    };
     // OpenAI's own Responses API reads the call's `openai` options.
     let call = match wire {
         Wire::Responses(profile) if profile.dialect == ResponsesDialect::OpenAI => {
@@ -592,13 +598,20 @@ pub(crate) fn wire_request(
             }
             Wire::Chat(profile) if profile.sends_json_schema(model) => {
                 let schema = strict_output_schema(schema, chat_call.is_some().then_some(model))?;
-                let strict = chat_call.as_ref().is_none_or(chat::ChatCall::strict);
+                let strict = match (&chat_call, &host_entry) {
+                    (Some(chat_call), _) => chat_call.strict(),
+                    (None, Some(entry)) => entry.strict(),
+                    (None, None) => true,
+                };
                 body.insert("response_format".into(),json!({"type":"json_schema","json_schema":{"name":name,"schema":schema,"strict":strict}}));
             }
             Wire::Chat(_) => {
                 body.insert("response_format".into(), json!({"type":"json_object"}));
             }
         }
+    }
+    if let (Some(profile), Some(entry)) = (chat, &host_entry) {
+        entry.apply(profile, &mut body);
     }
     // Match SDK extra_body merging: explicit escape-hatch keys win at the wire boundary.
     if let Some(extra) = &p.extra_body {
