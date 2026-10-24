@@ -4550,6 +4550,41 @@ fn full_config() -> RealtimeSessionConfig {
 }
 
 #[tokio::test]
+async fn oai_024_a_server_connection_opens_the_url_a_token_names() {
+    // A base URL with another path: the token names its host only, as
+    // TypeScript does, and a server connection opens that same URL.
+    let base = ProviderConfig {
+        default_base_url: "https://proxy.example:8443/openai/v1".into(),
+        ..config()
+    };
+    let transport = Recorder::new([json_reply(json!({"value": "ek_1"}))]);
+    let socket = ScriptedSocket::new(vec![(NEVER_SENT, text_message(json!({})))]);
+    let model = Model::new(
+        "gpt-realtime",
+        Arc::new(
+            OpenAICompatibleProvider::new(base, transport.clone())
+                .with_websocket_transport(socket.clone()),
+        ),
+    );
+    let token =
+        suprnova_ai::ops::realtime::create_token(&model, Default::default(), Default::default())
+            .await
+            .unwrap();
+    assert_eq!(
+        url(&transport, 0),
+        "https://proxy.example:8443/openai/v1/realtime/client_secrets"
+    );
+    assert_eq!(
+        token.url,
+        "wss://proxy.example:8443/v1/realtime?model=gpt-realtime"
+    );
+    let _ = suprnova_ai::ops::realtime::connect_server(&model, RealtimeSessionConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(socket.request().url, token.url);
+}
+
+#[tokio::test]
 async fn oai_024_a_token_carries_the_session_setup_and_opens_the_realtime_socket() {
     let transport = Recorder::new([json_reply(
         json!({"value": "ek_1", "expires_at": 1_800_000_060u64}),
