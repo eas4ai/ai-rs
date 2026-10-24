@@ -4008,3 +4008,240 @@ async fn hst_030_deepinfra_image_errors_give_their_message() {
     assert_eq!(error.message, "bad size");
     assert_eq!(error.kind, ProviderErrorKind::BadRequest);
 }
+
+// HST-031
+
+const FIREWORKS: &str = "https://api.fireworks.ai/inference/v1";
+
+fn fireworks_requests(transport: &Recorder) -> Vec<HttpRequest> {
+    transport.requests.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn hst_031_a_size_model_generates_at_image_generation() {
+    let model_id = "accounts/fireworks/models/stable-diffusion-xl-1024-v1-0";
+    let transport = Recorder::new([(200, PNG.to_vec())]);
+    let item = image(
+        "fireworks",
+        model_id,
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(
+            Some("1024x768"),
+            Some("16:9"),
+            Some(7),
+            Some(("fireworks", json!({"cfg_scale": 7}))),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        format!("{FIREWORKS}/image_generation/{model_id}")
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"prompt": "a cat", "seed": 7, "samples": 1, "width": "1024", "height": "768",
+            "cfg_scale": 7})
+    );
+    assert_eq!(png_bytes(&item.value[0]), PNG);
+    assert!(
+        warned(&item.warnings, "unsupported", Some("aspectRatio")),
+        "{:?}",
+        item.warnings
+    );
+}
+
+#[tokio::test]
+async fn hst_031_another_model_generates_at_its_text_to_image_workflow() {
+    let model_id = "accounts/fireworks/models/flux-1-dev-fp8";
+    let transport = Recorder::new([(200, PNG.to_vec())]);
+    let item = image(
+        "fireworks",
+        model_id,
+        transport.clone(),
+        prompt(
+            "a cat",
+            vec![
+                MediaInput::Url("https://img.test/a.png".into()),
+                MediaInput::Url("https://img.test/b.png".into()),
+            ],
+            Some(MediaInput::Url("https://img.test/m.png".into())),
+        ),
+        image_params(Some("512x512"), Some("16:9"), None, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        format!("{FIREWORKS}/workflows/{model_id}/text_to_image")
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"prompt": "a cat", "aspect_ratio": "16:9", "samples": 1,
+            "input_image": "https://img.test/a.png"})
+    );
+    for (kind, feature) in [
+        ("unsupported", Some("size")),
+        ("other", None),
+        ("unsupported", Some("mask")),
+    ] {
+        assert!(
+            warned(&item.warnings, kind, feature),
+            "{feature:?}: {:?}",
+            item.warnings
+        );
+    }
+}
+
+fn kontext_replies(sample: &str, final_status: &str) -> Vec<(u16, Vec<u8>)> {
+    vec![
+        json_reply(json!({"request_id": "req-1"})),
+        json_reply(json!({"id": "req-1", "status": "Pending", "result": null})),
+        json_reply(json!({"id": "req-1", "status": final_status, "result": {"sample": sample}})),
+        (200, PNG.to_vec()),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn hst_031_a_kontext_model_polls_and_downloads_from_the_base_origin_with_the_key() {
+    let model_id = "accounts/fireworks/models/flux-kontext-pro";
+    let sample = "https://api.fireworks.ai/inference/v1/samples/x.png";
+    let transport = Recorder::new(kontext_replies(sample, "Ready"));
+    let item = image(
+        "fireworks",
+        model_id,
+        transport.clone(),
+        prompt("a cat", vec![MediaInput::Bytes(PNG.to_vec())], None),
+        image_params(None, Some("1:1"), None, None),
+    )
+    .await
+    .unwrap();
+    let requests = fireworks_requests(&transport);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].url, format!("{FIREWORKS}/workflows/{model_id}"));
+    let submitted: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        submitted["input_image"],
+        format!("data:image/png;base64,{}", b64(PNG))
+    );
+    for poll in &requests[1..3] {
+        assert_eq!(
+            poll.url,
+            format!("{FIREWORKS}/workflows/{model_id}/get_result")
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&poll.body).unwrap(),
+            json!({"id": "req-1"})
+        );
+    }
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(requests[3].url, sample);
+    assert!(
+        requests[3]
+            .headers
+            .iter()
+            .any(|(n, v)| n.eq_ignore_ascii_case("authorization") && v == "Bearer sk-test"),
+        "{:?}",
+        requests[3].headers
+    );
+    assert_eq!(png_bytes(&item.value[0]), PNG);
+}
+
+#[tokio::test(start_paused = true)]
+async fn hst_031_a_sample_on_another_origin_downloads_without_the_key() {
+    let model_id = "accounts/fireworks/models/flux-kontext-max";
+    let sample = "https://cdn.fireworks.test/x.png";
+    // Without a download transport the call fails after the polls.
+    let transport = Recorder::new(kontext_replies(sample, "Ready"));
+    let error = image(
+        "fireworks",
+        model_id,
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(fireworks_requests(&transport).len(), 3);
+    // With one, the sample comes through it.
+    let transport = Recorder::new(kontext_replies(sample, "Ready"));
+    let downloads = Arc::new(Downloads::default());
+    let model = Model::new(
+        model_id,
+        Arc::new(
+            fireworks::provider(key_config(), transport.clone())
+                .with_download_transport(downloads.clone()),
+        ),
+    );
+    let item = suprnova_ai::ops::generate_image(
+        &model,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fireworks_requests(&transport).len(), 3);
+    assert_eq!(*downloads.urls.lock().unwrap(), vec![sample.to_owned()]);
+    assert_eq!(png_bytes(&item.value[0]), [1, 2, 3]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn hst_031_a_failed_or_slow_kontext_job_fails_the_call() {
+    let model_id = "accounts/fireworks/models/flux-kontext-pro";
+    let transport = Recorder::new(kontext_replies("unused", "Failed"));
+    let error = image(
+        "fireworks",
+        model_id,
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    assert_eq!(fireworks_requests(&transport).len(), 3);
+    // A job still pending after 120 s fails.
+    let mut replies = vec![json_reply(json!({"request_id": "req-1"}))];
+    replies.extend(
+        (0..400).map(|_| json_reply(json!({"id": "req-1", "status": "Pending", "result": null}))),
+    );
+    let transport = Recorder::new(replies);
+    let started = tokio::time::Instant::now();
+    let error = image(
+        "fireworks",
+        model_id,
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    let waited = started.elapsed().as_secs();
+    assert!((119..=121).contains(&waited), "waited {waited} s");
+    assert!(fireworks_requests(&transport).len() < 400);
+}
+
+#[tokio::test]
+async fn hst_031_invalid_fireworks_entries_fail_before_a_request() {
+    for entry in [
+        json!({"output_format": "gif"}),
+        json!({"safety_tolerance": 7}),
+    ] {
+        let transport = Recorder::new([]);
+        let error = image(
+            "fireworks",
+            "accounts/fireworks/models/flux-1-dev-fp8",
+            transport.clone(),
+            prompt("a cat", vec![], None),
+            image_params(None, None, None, Some(("fireworks", entry.clone()))),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::Validation(_)), "{entry}: {error:?}");
+        assert_eq!(transport.count(), 0);
+    }
+}
