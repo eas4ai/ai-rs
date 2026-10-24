@@ -5879,3 +5879,29 @@ async fn oai_003_every_operation_uses_its_path_key_organization_and_project() {
         );
     }
 }
+
+#[tokio::test]
+async fn oai_021_a_file_time_the_clock_cannot_hold_is_left_out() {
+    use suprnova_ai::providers::operations::{UploadFile, UploadParams};
+    // A created_at past what SystemTime holds is a response to distrust, not
+    // to panic on.
+    let transport = Recorder::new([json_reply(json!({
+        "id": "file-1", "object": "file", "created_at": 18446744073709551615u64,
+        "expires_at": 1800003600
+    }))]);
+    let provider = OpenAICompatibleProvider::new(config(), transport);
+    let file = UploadFile {
+        data: Bytes::from_static(b"%PDF"),
+        media_type: "application/pdf".into(),
+        filename: Some("r.pdf".into()),
+    };
+    let uploaded =
+        suprnova_ai::ops::upload_file(&provider, file, UploadParams::default(), Default::default())
+            .await
+            .unwrap();
+    assert_eq!(uploaded.value.created_at, None);
+    assert_eq!(
+        uploaded.value.expires_at.as_deref(),
+        Some("2027-01-15T09:00:00.000Z")
+    );
+}

@@ -73,10 +73,12 @@ pub(super) fn file_id(reference: &BTreeMap<String, String>) -> Result<&str, Erro
     path_id("file", id)
 }
 
+/// A time the system clock cannot hold is left out rather than trusted.
 fn time(seconds: &Value) -> Option<String> {
     seconds
         .as_u64()
-        .map(|seconds| iso_time(UNIX_EPOCH + Duration::from_secs(seconds)))
+        .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+        .map(iso_time)
 }
 
 /// A file object as an `UploadedFile`, with the fields OpenAI reports and
