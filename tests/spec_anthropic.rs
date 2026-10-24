@@ -235,6 +235,59 @@ async fn ant_001_betas_go_in_one_header_once_each() {
     );
 }
 
+#[tokio::test]
+async fn ant_001_anthropic_credentials_go_only_to_anthropic() {
+    // Another host behind the Messages protocol gets neither Anthropic's
+    // token nor Anthropic's key, whatever the env snapshot holds.
+    let env: std::collections::BTreeMap<String, String> = [
+        ("ANTHROPIC_AUTH_TOKEN".to_owned(), "tok-1".to_owned()),
+        ("ANTHROPIC_API_KEY".to_owned(), "sk-ant-env".to_owned()),
+    ]
+    .into();
+    let metadata = suprnova_ai::providers::ModelsDevProvider {
+        id: "other".into(),
+        api: Some("https://other.test".into()),
+        npm: Some("@ai-sdk/anthropic".into()),
+        env: vec![],
+    };
+    let transport = Recorder::new([text_reply(), text_reply()]);
+    let other = AnthropicCompatibleProvider::from_modelsdev(
+        &metadata,
+        ProviderConfig {
+            env: env.clone(),
+            ..Default::default()
+        },
+        transport.clone(),
+    )
+    .unwrap();
+    run(
+        &Model::new("claude-sonnet-4-6", Arc::new(other)),
+        vec![user("hi")],
+        StreamOptions::default(),
+    )
+    .await;
+    let configured = suprnova_ai::providers::ConfiguredProvider::new(
+        "proxy",
+        ProviderConfig {
+            default_base_url: "https://proxy.test".into(),
+            env,
+            ..Default::default()
+        },
+        Arc::new(suprnova_ai::providers::anthropic::AnthropicMessagesProtocol),
+        Some(transport.clone()),
+    );
+    run(
+        &Model::new("claude-sonnet-4-6", Arc::new(configured)),
+        vec![user("hi")],
+        StreamOptions::default(),
+    )
+    .await;
+    for index in 0..2 {
+        assert_eq!(transport.header(index, "authorization"), None, "{index}");
+        assert_eq!(transport.header(index, "x-api-key"), None, "{index}");
+    }
+}
+
 // ANT-002
 
 #[tokio::test]
