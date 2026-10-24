@@ -59,8 +59,8 @@ fn entry(params: &ImageParams, key: &str) -> Result<Map<String, Value>, Error> {
     }
 }
 
-/// Fail on an entry value of the wrong type. TypeScript's schemas take
-/// `null` for these options too.
+/// Fail on an entry value of the wrong type. Together AI's and DeepInfra's
+/// schemas (`nullish`) take `null` for these options too.
 fn typed(
     entry: &Map<String, Value>,
     key: &str,
@@ -70,6 +70,23 @@ fn typed(
 ) -> Result<(), Error> {
     match entry.get(option) {
         Some(value) if !value.is_null() && !ok(value) => Err(invalid(format!(
+            "{key} image option {option} must be {expected}, not {value}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// [`typed`] for a schema whose options are `optional`, as Fireworks' are,
+/// which takes no `null`.
+fn typed_present(
+    entry: &Map<String, Value>,
+    key: &str,
+    option: &str,
+    expected: &str,
+    ok: fn(&Value) -> bool,
+) -> Result<(), Error> {
+    match entry.get(option) {
+        Some(value) if !ok(value) => Err(invalid(format!(
             "{key} image option {option} must be {expected}, not {value}"
         ))),
         _ => Ok(()),
@@ -571,12 +588,12 @@ async fn fireworks(
         ("cfg_scale", "a number", Value::is_number),
         ("steps", "an integer", integer),
     ] {
-        typed(&options, "fireworks", option, expected, ok)?;
+        typed_present(&options, "fireworks", option, expected, ok)?;
     }
-    typed(&options, "fireworks", "output_format", "jpeg or png", |v| {
+    typed_present(&options, "fireworks", "output_format", "jpeg or png", |v| {
         v == "jpeg" || v == "png"
     })?;
-    typed(
+    typed_present(
         &options,
         "fireworks",
         "safety_tolerance",
