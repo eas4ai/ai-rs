@@ -4,7 +4,7 @@
 //! seeds. An output schema goes out as JSON mode, which does not enforce it.
 //! The finish reasons `sensitive`, `model_context_window_exceeded` and
 //! `network_error` report `content_filter`, `length` and `error`.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -56,6 +56,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.z.ai/api/paas/v4",
     api_key_env: "ZAI_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the Z.ai provider. An unset base URL becomes `https://api.z.ai/api/paas/v4` and an

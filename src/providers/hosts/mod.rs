@@ -55,6 +55,7 @@ pub mod fireworks;
 pub mod huggingface;
 pub mod minimax;
 pub mod mistral;
+mod models;
 pub mod moonshotai;
 pub mod togetherai;
 pub mod xai;
@@ -122,6 +123,37 @@ pub(crate) struct Host {
     pub default_base_url: &'static str,
     pub api_key_env: &'static str,
     pub protocol: HostProtocol,
+    /// The model kinds beside the language model.
+    pub models: Models,
+}
+
+/// The model kinds a host's TypeScript package ships beside its language
+/// model, which the host provider's default protocol serves.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Models {
+    /// Embeddings on OAI-016's compatible protocol (HST-028).
+    pub embeddings: bool,
+}
+impl Models {
+    /// The language model alone.
+    pub(crate) const CHAT: Self = Self { embeddings: false };
+    /// Embeddings on the compatible protocol.
+    pub(crate) const EMBEDDINGS: Self = Self { embeddings: true };
+}
+impl Host {
+    /// The protocol of the host's models: its language model's, with the
+    /// other model kinds it serves.
+    fn protocol(
+        &'static self,
+        downloads: Option<Arc<dyn DownloadTransport>>,
+    ) -> Arc<dyn ProviderProtocol> {
+        match self.protocol {
+            HostProtocol::Chat(profile) if self.models.embeddings => Arc::new(
+                models::HostModels::new(HostChatProtocol(profile, downloads), self.models),
+            ),
+            _ => self.protocol.protocol(downloads),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -211,7 +243,7 @@ impl Provider for HostProvider {
         self.host.name
     }
     fn default_protocol(&self) -> Option<Arc<dyn ProviderProtocol>> {
-        Some(self.host.protocol.protocol(self.downloads.clone()))
+        Some(self.host.protocol(self.downloads.clone()))
     }
     fn transport(&self) -> Option<&dyn HttpTransport> {
         Some(self.transport.as_ref())
@@ -252,9 +284,7 @@ fn register(
         let config = serde_json::from_value(value)?;
         Ok(Arc::new(build(config)))
     })?;
-    next.register_protocol_factory(host.protocol.class_id(), move |_| {
-        Ok(host.protocol.protocol(None))
-    })?;
+    next.register_protocol_factory(host.protocol.class_id(), move |_| Ok(host.protocol(None)))?;
     *registry = next;
     Ok(())
 }

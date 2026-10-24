@@ -9,7 +9,7 @@
 //! message. V4 models get `reasoning_content` back on every assistant turn;
 //! earlier models get none from before the last user turn. User files must be
 //! GIF, JPEG, PNG or WebP images.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -67,6 +67,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.deepseek.com",
     api_key_env: "DEEPSEEK_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the DeepSeek provider. An unset base URL becomes

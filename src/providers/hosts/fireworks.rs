@@ -3,7 +3,7 @@
 //! as `high`. The `fireworks` provider options entry takes `promptCacheKey`,
 //! `serviceTier`, `thinking` and `reasoningHistory`, sent under Fireworks'
 //! names, and any other Fireworks field as it is.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -54,6 +54,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.fireworks.ai/inference/v1",
     api_key_env: "FIREWORKS_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::EMBEDDINGS,
 };
 
 /// Build the Fireworks provider. An unset base URL becomes `https://api.fireworks.ai/inference/v1` and an

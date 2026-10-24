@@ -7,7 +7,7 @@
 //! built-in tools fail with `Error::UnsupportedOperation`. History goes out
 //! as output text messages, with tool calls and results as `function_call`
 //! and `function_call_output` items, and user files must be images.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -60,6 +60,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://router.huggingface.co/v1",
     api_key_env: "HUGGINGFACE_API_KEY",
     protocol: HostProtocol::Responses(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the Hugging Face provider. An unset base URL becomes

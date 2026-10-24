@@ -4,7 +4,7 @@
 //! tool calls next to the text, so tool events wait for the finish: when text
 //! came, every tool call of the response is dropped and a `tool_calls` finish
 //! reports `stop`.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -52,6 +52,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.cerebras.ai/v1",
     api_key_env: "CEREBRAS_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the Cerebras provider. An unset base URL becomes `https://api.cerebras.ai/v1` and an

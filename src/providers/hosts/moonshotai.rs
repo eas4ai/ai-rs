@@ -8,7 +8,7 @@
 //! Tool and output schemas go out as Moonshot's MFJS subset of JSON schema.
 //! Moonshot AI does not fetch media URLs: build the provider with a download
 //! transport to send image and video URLs, which otherwise fail.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     models::files::DownloadTransport,
@@ -65,6 +65,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.moonshot.ai/v1",
     api_key_env: "MOONSHOT_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the Moonshot AI provider. An unset base URL becomes

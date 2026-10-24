@@ -1,7 +1,7 @@
 //! DeepInfra over Chat Completions. Requests send no `stream_options`. Some
 //! DeepInfra models report reasoning tokens apart from completion tokens;
 //! when reasoning tokens exceed completion tokens, output tokens are the sum.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -52,6 +52,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.deepinfra.com/v1/openai",
     api_key_env: "DEEPINFRA_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::EMBEDDINGS,
 };
 
 /// Build the DeepInfra provider. An unset base URL becomes `https://api.deepinfra.com/v1/openai` and an

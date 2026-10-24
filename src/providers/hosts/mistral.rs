@@ -9,7 +9,7 @@
 //! final assistant message as a prefix to continue, and PDFs as document URLs;
 //! other non-image files fail. Mistral-only fields, such as `safe_prompt`, go
 //! in `InferenceRequestParams::extra_body`.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -66,6 +66,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.mistral.ai/v1",
     api_key_env: "MISTRAL_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the Mistral provider. An unset base URL becomes
