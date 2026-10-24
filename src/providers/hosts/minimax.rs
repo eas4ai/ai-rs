@@ -12,7 +12,13 @@
 //! Anthropic mapping and conversion. The video models (`MiniMax-H3`,
 //! `MiniMax-H3-Max`) run as jobs through `ops::generate_video` at the root
 //! of the base URL, and need a download transport for the finished video
-//! (`register_with_downloads`).
+//! (`register_with_downloads`); a call without one, or without a Tokio
+//! timer to poll with, fails before its job starts and bills. The video is
+//! read up to 256 MiB. `ops::generate_video` gives each job one video and
+//! merges the start's `resolvedInputs` into the completed item's `minimax`
+//! metadata; `ops::start_video` with an `n` above 1 warns and starts one
+//! job, and a status checked later from its `VideoJob` through
+//! `ops::video_status` completes without `resolvedInputs`.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,

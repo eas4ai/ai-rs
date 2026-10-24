@@ -203,9 +203,14 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   fails with `Error::Validation` on the `pollIntervalMs` and `pollTimeoutMs`
   options, since `ops::generate_video` polls by its `VideoOptions`, has no
   `webhookUrl`, and makes `n` videos as `n` jobs where TypeScript warns and
-  makes one; and a MiniMax video goes to the base URL without its last
+  makes one; a MiniMax video goes to the base URL without its last
   segment `anthropic`, so a base URL that does not end in `/anthropic` fails
-  with `Error::Configuration`.
+  with `Error::Configuration`; a MiniMax video call also fails before its
+  job without a Tokio timer to poll with; the finished video is read up to
+  256 MiB, the limit Google's videos get, where TypeScript reads it without
+  one; and a MiniMax job is its `task_id` alone, so a status checked from a
+  stored `VideoJob` through `ops::video_status` completes without the
+  `resolvedInputs` that `ops::generate_video` merges from the start.
 - Chat Completions tool call deltas without an index, as Mistral and Moonshot
   AI send them, are told apart by their place in the chunk and their id; Python
   merges them. Text that follows reasoning, or reasoning that follows text,
