@@ -2710,6 +2710,28 @@ async fn oai_013_usage_and_final_metadata_follow_typescript() {
 }
 
 #[tokio::test]
+async fn oai_013_delta_logprobs_reach_the_metadata_only_when_asked() {
+    // OpenAI sends `"logprobs": []` on every text delta, asked or not.
+    let events = || {
+        vec![
+            json!({"type": "response.created", "response": {"id": "resp_l", "model": "gpt-5.4", "status": "in_progress"}}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+            json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "h", "logprobs": []}),
+            json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "i", "logprobs": []}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "hi", "annotations": []}]}}),
+            json!({"type": "response.completed", "response": {"id": "resp_l", "model": "gpt-5.4", "status": "completed", "output": [],
+                   "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+        ]
+    };
+    let unasked = finished(events(), openai(json!({}))).await;
+    let md = &unasked.message().provider_metadata.as_ref().unwrap()["openai"];
+    assert!(md.get("logprobs").is_none(), "{md}");
+    let asked = finished(events(), openai(json!({"logprobs": 2}))).await;
+    let md = &asked.message().provider_metadata.as_ref().unwrap()["openai"];
+    assert_eq!(md["logprobs"], json!([[], []]), "{md}");
+}
+
+#[tokio::test]
 async fn oai_013_finish_reasons_follow_typescript() {
     let end = |status: &str, reason: Option<&str>, output: Value| {
         let mut response = json!({"id": "resp_f", "model": "gpt-5.4", "status": status, "output": output, "usage": {"input_tokens": 1, "output_tokens": 1}});

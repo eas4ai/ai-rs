@@ -152,6 +152,8 @@ async fn message_of(response: &Value, provider: &str) -> Result<Message, Error> 
         "image/png".into(),
         false,
         false,
+        // A result body holds logprobs only when its request asked for them.
+        true,
         CallTools::default(),
     )
     .try_collect()

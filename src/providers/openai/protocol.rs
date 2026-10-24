@@ -389,6 +389,10 @@ fn start(
                 .params
                 .as_ref()
                 .is_some_and(|p| params::unstored(p, wire));
+        let logprobs = options
+            .params
+            .as_ref()
+            .is_some_and(|p| params::asks_logprobs(p, wire));
         Ok::<_, Error>(streaming::parse(
             response.body,
             provider_name,
@@ -396,6 +400,7 @@ fn start(
             format!("image/{image_type}"),
             options.output_schema.is_some(),
             hold_reasoning,
+            logprobs,
             super::tools::CallTools::of(&options.tools),
         ))
     })
