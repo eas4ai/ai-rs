@@ -1266,7 +1266,11 @@ pub fn tool_result_to_anthropic(value: &ToolResultValue) -> Result<Value, Error>
     result_content(value, &mut Notes::new(""), &mut Vec::new())
 }
 /// Convert messages after dropping internal parts and repairing orphaned
-/// calls: the top-level system text and the messages.
+/// calls: the top-level system text and the messages. A later system
+/// message with content that Anthropic does not take at its place moves to
+/// just after the last user message before the next assistant message, and
+/// the user messages it separated go as one; with no user message after
+/// it, this fails with `Error::Validation` (ANT-011).
 pub fn messages_to_anthropic(messages: &[Message]) -> Result<(Option<String>, Vec<Value>), Error> {
     let names = ToolNames::default();
     let context = Context {
