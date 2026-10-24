@@ -5306,9 +5306,9 @@ async fn hst_036_the_final_message_carries_deepseek_metadata() {
         json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
             "usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40}}),
     ])]);
-    let model = model("deepseek", "deepseek-v4-flash", transport);
+    let first = model("deepseek", "deepseek-v4-flash", transport);
     let (handle, events) = call(
-        &model,
+        &first,
         vec![user_message("hello")],
         with_tools(tools(&["lookup"])),
     )
@@ -5330,8 +5330,8 @@ async fn hst_036_the_final_message_carries_deepseek_metadata() {
     );
     // Nothing the stream did not carry is reported.
     let transport = Recorder::new([chat_text("hi", "stop")]);
-    let model = model("deepseek", "deepseek-v4-flash", transport);
-    let (handle, events) = call(&model, vec![user_message("hello")], Default::default()).await;
+    let second = model("deepseek", "deepseek-v4-flash", transport);
+    let (handle, events) = call(&second, vec![user_message("hello")], Default::default()).await;
     ok(&events);
     let md = handle.message().provider_metadata.as_ref().unwrap()["deepseek"].clone();
     for key in [
