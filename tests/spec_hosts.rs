@@ -4486,6 +4486,66 @@ fn modelsdev(
     )
 }
 
+#[tokio::test(start_paused = true)]
+async fn hst_031_a_restored_kontext_model_keeps_the_download_transport() {
+    let model_id = "accounts/fireworks/models/flux-kontext-pro";
+    let sample = "https://cdn.fireworks.test/x.png";
+    let generate = |model: Model| async move {
+        suprnova_ai::ops::generate_image(
+            &model,
+            prompt("a cat", vec![], None),
+            image_params(None, None, None, None),
+            Default::default(),
+        )
+        .await
+    };
+    // A models.dev provider for Fireworks, registered with a download
+    // transport: the restored provider takes it from the registered one.
+    let transport = Recorder::new(kontext_replies(sample, "Ready"));
+    let downloads = Arc::new(Downloads::default());
+    let metadata: ModelsDevProvider = serde_json::from_value(
+        json!({"id": "fireworks-ai", "npm": "@ai-sdk/fireworks", "api": FIREWORKS, "env": []}),
+    )
+    .unwrap();
+    let provider = OpenAICompatibleProvider::from_modelsdev_provider(
+        &metadata,
+        key_config(),
+        transport.clone(),
+    )
+    .unwrap()
+    .with_download_transport(downloads.clone());
+    let mut registry = ProviderRegistry::new();
+    openai::register(&mut registry, Arc::new(provider)).unwrap();
+    openai::register_factories(&mut registry, transport.clone()).unwrap();
+    let model = Model::new(model_id, registry.get_provider("fireworks-ai").unwrap());
+    let restored = Model::from_value(model.to_value().unwrap(), &registry).unwrap();
+    let item = generate(restored).await.unwrap();
+    assert_eq!(png_bytes(&item.value[0]), [1, 2, 3]);
+    assert_eq!(*downloads.urls.lock().unwrap(), [sample]);
+
+    // A model with the Fireworks protocol set on it, from a registry made
+    // with register_with_downloads: the restored protocol gets the
+    // registry's download transport.
+    let transport = Recorder::new(kontext_replies(sample, "Ready"));
+    let downloads = Arc::new(Downloads::default());
+    let mut registry = ProviderRegistry::new();
+    fireworks::register_with_downloads(
+        &mut registry,
+        key_config(),
+        transport.clone(),
+        downloads.clone(),
+    )
+    .unwrap();
+    let provider = registry.get_provider("fireworks").unwrap();
+    let model =
+        Model::new(model_id, provider.clone()).with_protocol(provider.default_protocol().unwrap());
+    let restored = Model::from_value(model.to_value().unwrap(), &registry).unwrap();
+    assert!(restored.protocol.is_some());
+    let item = generate(restored).await.unwrap();
+    assert_eq!(png_bytes(&item.value[0]), [1, 2, 3]);
+    assert_eq!(*downloads.urls.lock().unwrap(), [sample]);
+}
+
 #[tokio::test]
 async fn hst_028_to_hst_032_a_models_dev_provider_for_a_host_serves_its_model_kinds() {
     // Embeddings, under the host's entry, for the models.dev id fireworks-ai.
