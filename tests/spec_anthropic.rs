@@ -2646,6 +2646,203 @@ async fn ant_013_redacted_thinking_is_reasoning_with_its_data() {
     );
 }
 
+fn final_metadata(handle: &suprnova_ai::models::StreamHandle) -> Value {
+    handle.message().provider_metadata.as_ref().unwrap()["anthropic"].clone()
+}
+
+#[tokio::test]
+async fn ant_013_citations_and_sources_follow_typescript() {
+    let char_citation = json!({"type": "char_location", "cited_text": "a", "document_index": 0,
+        "document_title": null, "start_char_index": 0, "end_char_index": 1});
+    let web_citation = json!({"type": "web_search_result_location", "cited_text": "b", "url": "https://web.test",
+        "title": "Web", "encrypted_index": "x"});
+    let reply = message(
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "cited"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "citations_delta", "citation": char_citation}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "citations_delta", "citation": char_citation}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "citations_delta", "citation": web_citation}}),
+            json!({"type": "content_block_stop", "index": 0}),
+        ],
+        json!({"output_tokens": 1}),
+        "end_turn",
+    );
+    let mut pdf = file(
+        FileData::Bytes(b"%PDF".to_vec()),
+        "application/pdf",
+        Some(json!({"citations": {"enabled": true}})),
+    );
+    pdf.filename = Some("r.pdf".into());
+    let mut handle = suprnova_ai::stream(
+        &model("claude-sonnet-4-6", Recorder::new([reply])),
+        vec![user_with(Part::File(pdf))],
+        StreamOptions::default(),
+    );
+    while let Some(event) = handle.next().await {
+        event.unwrap();
+    }
+    let Part::Text(text) = &handle.message().parts[0] else {
+        panic!("{:?}", handle.message().parts)
+    };
+    assert_eq!(
+        text.provider_metadata.as_ref().unwrap()["anthropic"]["citations"],
+        json!([char_citation, char_citation, web_citation])
+    );
+    let mut sources = final_metadata(&handle)["sources"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for source in &mut sources {
+        source.as_object_mut().unwrap().remove("id");
+    }
+    assert_eq!(
+        sources,
+        [
+            json!({"sourceType": "document", "mediaType": "application/pdf", "title": "r.pdf", "filename": "r.pdf"}),
+            json!({"sourceType": "url", "url": "https://web.test", "title": "Web"}),
+        ]
+    );
+    // With web search results, the results are the sources.
+    let handle = streamed(
+        "claude-sonnet-4-6",
+        blocks_reply(&builtin_blocks()[..2], "end_turn"),
+        StreamOptions::default(),
+    )
+    .await;
+    let sources = final_metadata(&handle)["sources"].clone();
+    assert_eq!(sources.as_array().unwrap().len(), 1, "{sources}");
+    assert_eq!(sources[0]["url"], "https://rust.test");
+}
+
+#[tokio::test]
+async fn ant_013_compaction_fallback_and_upload_blocks_are_text_parts() {
+    let reply = message(
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "compaction", "content": null}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "compaction_delta", "content": "summary"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "compaction", "signature": "cs", "content": "whole"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "content_block_start", "index": 2, "content_block": {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}}}),
+            json!({"type": "content_block_stop", "index": 2}),
+            json!({"type": "content_block_start", "index": 3, "content_block": {"type": "container_upload", "file_id": "file_1"}}),
+            json!({"type": "content_block_stop", "index": 3}),
+        ],
+        json!({"output_tokens": 1}),
+        "end_turn",
+    );
+    let handle = streamed("claude-sonnet-4-6", reply, StreamOptions::default()).await;
+    let parts: Vec<(String, Value)> = handle
+        .message()
+        .parts
+        .iter()
+        .map(|p| match p {
+            Part::Text(t) => (
+                t.text.clone(),
+                t.provider_metadata.as_ref().unwrap()["anthropic"].clone(),
+            ),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            ("summary".to_owned(), json!({"type": "compaction"})),
+            (
+                "whole".to_owned(),
+                json!({"type": "compaction", "signature": "cs"})
+            ),
+            (
+                String::new(),
+                json!({"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}})
+            ),
+            (
+                String::new(),
+                json!({"type": "container_upload", "fileId": "file_1"})
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn ant_013_pings_and_a_repeated_start_change_nothing() {
+    let start = json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-4-6", "content": [],
+        "stop_reason": null, "usage": {"input_tokens": 1, "output_tokens": 0}}});
+    let events = [
+        start.clone(),
+        json!({"type": "ping"}),
+        start.clone(),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+        json!({"type": "message_stop"}),
+    ];
+    let handle = streamed("claude-sonnet-4-6", sse(&events), StreamOptions::default()).await;
+    assert_eq!(handle.text(), "hi");
+    let mut other = start.clone();
+    other["message"]["id"] = json!("msg_2");
+    let mut handle = suprnova_ai::stream(
+        &model("claude-sonnet-4-6", Recorder::new([sse(&[start, other])])),
+        vec![user("hi")],
+        StreamOptions::default(),
+    );
+    let error = loop {
+        match handle.next().await {
+            Some(Err(error)) => break error,
+            Some(Ok(_)) => {}
+            None => panic!("no error"),
+        }
+    };
+    let suprnova_ai::Error::Provider(error) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(error.kind, suprnova_ai::errors::ProviderErrorKind::Response);
+}
+
+#[tokio::test]
+async fn ant_013_an_error_event_has_the_kind_of_its_status() {
+    use suprnova_ai::errors::ProviderErrorKind;
+    for (kind, status, retryable) in [
+        ("overloaded_error", 529, true),
+        ("api_error", 500, true),
+        ("rate_limit_error", 429, true),
+        ("invalid_request_error", 400, false),
+        ("billing_error", 400, false),
+        ("not_found_error", 404, false),
+    ] {
+        let events = [
+            json!({"type": "message_start", "message": {"id": "msg_1", "model": "m", "content": [], "stop_reason": null, "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+            json!({"type": "error", "error": {"type": kind, "message": "slow down"}}),
+        ];
+        let model = Model::new(
+            "claude-sonnet-4-6",
+            Arc::new(AnthropicCompatibleProvider::new(
+                config(),
+                Recorder::new([sse(&events)]),
+            )),
+        );
+        let mut stream = model
+            .provider
+            .stream(&model, vec![user("hi")], StreamOptions::default());
+        let error = loop {
+            match stream.next().await {
+                Some(Err(error)) => break error,
+                Some(Ok(_)) => {}
+                None => panic!("no error"),
+            }
+        };
+        let suprnova_ai::Error::Provider(error) = error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(error.kind, ProviderErrorKind::from_status(status), "{kind}");
+        assert_eq!(error.is_retryable, retryable, "{kind}");
+        assert_eq!(error.message, "slow down");
+        assert_eq!(error.error_type.as_deref(), Some(kind));
+    }
+}
+
 // ANT-014
 
 #[tokio::test]
@@ -2674,6 +2871,94 @@ async fn ant_014_input_tokens_count_cache_writes_and_reads() {
     );
 }
 
+#[tokio::test]
+async fn ant_014_usage_iterations_finish_and_metadata_follow_typescript() {
+    let usage = json!({"input_tokens": 10, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3,
+        "output_tokens": 20, "output_tokens_details": {"thinking_tokens": 5},
+        "iterations": [{"type": "compaction", "input_tokens": 100, "output_tokens": 7},
+                       {"type": "message", "input_tokens": 30, "output_tokens": 13, "model": "claude-sonnet-4-6"},
+                       {"type": "advisor_message", "input_tokens": 999, "output_tokens": 999}]});
+    let events = [
+        json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-4-6", "content": [], "stop_reason": null,
+            "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_sequence": null,
+            "stop_details": {"type": "refusal", "category": "cyber", "recommended_model": "claude-opus-5"},
+            "container": {"id": "cnt_1", "expires_at": "2026-10-25T00:00:00Z", "skills": [{"type": "anthropic", "skill_id": "pptx", "version": "1"}]},
+            "safeguard_results": [{"type": "dangerous_tool_use"}]},
+            "context_management": {"applied_edits": [{"type": "clear_tool_uses_20250919", "cleared_tool_uses": 2, "cleared_input_tokens": 50}]},
+            "usage": usage}),
+        json!({"type": "message_stop"}),
+    ];
+    let handle = streamed("claude-sonnet-4-6", sse(&events), StreamOptions::default()).await;
+    let reported = handle.message().usage.clone().unwrap();
+    assert_eq!(
+        (
+            reported.input_tokens,
+            reported.output_tokens,
+            reported.cache_write_tokens,
+            reported.cache_read_tokens,
+            reported.reasoning_tokens
+        ),
+        (135, 20, Some(2), Some(3), Some(5))
+    );
+    assert_eq!(handle.finish_reason(), Some("content_filter"));
+    let md = final_metadata(&handle);
+    assert_eq!(md["stopReason"], "refusal");
+    assert_eq!(
+        md["stopDetails"],
+        json!({"type": "refusal", "category": "cyber", "recommendedModel": "claude-opus-5"})
+    );
+    assert_eq!(
+        md["container"],
+        json!({"expiresAt": "2026-10-25T00:00:00Z", "id": "cnt_1",
+        "skills": [{"type": "anthropic", "skillId": "pptx", "version": "1"}]})
+    );
+    assert_eq!(
+        md["contextManagement"],
+        json!({"appliedEdits": [{"type": "clear_tool_uses_20250919",
+        "clearedToolUses": 2, "clearedInputTokens": 50}]})
+    );
+    assert_eq!(
+        md["safeguardResults"],
+        json!([{"type": "dangerous_tool_use"}])
+    );
+    assert_eq!(
+        md["iterations"][1],
+        json!({"type": "message", "model": "claude-sonnet-4-6", "inputTokens": 30, "outputTokens": 13})
+    );
+    assert_eq!(md["usage"]["cache_creation_input_tokens"], 2);
+    assert_eq!(
+        suprnova_ai::providers::anthropic::container_id(&[
+            user("hi"),
+            handle.message().clone(),
+            user("next")
+        ]),
+        Some("cnt_1".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn ant_014_finish_reasons_follow_typescript() {
+    for (reason, expected) in [
+        ("end_turn", "stop"),
+        ("stop_sequence", "stop"),
+        ("pause_turn", "stop"),
+        ("tool_use", "tool_call"),
+        ("max_tokens", "length"),
+        ("model_context_window_exceeded", "length"),
+        ("refusal", "content_filter"),
+        ("compaction", "other"),
+    ] {
+        let handle = streamed(
+            "claude-sonnet-4-6",
+            message(vec![], json!({"output_tokens": 1}), reason),
+            StreamOptions::default(),
+        )
+        .await;
+        assert_eq!(handle.finish_reason(), Some(expected), "{reason}");
+    }
+}
+
 // ANT-015
 
 #[tokio::test]
@@ -2693,12 +2978,168 @@ async fn ant_015_a_part_breakpoint_goes_on_its_block() {
     );
 }
 
+#[tokio::test]
+async fn ant_015_breakpoints_go_on_each_kind_of_block() {
+    use suprnova_ai::types::messages::ToolResultPart;
+    let cache = || json!({"cacheControl": {"type": "ephemeral", "ttl": "5m"}});
+    let mut pdf = file(FileData::Bytes(b"%PDF".to_vec()), "application/pdf", None);
+    pdf.provider_metadata = metadata(cache());
+    let mut result = ToolResultPart::new("toolu_1", "read", json!("ok"));
+    result.provider_metadata = metadata(json!({"cache_control": {"type": "ephemeral"}}));
+    let mut last = Message::new(
+        MessageRole::User,
+        vec![
+            Part::Text(TextPart::new("one")),
+            Part::Text(TextPart::new("two")),
+        ],
+    );
+    last.provider_metadata = metadata(cache());
+    let mut tool = function_tool("weather");
+    tool.tool_config
+        .get_or_insert_with(Default::default)
+        .args
+        .insert("cache_control".into(), json!({"type": "ephemeral"}));
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system_with("rules", cache()),
+            user_with(Part::File(pdf)),
+            assistant(vec![Part::ToolCall(ToolCallPart::new(
+                "toolu_1", "read", "{}",
+            ))]),
+            Message::new(MessageRole::Tool, vec![Part::ToolResult(result)]),
+            last,
+        ],
+        StreamOptions {
+            tools: vec![tool],
+            ..Default::default()
+        },
+    )
+    .await;
+    let control = json!({"type": "ephemeral", "ttl": "5m"});
+    assert_eq!(body["system"][0]["cache_control"], control, "{body}");
+    assert_eq!(
+        body["messages"][0]["content"][0]["cache_control"], control,
+        "{body}"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "{body}"
+    );
+    assert!(
+        body["messages"][2]["content"][1]
+            .get("cache_control")
+            .is_none(),
+        "{body}"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][2]["cache_control"], control,
+        "{body}"
+    );
+    // The fifth breakpoint, the tool's, is left out.
+    assert!(body["tools"][0].get("cache_control").is_none(), "{body}");
+}
+
 // ANT-016
 
 #[tokio::test]
 async fn ant_016_a_model_that_is_not_claude_takes_the_default_limit() {
     let body = body_for("MiniMax-M2", vec![user("hi")], StreamOptions::default()).await;
     assert_eq!(body["max_tokens"], 4096, "{body}");
+}
+
+fn minimax(model_id: &str, transport: Arc<Recorder>) -> Model {
+    let mut registry = suprnova_ai::ProviderRegistry::new();
+    suprnova_ai::providers::hosts::minimax::register(&mut registry, config(), transport).unwrap();
+    Model::new(model_id, registry.get_provider("minimax").unwrap())
+}
+async fn minimax_body(model_id: &str, options: StreamOptions) -> Value {
+    let transport = Recorder::new([text_reply()]);
+    run(
+        &minimax(model_id, transport.clone()),
+        vec![user("hi")],
+        options,
+    )
+    .await;
+    transport.body(0)
+}
+
+#[tokio::test]
+async fn ant_016_minimax_takes_its_typescript_settings() {
+    use suprnova_ai::models::params::{SamplerParams, TopPSamplerParams};
+    let sampling = |t: f64| {
+        let mut params = InferenceRequestParams::default().with_temperature(t);
+        if let ProviderValue::Value(SamplerParams { top_p, .. }) = &mut params.sampling {
+            *top_p = Some(TopPSamplerParams {
+                top_p: ProviderValue::Value(Some(0.9)),
+            });
+        }
+        params
+    };
+    let body = minimax_body("MiniMax-M3.1", with_params(sampling(1.5))).await;
+    assert_eq!(
+        (body["temperature"].clone(), body["top_p"].clone()),
+        (json!(1.5), json!(0.9)),
+        "{body}"
+    );
+    let body = minimax_body(
+        "MiniMax-M3.1",
+        with_anthropic(sampling(0.5), json!({"thinking": {"type": "adaptive"}})),
+    )
+    .await;
+    assert_eq!(
+        (body["temperature"].clone(), body["top_p"].clone()),
+        (json!(0.5), json!(0.9)),
+        "{body}"
+    );
+    let body = minimax_body(
+        "MiniMax-M2",
+        with_params(InferenceRequestParams::default().with_temperature(1.5)),
+    )
+    .await;
+    assert_eq!(body["temperature"], 1.0, "{body}");
+    let body = minimax_body("MiniMax-M2", StreamOptions::default()).await;
+    assert_eq!(body["max_tokens"], 4096, "{body}");
+}
+
+struct VertexToken;
+impl suprnova_ai::providers::google_vertex::AccessTokenSource for VertexToken {
+    fn access_token(&self) -> BoxFuture<'_, Result<String, suprnova_ai::Error>> {
+        Box::pin(async { Ok("t1".to_owned()) })
+    }
+}
+
+#[tokio::test]
+async fn ant_016_vertex_uses_the_json_tool_and_no_strict_flag() {
+    use suprnova_ai::providers::google_vertex;
+    let transport = Recorder::new([text_reply()]);
+    let config = ProviderConfig {
+        env: [
+            ("GOOGLE_VERTEX_PROJECT".to_owned(), "p1".to_owned()),
+            ("GOOGLE_VERTEX_LOCATION".to_owned(), "us-east5".to_owned()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let provider = google_vertex::anthropic::provider(config, transport.clone())
+        .with_access_token_source(Arc::new(VertexToken));
+    let mut registry = suprnova_ai::ProviderRegistry::new();
+    google_vertex::anthropic::register_provider(&mut registry, provider).unwrap();
+    let model = Model::new(
+        "claude-sonnet-4-6@20260101",
+        registry.get_provider("google-vertex-anthropic").unwrap(),
+    );
+    let options = StreamOptions {
+        output_schema: Some(output_schema()),
+        tools: vec![function_tool("lookup").with_strict(true)],
+        ..Default::default()
+    };
+    run(&model, vec![user("hi")], options).await;
+    let body = transport.body(0);
+    assert!(body.get("output_config").is_none(), "{body}");
+    assert!(body["tools"][0].get("strict").is_none(), "{body}");
+    assert_eq!(body["tools"][1]["name"], "json", "{body}");
 }
 
 // ANT-017
