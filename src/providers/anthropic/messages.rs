@@ -349,13 +349,21 @@ fn host_media(file: &FilePart, key: &str, cache: Option<Value>) -> Result<Value,
     let image = file.media_type.starts_with("image/");
     let kind = if image { "image" } else { "video" };
     let text = file.data.as_text();
-    let mut source = if let Some(id) = text.filter(|t| t.starts_with("mm_file://")) {
+    // An uploaded file: MiniMax's own `mm_file://` id, or an Anthropic
+    // `file_` id (ANT-010); TypeScript refuses either for an image.
+    let uploaded = text.filter(|t| t.starts_with("mm_file://") || t.starts_with("file_"));
+    let mut source = if let Some(id) = uploaded {
         if image {
             return Err(Error::Validation(format!(
                 "a {key} image cannot name an uploaded file; only a video can"
             )));
         }
-        json!({"type": "url", "url": id})
+        let url = if id.starts_with("mm_file://") {
+            id.to_owned()
+        } else {
+            format!("mm_file://{id}")
+        };
+        json!({"type": "url", "url": url})
     } else if let Some(url) = text.filter(|t| media::is_downloadable_url(t)) {
         json!({"type": "url", "url": url})
     } else {

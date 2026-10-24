@@ -1002,7 +1002,8 @@ fn start(
             .params
             .as_ref()
             .and_then(|p| p.provider_params.as_ref())
-            .is_some_and(|params| params.contains_key(*key))
+            .and_then(|params| params.get(*key))
+            .is_some_and(|entry| !entry.is_null())
     });
     stream::once(async move {
         let (request, reading) = prepare(
