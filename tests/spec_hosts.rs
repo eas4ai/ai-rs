@@ -4577,3 +4577,34 @@ async fn hst_030_a_models_dev_provider_lends_its_download_transport_to_images() 
         "https://api.deepinfra.com/v1/openai/images/edits"
     );
 }
+
+#[tokio::test]
+async fn hst_029_and_hst_030_an_image_response_above_8_mib_is_read() {
+    // About 9 MiB of image bytes, base64 in a JSON response.
+    let mut big = PNG.to_vec();
+    big.resize(9 * 1024 * 1024, 0);
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(&big)}]}))]);
+    let item = image(
+        "togetherai",
+        "black-forest-labs/FLUX.1-dev",
+        transport,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(png_bytes(&item.value[0]).len(), big.len());
+    let transport = Recorder::new([json_reply(
+        json!({"images": [format!("data:image/png;base64,{}", b64(&big))]}),
+    )]);
+    let item = image(
+        "deepinfra",
+        "black-forest-labs/FLUX-1-schnell",
+        transport,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(png_bytes(&item.value[0]).len(), big.len());
+}
