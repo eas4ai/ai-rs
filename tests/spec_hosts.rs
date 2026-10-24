@@ -5652,7 +5652,7 @@ async fn hst_038_the_final_metadata_is_also_given_under_minimax_when_the_entry_w
     .await;
     ok(&events);
     let metadata = handle.message().provider_metadata.clone().unwrap();
-    assert!(metadata.get("minimax").is_none(), "{metadata:?}");
+    assert!(!metadata.contains_key("minimax"), "{metadata:?}");
     assert_eq!(
         metadata["anthropic"]["stopReason"], "end_turn",
         "{metadata:?}"
