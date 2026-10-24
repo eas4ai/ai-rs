@@ -6,6 +6,7 @@ use super::{
 use crate::{
     Error, Model, Provider, ProviderConfig, ProviderProtocol, ProviderRegistry,
     errors::{ProviderError, ProviderErrorKind},
+    models::files::DownloadTransport,
     providers::{ModelsDevProvider, base::provider_config, http},
     transport::HttpTransport,
 };
@@ -23,6 +24,7 @@ pub struct AnthropicCompatibleProvider {
     /// Whether this provider is for Anthropic's own API, which alone gets
     /// Anthropic's key and token names by default (ANT-001).
     anthropic_api: bool,
+    downloads: Option<Arc<dyn DownloadTransport>>,
 }
 impl fmt::Debug for AnthropicCompatibleProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -66,6 +68,7 @@ impl AnthropicCompatibleProvider {
             protocol_override: None,
             anthropic_version: "2023-06-01".into(),
             anthropic_api,
+            downloads: None,
         }
         .with_anthropic_version("2023-06-01")
     }
@@ -76,6 +79,16 @@ impl AnthropicCompatibleProvider {
         } else {
             &protocol::ANTHROPIC
         }
+    }
+    /// Download the user files that Anthropic does not take by URL, such as
+    /// a text file, before each request (ANT-010). Without one, such a URL
+    /// fails with `Error::Validation`. Download transports must honor the
+    /// core DNS-pinning contract. Runtime transports are not serialized; set
+    /// this again after restoring a snapshot.
+    #[must_use]
+    pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
+        self.downloads = Some(downloads);
+        self
     }
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -154,6 +167,9 @@ impl Provider for AnthropicCompatibleProvider {
     }
     fn shared_transport(&self) -> Option<Arc<dyn HttpTransport>> {
         Some(self.transport.clone())
+    }
+    fn download_transport(&self) -> Option<Arc<dyn DownloadTransport>> {
+        self.downloads.clone()
     }
     fn is_configured(&self) -> bool {
         let token = self

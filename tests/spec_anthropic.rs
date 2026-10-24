@@ -2121,6 +2121,254 @@ async fn ant_010_a_wildcard_image_type_is_resolved_from_the_bytes() {
     );
 }
 
+fn file(data: FileData, media_type: &str, md: Option<Value>) -> FilePart {
+    FilePart {
+        id: "f".into(),
+        data,
+        media_type: media_type.into(),
+        filename: None,
+        provider_metadata: md.and_then(metadata),
+    }
+}
+fn user_with(part: Part) -> Message {
+    Message::new(MessageRole::User, vec![part])
+}
+
+#[tokio::test]
+async fn ant_010_user_files_go_as_typescript_sends_them() {
+    let url = |u: &str| FileData::Text(u.into());
+    let cases: Vec<(FilePart, Value, Option<&str>)> = vec![
+        (
+            file(url("https://a.test/cat.png"), "image/png", None),
+            json!({"type": "image", "source": {"type": "url", "url": "https://a.test/cat.png"}}),
+            None,
+        ),
+        (
+            file(FileData::Bytes(b"\x89PNG".to_vec()), "image/png", None),
+            json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw=="}}),
+            None,
+        ),
+        (
+            file(url("https://a.test/r.pdf"), "application/pdf", None),
+            json!({"type": "document", "source": {"type": "url", "url": "https://a.test/r.pdf"}}),
+            Some("pdfs-2024-09-25"),
+        ),
+        (
+            file(FileData::Bytes(b"%PDF".to_vec()), "application/pdf", None),
+            json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERg=="}}),
+            Some("pdfs-2024-09-25"),
+        ),
+        (
+            file(FileData::Bytes(b"plain".to_vec()), "text/plain", None),
+            json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "plain"}}),
+            None,
+        ),
+        (
+            file(url("file_abc"), "application/pdf", None),
+            json!({"type": "document", "source": {"type": "file", "file_id": "file_abc"}}),
+            Some("files-api-2025-04-14"),
+        ),
+        (
+            file(url("file_img"), "image/png", None),
+            json!({"type": "image", "source": {"type": "file", "file_id": "file_img"}}),
+            Some("files-api-2025-04-14"),
+        ),
+        (
+            file(
+                url("file_abc"),
+                "text/csv",
+                Some(json!({"containerUpload": true})),
+            ),
+            json!({"type": "container_upload", "file_id": "file_abc"}),
+            Some("files-api-2025-04-14"),
+        ),
+    ];
+    for (part, expected, beta) in cases {
+        let (body, betas) = sent(
+            "claude-sonnet-4-6",
+            vec![user_with(Part::File(part))],
+            StreamOptions::default(),
+        )
+        .await;
+        assert_eq!(body["messages"][0]["content"][0], expected, "{body}");
+        if let Some(beta) = beta {
+            assert!(betas.iter().any(|b| b == beta), "{expected}: {betas:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn ant_010_a_document_takes_its_title_context_and_citations() {
+    let mut pdf = file(
+        FileData::Bytes(b"%PDF".to_vec()),
+        "application/pdf",
+        Some(json!({"citations": {"enabled": true}, "title": "Report", "context": "Q3 numbers"})),
+    );
+    pdf.filename = Some("r.pdf".into());
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user_with(Part::File(pdf))],
+        StreamOptions::default(),
+    )
+    .await;
+    let document = &body["messages"][0]["content"][0];
+    assert_eq!(
+        (
+            document["title"].clone(),
+            document["context"].clone(),
+            document["citations"].clone()
+        ),
+        (
+            json!("Report"),
+            json!("Q3 numbers"),
+            json!({"enabled": true})
+        ),
+        "{body}"
+    );
+    let mut named = file(FileData::Bytes(b"plain".to_vec()), "text/plain", None);
+    named.filename = Some("notes.txt".into());
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![user_with(Part::File(named))],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][0]["content"][0]["title"], "notes.txt",
+        "{body}"
+    );
+}
+
+/// A download transport that answers every URL with this text.
+struct Downloads(&'static str);
+impl suprnova_ai::models::files::DownloadTransport for Downloads {
+    fn resolve<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+    ) -> BoxFuture<'a, Result<Vec<std::net::IpAddr>, suprnova_ai::models::files::DownloadError>>
+    {
+        Box::pin(async { Ok(vec!["93.184.216.34".parse().unwrap()]) })
+    }
+    fn send_pinned(
+        &self,
+        _request: HttpRequest,
+        _addresses: Vec<std::net::IpAddr>,
+    ) -> BoxFuture<'_, Result<HttpResponse, suprnova_ai::models::files::DownloadError>> {
+        let text = self.0;
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/plain".into())],
+                body: stream::iter([Ok(Bytes::from(text))]).boxed(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn ant_010_a_text_url_is_downloaded_first() {
+    let text = || {
+        user_with(Part::File(file(
+            FileData::Text("https://a.test/notes.txt".into()),
+            "text/plain",
+            None,
+        )))
+    };
+    let transport = Recorder::new([text_reply()]);
+    let provider = AnthropicCompatibleProvider::new(config(), transport.clone())
+        .with_download_transport(Arc::new(Downloads("fetched text")));
+    run(
+        &Model::new("claude-sonnet-4-6", Arc::new(provider)),
+        vec![text()],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        transport.body(0)["messages"][0]["content"][0]["source"],
+        json!({"type": "text", "media_type": "text/plain", "data": "fetched text"})
+    );
+    let error = refused("claude-sonnet-4-6", vec![text()], StreamOptions::default()).await;
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+    let error = refused(
+        "claude-sonnet-4-6",
+        vec![user_with(Part::File(file(
+            FileData::Bytes(vec![1]),
+            "audio/wav",
+            None,
+        )))],
+        StreamOptions::default(),
+    )
+    .await;
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn ant_010_a_tool_result_holds_its_content_parts() {
+    use suprnova_ai::types::messages::{ContentOutput, ContentPart, ToolResultPart};
+    let content = ContentOutput::new(vec![
+        ContentPart::Text(TextPart::new("Loaded")),
+        ContentPart::File(file(
+            FileData::Bytes(b"\x89PNG".to_vec()),
+            "image/png",
+            None,
+        )),
+        ContentPart::File(file(
+            FileData::Text("https://a.test/r.pdf".into()),
+            "application/pdf",
+            None,
+        )),
+    ]);
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("read"),
+            assistant(vec![Part::ToolCall(ToolCallPart::new(
+                "toolu_1", "read", "{}",
+            ))]),
+            Message::new(
+                MessageRole::Tool,
+                vec![Part::ToolResult(ToolResultPart::new(
+                    "toolu_1", "read", content,
+                ))],
+            ),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][2]["content"][0],
+        json!({"type": "tool_result", "tool_use_id": "toolu_1", "content": [
+            {"type": "text", "text": "Loaded"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw=="}},
+            {"type": "document", "source": {"type": "url", "url": "https://a.test/r.pdf"}}]}),
+        "{body}"
+    );
+    let error_result = ToolResultPart::error("toolu_1", "read", json!("boom"));
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("read"),
+            assistant(vec![Part::ToolCall(ToolCallPart::new(
+                "toolu_1", "read", "{}",
+            ))]),
+            Message::new(MessageRole::Tool, vec![Part::ToolResult(error_result)]),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][2]["content"][0]["is_error"], true,
+        "{body}"
+    );
+}
+
 // ANT-011
 
 #[tokio::test]
@@ -2147,6 +2395,93 @@ async fn ant_011_a_later_system_message_goes_in_place() {
         transport
             .header(0, "anthropic-beta")
             .is_some_and(|b| b.contains("mid-conversation-system-2026-04-07"))
+    );
+}
+
+fn system_with(text: &str, options: Value) -> Message {
+    let mut message = system(text);
+    message.provider_metadata = metadata(options);
+    message
+}
+
+#[tokio::test]
+async fn ant_011_system_message_options_go_out_with_their_betas() {
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system("first"),
+            user("a"),
+            assistant(vec![Part::Text(TextPart::new("ok"))]),
+            system_with("brief now", json!({"clearAt": "next_user_message", "effort": "low"})),
+            system_with("", json!({"toolChanges": [{"type": "tool_addition", "toolName": "weather"}, {"type": "tool_removal", "toolName": "search"}]})),
+            assistant(vec![Part::Text(TextPart::new("next"))]),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][2],
+        json!({"role": "system", "content": [{"type": "text", "text": "brief now"}],
+               "clear_at": "next_user_message", "output_config": {"effort": "low"}}),
+        "{body}"
+    );
+    assert_eq!(
+        body["messages"][3],
+        json!({"role": "system", "content": [
+            {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "weather"}},
+            {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "search"}}]}),
+        "{body}"
+    );
+    for beta in [
+        "mid-conversation-system-2026-04-07",
+        "mid-conversation-system-clear-at-2026-08-21",
+        "mid-conversation-output-config-2026-07-01",
+        "mid-conversation-tool-changes-2026-07-01",
+    ] {
+        assert!(betas.iter().any(|b| b == beta), "{beta}: {betas:?}");
+    }
+}
+
+#[tokio::test]
+async fn ant_011_the_first_system_message_takes_only_an_effort_alone() {
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![system_with("", json!({"effort": "low"})), user("hi")],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][0],
+        json!({"role": "system", "content": [], "output_config": {"effort": "low"}}),
+        "{body}"
+    );
+    assert!(body.get("system").is_none(), "{body}");
+    assert!(
+        betas
+            .iter()
+            .any(|b| b == "mid-conversation-output-config-2026-07-01")
+    );
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            system_with(
+                "rules",
+                json!({"toolChanges": [{"type": "tool_addition", "toolName": "weather"}]}),
+            ),
+            user("hi"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["system"],
+        json!([{"type": "text", "text": "rules"}]),
+        "{body}"
+    );
+    assert!(
+        logs.take()
+            .contains(&("toolChanges".to_owned(), "claude-sonnet-4-6".to_owned()))
     );
 }
 
@@ -2180,6 +2515,100 @@ async fn ant_012_tool_calls_move_after_the_other_blocks_of_their_run() {
         .map(|b| b["type"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["text", "text", "tool_use"], "{body}");
+}
+
+fn text_with(text: &str, md: Value) -> Part {
+    let mut part = TextPart::new(text);
+    part.provider_metadata = metadata(md);
+    Part::Text(part)
+}
+fn reasoning_with(text: &str, md: Value) -> Part {
+    let mut part = suprnova_ai::types::messages::ReasoningPart::new(text);
+    part.provider_metadata = metadata(md);
+    Part::Reasoning(part)
+}
+
+#[tokio::test]
+async fn ant_012_assistant_parts_go_back_in_their_blocks() {
+    let citation = json!({"type": "char_location", "cited_text": "x", "document_index": 0, "start_char_index": 0, "end_char_index": 1});
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("hi"),
+            assistant(vec![
+                reasoning_with("thought", json!({"signature": "sig"})),
+                reasoning_with("", json!({"redactedData": "opaque"})),
+                text_with(
+                    "",
+                    json!({"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}}),
+                ),
+                text_with("cited", json!({"citations": [citation]})),
+                text_with("summary", json!({"type": "compaction", "signature": "cs"})),
+                text_with("", json!({"type": "container_upload", "fileId": "file_1"})),
+            ]),
+            assistant(vec![Part::Text(TextPart::new("second  "))]),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2, "{body}");
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([
+            {"type": "thinking", "thinking": "thought", "signature": "sig"},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+            {"type": "text", "text": "cited", "citations": [citation]},
+            {"type": "compaction", "content": "summary", "signature": "cs"},
+            {"type": "text", "text": "second"}
+        ]),
+        "{body}"
+    );
+    for beta in ["server-side-fallback-2026-06-01", "compact-2026-09-04"] {
+        assert!(betas.iter().any(|b| b == beta), "{beta}: {betas:?}");
+    }
+}
+
+#[tokio::test]
+async fn ant_012_reasoning_without_its_data_or_when_turned_off_stays_out() {
+    let (logs, _guard) = capture_logs();
+    let turns = || {
+        vec![
+            user("hi"),
+            assistant(vec![
+                reasoning_with("thought", json!({"signature": "sig"})),
+                Part::Reasoning(suprnova_ai::types::messages::ReasoningPart::new("unsigned")),
+                Part::Text(TextPart::new("answer")),
+            ]),
+            user("more"),
+        ]
+    };
+    let (body, _) = sent("claude-sonnet-4-6", turns(), StreamOptions::default()).await;
+    assert_eq!(
+        body["messages"][1]["content"].as_array().unwrap().len(),
+        2,
+        "{body}"
+    );
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        turns(),
+        anthropic(json!({"sendReasoning": false})),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{"type": "text", "text": "answer"}]),
+        "{body}"
+    );
+    let logged = logs.take();
+    assert!(
+        logged.contains(&("reasoning".to_owned(), "claude-sonnet-4-6".to_owned())),
+        "{logged:?}"
+    );
+    assert!(
+        logged.contains(&("sendReasoning".to_owned(), "claude-sonnet-4-6".to_owned())),
+        "{logged:?}"
+    );
 }
 
 // ANT-013
