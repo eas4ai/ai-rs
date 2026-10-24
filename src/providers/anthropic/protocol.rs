@@ -720,6 +720,13 @@ pub(crate) fn request_parts(
         add_betas(&mut betas, ["dangerous-tool-use-2026-09-03"]);
     }
     if let Some(compaction) = &o.compaction {
+        // A core threshold goes as a context management edit, which
+        // Anthropic does not take with compaction, as contextManagement.
+        if o.context_management.is_none() && core.compaction.is_some() {
+            return Err(Error::Validation(
+                "the anthropic compaction option and a core compaction threshold cannot be used together".into(),
+            ));
+        }
         let mut wire = json!({"type": "summarize"});
         if let Some(instructions) = &compaction.instructions {
             wire["instructions"] = json!(instructions);
