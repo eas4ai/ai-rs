@@ -66,20 +66,15 @@ async fn builtin_events_are_ordered_and_aggregate_call_parts_and_results() {
     let call = s.message().builtin_tool_calls()[0];
     assert_eq!(call.tool_call_id, "srvtoolu_1");
     assert_eq!(call.tool_name, "web_search");
-    assert_eq!(
-        call.provider_metadata.as_ref().unwrap()["anthropic"],
-        json!({})
-    );
+    assert!(call.provider_metadata.is_none());
+    // A web search result in TypeScript's shape (ANT-008).
     let result = s.message().builtin_tool_returns()[0];
     assert_eq!(result.tool_name, "web_search");
     assert_eq!(
         result.result,
-        json!([{"title":"Forecast","url":"https://example.com"}])
+        json!([{"title":"Forecast","url":"https://example.com","pageAge":null}])
     );
-    assert_eq!(
-        result.provider_metadata.as_ref().unwrap()["anthropic"],
-        json!({"resultType":"web_search_tool_result"})
-    );
+    assert!(result.provider_metadata.is_none());
 }
 #[tokio::test]
 async fn split_signatures_text_tools_and_usage_round_trip() {
@@ -124,7 +119,8 @@ async fn split_signatures_text_tools_and_usage_round_trip() {
         json!({"signature":"sig"})
     );
     let usage = s.usage().unwrap();
-    assert_eq!(usage.input_tokens, 15);
+    // Input counts the cache writes and reads too (ANT-014).
+    assert_eq!(usage.input_tokens, 18);
     assert_eq!(usage.output_tokens, 20);
     assert_eq!(usage.cache_read_tokens, Some(5));
     assert_eq!(usage.cache_write_tokens, Some(3));
@@ -146,7 +142,7 @@ async fn finish_reasons_response_identity_and_unknown_reason_metadata() {
         (Some("model_context_window_exceeded"), Some("length")),
         (Some("tool_use"), Some("tool_call")),
         (Some("refusal"), Some("content_filter")),
-        (Some("pause_turn"), Some("other")),
+        (Some("pause_turn"), Some("stop")),
         (None, None),
     ] {
         let m = model(ScriptedTransport::events(complete(vec![], reason)));
@@ -161,24 +157,35 @@ async fn finish_reasons_response_identity_and_unknown_reason_metadata() {
         assert_eq!(end.finish_reason.as_deref(), expected);
         assert_eq!(end.response_id.as_deref(), Some("msg_test"));
         assert_eq!(end.response_model.as_deref(), Some("claude-test"));
-        if reason == Some("pause_turn") {
-            assert_eq!(
-                end.event.provider_metadata.as_ref().unwrap()["anthropic"],
-                json!({"stop_reason":"pause_turn"})
-            );
-        } else {
-            assert!(end.event.provider_metadata.is_none());
-        }
+        // The raw stop reason is in the final metadata (ANT-014).
+        assert_eq!(
+            end.event.provider_metadata.as_ref().unwrap()["anthropic"]["stopReason"],
+            json!(reason)
+        );
     }
 }
 #[tokio::test]
 async fn all_server_result_types_and_unknown_blocks() {
-    for ty in [
-        "web_search_tool_result",
-        "web_fetch_tool_result",
-        "code_execution_tool_result",
-        "bash_tool_result",
-        "memory_tool_result",
+    // Each error result in TypeScript's shape; an unknown result block is
+    // not delivered (ANT-008), and redacted thinking keeps its data (ANT-013).
+    for (ty, name, error_type) in [
+        (
+            "web_search_tool_result",
+            "web_search",
+            "web_search_tool_result_error",
+        ),
+        (
+            "web_fetch_tool_result",
+            "web_fetch",
+            "web_fetch_tool_result_error",
+        ),
+        (
+            "code_execution_tool_result",
+            "code_execution",
+            "code_execution_tool_result_error",
+        ),
+        ("bash_tool_result", "", ""),
+        ("memory_tool_result", "", ""),
     ] {
         let m = model(ScriptedTransport::events(complete(
             vec![
@@ -190,7 +197,7 @@ async fn all_server_result_types_and_unknown_blocks() {
                 ),
                 block_start(
                     1,
-                    json!({"type":ty,"tool_use_id":"unknown","content":{"error_code":"unavailable"}}),
+                    json!({"type":ty,"tool_use_id":"unknown","content":{"type":error_type,"error_code":"unavailable"}}),
                 ),
                 stop(1),
             ],
@@ -200,13 +207,23 @@ async fn all_server_result_types_and_unknown_blocks() {
         while let Some(e) = s.next().await {
             e.unwrap();
         }
-        assert_eq!(s.message().builtin_tool_returns()[0].tool_name, "");
+        let Part::Reasoning(reasoning) = &s.message().parts[0] else {
+            panic!("{:?}", s.message().parts)
+        };
         assert_eq!(
-            s.message().builtin_tool_returns()[0]
-                .provider_metadata
-                .as_ref()
-                .unwrap()["anthropic"]["resultType"],
-            ty
+            reasoning.provider_metadata.as_ref().unwrap()["anthropic"],
+            json!({"redactedData": "redacted"})
+        );
+        let results = s.message().builtin_tool_returns();
+        if name.is_empty() {
+            assert!(results.is_empty(), "{ty}");
+            continue;
+        }
+        assert_eq!(results[0].tool_name, name);
+        assert!(results[0].is_error);
+        assert_eq!(
+            results[0].result,
+            json!({"type": error_type, "errorCode": "unavailable"})
         );
     }
 }
@@ -277,7 +294,8 @@ async fn status_transport_malformed_and_truncated_stream_errors() {
                 start(),
                 json!({"type":"error","error":{"type":"api_error","message":"broken"}}),
             ]),
-            ProviderErrorKind::Api,
+            // An api_error has status 500 (ANT-013).
+            ProviderErrorKind::InternalServer,
         ),
     ];
     for (fake, kind) in cases {
@@ -386,9 +404,23 @@ async fn lazy_stream_cancels_its_body_on_drop() {
 }
 #[tokio::test]
 async fn malformed_fields_usage_and_body_fail_without_a_success_end() {
+    // A delta of a block that never started is passed over, as TypeScript
+    // does, and the stream then ends without its stop.
+    let m = model(ScriptedTransport::events(vec![
+        start(),
+        delta(0, json!({"type":"text_delta"})),
+    ]));
+    let values = m
+        .provider
+        .stream(&m, vec![], StreamOptions::default())
+        .collect::<Vec<_>>()
+        .await;
+    let Error::Provider(err) = values.into_iter().find_map(Result::err).unwrap() else {
+        panic!()
+    };
+    assert_eq!(err.kind, ProviderErrorKind::IncompleteResponse);
     for event in [
         block_start(0, json!({"type":"tool_use","name":"missing-id"})),
-        delta(0, json!({"type":"text_delta"})),
         json!({"type":"message_delta","usage":{"input_tokens":-1}}),
         json!({"type":"content_block_start","index":-1,"content_block":{"type":"text"}}),
     ] {
@@ -458,13 +490,15 @@ async fn structured_output_lowers_nested_definitions_nullable_types_and_constrai
         },
     )
     .await;
+    // A type list stays, and a constraint goes into the description
+    // (ANT-005).
     assert_eq!(
-        b["output_config"]["format"]["schema"]["properties"]["value"]["anyOf"][0]["type"],
-        "integer"
+        b["output_config"]["format"]["schema"]["properties"]["value"]["type"],
+        json!(["integer", "null"])
     );
     assert_eq!(
-        b["output_config"]["format"]["schema"]["properties"]["value"]["anyOf"][0]["description"],
-        "{minimum: 0}"
+        b["output_config"]["format"]["schema"]["properties"]["value"]["description"],
+        "minimum: 0."
     );
 }
 #[tokio::test]

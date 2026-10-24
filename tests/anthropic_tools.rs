@@ -53,36 +53,38 @@ async fn all_builtin_tools_and_custom_function_schema() {
             },
         ),
     ];
+    // The tools go in the order declared, a function tool without a
+    // description has none, and a streamed call streams its input (ANT-006).
     let (b, r) = capture(vec![], StreamOptions::default().with_tools(tools)).await;
     assert_eq!(
         b["tools"][0],
-        json!({"name":"weather","description":"","input_schema":{"type":"object","properties":{}}})
-    );
-    assert_eq!(
-        b["tools"][1],
         json!({"type":"web_fetch_20260209","name":"web_fetch","citations":{"enabled":true}})
     );
     assert_eq!(
-        b["tools"][2],
+        b["tools"][1],
         json!({"type":"computer_20251124","name":"computer","display_width_px":1024,"display_height_px":768})
     );
     assert_eq!(
-        b["tools"][3],
+        b["tools"][2],
         json!({"type":"text_editor_20250728","name":"str_replace_based_edit_tool"})
     );
     assert_eq!(
-        b["tools"][4],
+        b["tools"][3],
         json!({"type":"code_execution_20260120","name":"code_execution"})
     );
-    assert_eq!(b["tools"][5], json!({"type":"bash_20250124","name":"bash"}));
+    assert_eq!(b["tools"][4], json!({"type":"bash_20250124","name":"bash"}));
+    assert_eq!(
+        b["tools"][5],
+        json!({"type":"memory_20250818","name":"memory"})
+    );
     assert_eq!(
         b["tools"][6],
-        json!({"type":"memory_20250818","name":"memory"})
+        json!({"name":"weather","input_schema":{"type":"object","properties":{}},"eager_input_streaming":true})
     );
     assert_eq!(
         header(&r, "anthropic-beta").as_deref(),
         Some(
-            "code-execution-web-tools-2026-02-09,computer-use-2025-01-24,computer-use-2025-11-24,context-management-2025-06-27"
+            "code-execution-web-tools-2026-02-09,computer-use-2025-11-24,computer-use-2025-01-24,context-management-2025-06-27,structured-outputs-2025-11-13"
         )
     );
 }

@@ -1,74 +1,89 @@
+//! The history of a Messages request, as `convert-to-anthropic-prompt.ts`
+//! sends it (ANT-009 to ANT-012, ANT-015).
+use super::{
+    capabilities::Notes,
+    options::{FileOptions, SystemOptions, ToolChange, part_options},
+    params::add_betas,
+    tools::ToolNames,
+};
 use crate::{
     Error,
     types::{media, messages::*},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
-use std::collections::HashSet;
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeSet, HashSet};
 
 pub(super) fn metadata(values: Value) -> Metadata {
     [("anthropic".into(), values)].into()
 }
-fn anthropic_metadata(metadata: &Option<Metadata>, key: &str) -> Option<Value> {
+/// The `anthropic` entry of a part's or message's metadata.
+fn anthropic(metadata: Option<&Metadata>) -> Option<&Value> {
+    metadata?.get("anthropic").filter(|v| v.is_object())
+}
+fn part_metadata(part: &Part) -> Option<&Value> {
+    anthropic(match part {
+        Part::Text(p) => p.provider_metadata.as_ref(),
+        Part::Reasoning(p) => p.provider_metadata.as_ref(),
+        Part::ToolCall(p) => p.provider_metadata.as_ref(),
+        Part::BuiltinToolCall(p) => p.provider_metadata.as_ref(),
+        Part::BuiltinToolReturn(p) => p.provider_metadata.as_ref(),
+        Part::File(p) => p.provider_metadata.as_ref(),
+        Part::ToolResult(p) => p.provider_metadata.as_ref(),
+        _ => None,
+    })
+}
+fn string<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a str> {
+    value?.get(key)?.as_str()
+}
+
+/// The `cacheControl`, else `cache_control`, of an `anthropic` metadata
+/// entry.
+pub(crate) fn cache_control(metadata: Option<&Value>) -> Option<Value> {
+    let metadata = metadata?;
     metadata
-        .as_ref()?
-        .get("anthropic")?
-        .as_object()?
-        .get(key)
+        .get("cacheControl")
+        .or_else(|| metadata.get("cache_control"))
+        .filter(|v| !v.is_null())
         .cloned()
 }
 
-pub fn file_to_anthropic(part: &FilePart) -> Result<Value, Error> {
-    let mt = part.media_type.as_str();
-    let block_type = if mt.starts_with("image/") {
-        "image"
-    } else if matches!(mt, "application/pdf" | "text/plain") {
-        "document"
-    } else {
-        return Err(Error::Validation(format!(
-            "Unsupported media type for Anthropic: {mt}"
-        )));
-    };
-    if let FileData::Text(data) = &part.data
-        && media::is_url(data)
-    {
-        return Ok(json!({"type":block_type,"source":{"type":"url","url":data}}));
-    }
-    let source = if mt == "text/plain" {
-        let bytes = match &part.data {
-            FileData::Bytes(data) => data.clone(),
-            FileData::Text(data) => STANDARD.decode(data).map_err(|_| {
-                Error::Validation("Anthropic text document must contain base64 UTF-8 data".into())
-            })?,
-        };
-        let text = String::from_utf8(bytes).map_err(|_| {
-            Error::Validation("Anthropic text document must contain UTF-8 data".into())
-        })?;
-        json!({"type":"text","media_type":mt,"data":text})
-    } else {
-        let data = match &part.data {
-            FileData::Text(data) => media::data_to_base64(data),
-            FileData::Bytes(data) => media::data_to_base64(data.as_slice()),
-        };
-        json!({"type":"base64","media_type":if mt=="image/*" {"image/jpeg"}else{mt},"data":data})
-    };
-    Ok(json!({"type":block_type,"source":source}))
+/// A document the call sent with citations enabled, for the sources of its
+/// citations (ANT-013).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Document {
+    pub title: String,
+    pub filename: Option<String>,
+    pub media_type: String,
 }
-pub fn tool_result_to_anthropic(value: &ToolResultValue) -> Result<Value, Error> {
-    match value {
-        ToolResultValue::Special(SpecialToolResult::Content(content)) => content
-            .value
-            .iter()
-            .map(|item| match item {
-                ContentPart::Text(p) => Ok(json!({"type":"text","text":p.text})),
-                ContentPart::File(p) => file_to_anthropic(p),
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        ToolResultValue::Json(Value::Null) => Ok(json!("")),
-        ToolResultValue::Json(Value::String(s)) => Ok(json!(s)),
-        other => Ok(json!(serde_json::to_string(other)?)),
-    }
+
+/// The documents of the user's files that enable citations, in order.
+pub(crate) fn citation_documents(messages: &[Message]) -> Vec<Document> {
+    messages
+        .iter()
+        .filter(|m| m.role == MessageRole::User)
+        .flat_map(|m| &m.parts)
+        .filter_map(|part| match part {
+            Part::File(file)
+                if matches!(file.media_type.as_str(), "application/pdf" | "text/plain") =>
+            {
+                let options: FileOptions =
+                    part_options(anthropic(file.provider_metadata.as_ref()), "file part").ok()?;
+                options
+                    .citations
+                    .is_some_and(|c| c.enabled)
+                    .then(|| Document {
+                        title: file
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| "Untitled Document".into()),
+                        filename: file.filename.clone(),
+                        media_type: file.media_type.clone(),
+                    })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn check_tool_ids(messages: &[Message]) -> Result<(), Error> {
@@ -124,6 +139,8 @@ fn flush_pending(pending: &mut Vec<ToolCallPart>, result: &mut Vec<Message>) {
         ));
     }
 }
+/// The history without internal messages and hooks, with each call that has
+/// no result closed by an error result.
 fn repair(messages: &[Message]) -> Result<Vec<Message>, Error> {
     let messages: Vec<_> = messages
         .iter()
@@ -131,13 +148,6 @@ fn repair(messages: &[Message]) -> Result<Vec<Message>, Error> {
         .cloned()
         .filter_map(|mut m| {
             m.parts.retain(|p| !matches!(p, Part::Hook(_)));
-            for p in &mut m.parts {
-                if let Part::ToolCall(c) = p
-                    && serde_json::from_str::<Value>(&c.tool_args).is_err()
-                {
-                    c.tool_args = "{}".into();
-                }
-            }
             (!m.parts.is_empty()).then_some(m)
         })
         .collect();
@@ -171,92 +181,951 @@ fn repair(messages: &[Message]) -> Result<Vec<Message>, Error> {
     flush_pending(&mut pending, &mut result);
     Ok(result)
 }
-fn assistant_content(parts: &[Part]) -> Result<Vec<Value>, Error> {
+
+/// A tool call's input: its arguments when they are a JSON object, else
+/// `{"rawInvalidInput": <value>}` (`toAnthropicToolInput`).
+fn tool_input(args: &str) -> Value {
+    match serde_json::from_str::<Value>(args) {
+        Ok(Value::Object(input)) => Value::Object(input),
+        Ok(other) => json!({"rawInvalidInput": other}),
+        Err(_) => json!({"rawInvalidInput": args}),
+    }
+}
+
+/// A file's data as base64.
+fn base64(data: &FileData) -> String {
+    match data {
+        FileData::Text(text) => media::data_to_base64(text.as_str()),
+        FileData::Bytes(bytes) => media::data_to_base64(bytes.as_slice()),
+    }
+}
+/// The media type a wildcard's top-level type detects in the data.
+fn detect(wildcard: &str, data: media::MediaDataRef<'_>) -> Option<&'static str> {
+    match wildcard {
+        "image/*" => media::detect_image_media_type(data),
+        "audio/*" => media::detect_audio_media_type(data),
+        "video/*" => media::detect_video_media_type(data),
+        _ => None,
+    }
+}
+/// A user file's media type, a wildcard resolved from its bytes.
+fn full_media_type(file: &FilePart) -> Result<String, Error> {
+    let mt = file.media_type.as_str();
+    if !mt.ends_with("/*") {
+        return Ok(mt.to_owned());
+    }
+    let detected = match &file.data {
+        FileData::Text(text) if media::is_downloadable_url(text) => None,
+        FileData::Text(text) => detect(mt, media::MediaDataRef::from(text.as_str())),
+        FileData::Bytes(bytes) => detect(mt, media::MediaDataRef::from(bytes.as_slice())),
+    };
+    detected.map(str::to_owned).ok_or_else(|| {
+        Error::Validation(format!(
+            "a file of media type {mt:?} must name its subtype, which cannot be detected"
+        ))
+    })
+}
+
+/// The UTF-8 text of a text file's data.
+fn text_of(data: &FileData) -> Result<String, Error> {
+    let bytes = match data {
+        FileData::Bytes(data) => data.clone(),
+        FileData::Text(data) => STANDARD
+            .decode(media::data_to_base64(data.as_str()))
+            .map_err(|_| {
+                Error::Validation("Anthropic text document must contain base64 UTF-8 data".into())
+            })?,
+    };
+    String::from_utf8(bytes)
+        .map_err(|_| Error::Validation("Anthropic text document must contain UTF-8 data".into()))
+}
+
+fn with_cache(mut block: Value, cache: Option<Value>) -> Value {
+    if let Some(cache) = cache {
+        block["cache_control"] = cache;
+    }
+    block
+}
+
+/// A user file as an `image`, `document` or `container_upload` block.
+fn user_file(
+    file: &FilePart,
+    cache: Option<Value>,
+    betas: &mut Vec<String>,
+) -> Result<Value, Error> {
+    let mt = file.media_type.as_str();
+    let options: FileOptions =
+        part_options(anthropic(file.provider_metadata.as_ref()), "file part")?;
+    let text = file.data.as_text();
+    if let Some(id) = text.filter(|t| t.starts_with("file_")) {
+        add_betas(betas, ["files-api-2025-04-14"]);
+        if options.container_upload == Some(true) {
+            return Ok(json!({"type": "container_upload", "file_id": id}));
+        }
+        let kind = if mt.starts_with("image/") {
+            "image"
+        } else {
+            "document"
+        };
+        return Ok(with_cache(
+            json!({"type": kind, "source": {"type": "file", "file_id": id}}),
+            cache,
+        ));
+    }
+    let url = text.filter(|t| media::is_downloadable_url(t));
+    let document = |source: Value| {
+        let mut block = json!({"type": "document", "source": source});
+        if let Some(title) = options.title.clone().or_else(|| file.filename.clone()) {
+            block["title"] = json!(title);
+        }
+        if let Some(context) = options.context.as_ref().filter(|c| !c.is_empty()) {
+            block["context"] = json!(context);
+        }
+        if options.citations.as_ref().is_some_and(|c| c.enabled) {
+            block["citations"] = json!({"enabled": true});
+        }
+        block
+    };
+    let block = if mt.starts_with("image/") {
+        let source = match url {
+            Some(url) => json!({"type": "url", "url": url}),
+            None => json!({
+                "type": "base64",
+                "media_type": full_media_type(file)?,
+                "data": base64(&file.data),
+            }),
+        };
+        json!({"type": "image", "source": source})
+    } else if mt == "application/pdf" {
+        add_betas(betas, ["pdfs-2024-09-25"]);
+        document(match url {
+            Some(url) => json!({"type": "url", "url": url}),
+            None => json!({
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64(&file.data),
+            }),
+        })
+    } else if mt == "text/plain" {
+        if url.is_some() {
+            return Err(Error::Validation(
+                "an Anthropic text file given as a URL needs the provider's download transport"
+                    .into(),
+            ));
+        }
+        document(json!({
+            "type": "text",
+            "media_type": "text/plain",
+            "data": text_of(&file.data)?,
+        }))
+    } else {
+        return Err(Error::Validation(format!(
+            "Unsupported media type for Anthropic: {mt}"
+        )));
+    };
+    Ok(with_cache(block, cache))
+}
+
+/// A file of a tool result's content, or `None` with a log when Anthropic
+/// takes no such file there.
+fn result_file(file: &FilePart, notes: &mut Notes, betas: &mut Vec<String>) -> Option<Value> {
+    let image = file.media_type.starts_with("image/");
+    let kind = if image { "image" } else { "document" };
+    let text = file.data.as_text();
+    if let Some(id) = text.filter(|t| t.starts_with("file_")) {
+        add_betas(betas, ["files-api-2025-04-14"]);
+        return Some(json!({"type": kind, "source": {"type": "file", "file_id": id}}));
+    }
+    if let Some(url) = text.filter(|t| media::is_downloadable_url(t)) {
+        return Some(json!({"type": kind, "source": {"type": "url", "url": url}}));
+    }
+    let media_type = full_media_type(file).ok();
+    if image && let Some(media_type) = media_type {
+        return Some(json!({"type": "image", "source": {
+            "type": "base64", "media_type": media_type, "data": base64(&file.data)}}));
+    }
+    if media_type.as_deref() == Some("application/pdf") {
+        add_betas(betas, ["pdfs-2024-09-25"]);
+        return Some(json!({"type": "document", "source": {
+            "type": "base64", "media_type": "application/pdf", "data": base64(&file.data)}}));
+    }
+    notes.note(
+        "tool result content",
+        &format!(
+            "a file of media type {} cannot go in a tool result; it is left out",
+            file.media_type
+        ),
+    );
+    None
+}
+
+/// The content of a tool result: its text, the JSON text of its value, or
+/// its parts.
+fn result_content(
+    value: &ToolResultValue,
+    notes: &mut Notes,
+    betas: &mut Vec<String>,
+) -> Result<Value, Error> {
+    match value {
+        ToolResultValue::Special(SpecialToolResult::Content(content)) => Ok(Value::Array(
+            content
+                .value
+                .iter()
+                .filter_map(|item| match item {
+                    ContentPart::Text(p) => Some(json!({"type": "text", "text": p.text})),
+                    ContentPart::File(p) => result_file(p, notes, betas),
+                })
+                .collect(),
+        )),
+        ToolResultValue::Json(Value::Null) => Ok(json!("")),
+        ToolResultValue::Json(Value::String(s)) => Ok(json!(s)),
+        other => Ok(json!(serde_json::to_string(other)?)),
+    }
+}
+
+/// The caller of a call or result in the wire form, from its `anthropic`
+/// metadata's `caller` (`getAnthropicCaller`).
+fn caller(metadata: Option<&Value>) -> Option<Value> {
+    let caller = metadata?.get("caller")?;
+    match caller.get("type")?.as_str()? {
+        kind @ ("code_execution_20250825" | "code_execution_20260120") => {
+            let tool_id = caller.get("toolId")?.as_str().filter(|id| !id.is_empty())?;
+            Some(json!({"type": kind, "tool_id": tool_id}))
+        }
+        "direct" => Some(json!({"type": "direct"})),
+        _ => None,
+    }
+}
+
+/// An error code of a built-in error result, `unavailable` when it names
+/// none.
+fn error_code(result: &Value) -> Value {
+    let value = match result {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    value
+        .get("errorCode")
+        .filter(|code| code.is_string())
+        .cloned()
+        .unwrap_or_else(|| json!("unavailable"))
+}
+
+/// What an assistant turn's conversion needs from the whole call.
+pub(crate) struct Context<'a> {
+    pub send_reasoning: bool,
+    pub names: &'a ToolNames,
+}
+
+/// A built-in call of the history as a `server_tool_use` or `mcp_tool_use`.
+fn builtin_call(
+    call: &BuiltinToolCallPart,
+    context: &Context<'_>,
+    cache: Option<Value>,
+    mcp: &mut BTreeSet<String>,
+    notes: &mut Notes,
+) -> Option<Value> {
+    let md = anthropic(call.provider_metadata.as_ref());
+    let input = if call.tool_args.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&call.tool_args).unwrap_or_else(|_| json!({}))
+    };
+    let mut block = if string(md, "type") == Some("mcp-tool-use") {
+        mcp.insert(call.tool_call_id.clone());
+        let Some(server) = string(md, "serverName") else {
+            notes.note(
+                "mcp tool use",
+                "an MCP call needs a string server name; it is left out",
+            );
+            return None;
+        };
+        json!({"type": "mcp_tool_use", "id": call.tool_call_id, "name": call.tool_name,
+               "input": input, "server_name": server})
+    } else {
+        let name = context.names.provider(&call.tool_name);
+        let typed = input.get("type").and_then(Value::as_str);
+        let (name, input) = match (name, typed) {
+            (
+                "code_execution",
+                Some(sub @ ("bash_code_execution" | "text_editor_code_execution")),
+            ) => {
+                let mut rest = input.clone();
+                rest.as_object_mut().map(|o| o.remove("type"));
+                (sub.to_owned(), rest)
+            }
+            ("code_execution", Some("programmatic-tool-call")) => {
+                let mut rest = input.clone();
+                rest.as_object_mut().map(|o| o.remove("type"));
+                ("code_execution".to_owned(), rest)
+            }
+            (
+                "code_execution"
+                | "web_fetch"
+                | "web_search"
+                | "tool_search_tool_regex"
+                | "tool_search_tool_bm25",
+                _,
+            ) => (name.to_owned(), input),
+            ("advisor", _) => ("advisor".to_owned(), json!({})),
+            _ => {
+                notes.note("provider tool call", &format!(
+                        "a call of the provider tool {:?} cannot go back to Anthropic; it is left out",
+                        call.tool_name
+                    ),
+                );
+                return None;
+            }
+        };
+        let mut block = json!({"type": "server_tool_use", "id": call.tool_call_id, "name": name, "input": input});
+        if let Some(caller) = caller(md) {
+            block["caller"] = caller;
+        }
+        block
+    };
+    if let Some(cache) = cache {
+        block["cache_control"] = cache;
+    }
+    Some(block)
+}
+
+/// A built-in result of the history in Anthropic's shapes.
+fn builtin_result(
+    result: &BuiltinToolReturnPart,
+    context: &Context<'_>,
+    cache: Option<Value>,
+    mcp: &BTreeSet<String>,
+    notes: &mut Notes,
+) -> Option<Value> {
+    let md = anthropic(result.provider_metadata.as_ref());
+    let id = &result.tool_call_id;
+    let value = &result.result;
+    // A result kept before the crate kept TypeScript's shapes goes back as
+    // it came.
+    if let Some(kind) = string(md, "resultType").filter(|k| !k.is_empty()) {
+        return Some(with_cache(
+            json!({"type": kind, "tool_use_id": id, "content": value}),
+            cache,
+        ));
+    }
+    let name = context.names.provider(&result.tool_name);
+    let mut block = if mcp.contains(id) || string(md, "type") == Some("mcp-tool-use") {
+        json!({"type": "mcp_tool_result", "tool_use_id": id, "is_error": result.is_error,
+               "content": value})
+    } else {
+        match name {
+            "code_execution" => code_execution_result(result)?,
+            "web_fetch" if result.is_error => json!({"type": "web_fetch_tool_result",
+                "tool_use_id": id, "content": {"type": "web_fetch_tool_result_error",
+                "error_code": error_code(value)}}),
+            "web_fetch" => {
+                let content = &value["content"];
+                let source = &content["source"];
+                json!({"type": "web_fetch_tool_result", "tool_use_id": id, "content": {
+                    "type": "web_fetch_result", "url": value["url"], "retrieved_at": value["retrievedAt"],
+                    "content": {"type": "document", "title": content["title"], "citations": content["citations"],
+                        "source": {"type": source["type"], "media_type": source["mediaType"], "data": source["data"]}}}})
+            }
+            "web_search" if result.is_error => json!({"type": "web_search_tool_result",
+                "tool_use_id": id, "content": {"type": "web_search_tool_result_error",
+                "error_code": error_code(value)}}),
+            "web_search" => json!({"type": "web_search_tool_result", "tool_use_id": id,
+                "content": value.as_array().into_iter().flatten().map(|r| {
+                    let mut out = Map::new();
+                    for (from, to) in [("url", "url"), ("title", "title"), ("pageAge", "page_age"),
+                        ("encryptedContent", "encrypted_content"), ("type", "type")] {
+                        if let Some(v) = r.get(from) {
+                            out.insert(to.into(), v.clone());
+                        }
+                    }
+                    Value::Object(out)
+                }).collect::<Vec<_>>()}),
+            "tool_search_tool_regex" | "tool_search_tool_bm25"
+                if result.is_error || value["type"] == "tool_search_tool_result_error" =>
+            {
+                json!({"type": "tool_search_tool_result", "tool_use_id": id, "content": {
+                    "type": "tool_search_tool_result_error", "error_code": error_code(value)}})
+            }
+            "tool_search_tool_regex" | "tool_search_tool_bm25" => {
+                json!({"type": "tool_search_tool_result", "tool_use_id": id, "content": {
+                    "type": "tool_search_tool_search_result",
+                    "tool_references": value.as_array().into_iter().flatten().map(|r| json!({
+                        "type": "tool_reference", "tool_name": r["toolName"]})).collect::<Vec<_>>()}})
+            }
+            "advisor" => {
+                let mut content = match value["type"].as_str() {
+                    Some("advisor_result") => {
+                        json!({"type": "advisor_result", "text": value["text"]})
+                    }
+                    Some("advisor_redacted_result") => json!({"type": "advisor_redacted_result",
+                        "encrypted_content": value["encryptedContent"]}),
+                    _ => {
+                        json!({"type": "advisor_tool_result_error", "error_code": error_code(value)})
+                    }
+                };
+                if content["type"] != "advisor_tool_result_error"
+                    && let Some(reason) = value.get("stopReason").filter(|r| !r.is_null())
+                {
+                    content["stop_reason"] = reason.clone();
+                }
+                json!({"type": "advisor_tool_result", "tool_use_id": id, "content": content})
+            }
+            _ => {
+                notes.note("provider tool result", &format!(
+                        "a result of the provider tool {:?} cannot go back to Anthropic; it is left out",
+                        result.tool_name
+                    ),
+                );
+                return None;
+            }
+        }
+    };
+    if matches!(name, "web_fetch" | "web_search")
+        && let Some(caller) = caller(md)
+    {
+        block["caller"] = caller;
+    }
+    Some(with_cache(block, cache))
+}
+
+/// A code execution result, by the type of its value.
+fn code_execution_result(result: &BuiltinToolReturnPart) -> Option<Value> {
+    let id = &result.tool_call_id;
+    let value = &result.result;
+    if result.is_error {
+        let parsed = match value {
+            Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+            other => other.clone(),
+        };
+        let code = parsed
+            .get("errorCode")
+            .cloned()
+            .unwrap_or_else(|| json!("unknown"));
+        return Some(if parsed["type"] == "code_execution_tool_result_error" {
+            json!({"type": "code_execution_tool_result", "tool_use_id": id, "content": {
+                    "type": "code_execution_tool_result_error", "error_code": code}})
+        } else {
+            json!({"type": "bash_code_execution_tool_result", "tool_use_id": id, "content": {
+                    "type": "bash_code_execution_tool_result_error", "error_code": code}})
+        });
+    }
+    let content = |value: &Value| value.get("content").cloned().unwrap_or_else(|| json!([]));
+    Some(match value["type"].as_str()? {
+        "code_execution_result" => json!({"type": "code_execution_tool_result", "tool_use_id": id,
+            "content": {"type": "code_execution_result", "stdout": value["stdout"],
+                "stderr": value["stderr"], "return_code": value["return_code"], "content": content(value)}}),
+        "encrypted_code_execution_result" => json!({"type": "code_execution_tool_result",
+            "tool_use_id": id, "content": {"type": "encrypted_code_execution_result",
+                "encrypted_stdout": value["encrypted_stdout"], "stderr": value["stderr"],
+                "return_code": value["return_code"], "content": content(value)}}),
+        "bash_code_execution_result" => json!({"type": "bash_code_execution_tool_result",
+            "tool_use_id": id, "content": {"type": "bash_code_execution_result",
+                "stdout": value["stdout"], "stderr": value["stderr"],
+                "return_code": value["return_code"], "content": value["content"]}}),
+        "bash_code_execution_tool_result_error" => {
+            json!({"type": "bash_code_execution_tool_result",
+            "tool_use_id": id, "content": value})
+        }
+        _ => json!({"type": "text_editor_code_execution_tool_result", "tool_use_id": id,
+            "content": value}),
+    })
+}
+
+/// The blocks of an assistant run, with each run of blocks between thinking
+/// and fallback blocks ending in its `tool_use` blocks
+/// (`moveToolUseBlocksToEnd`).
+fn tool_uses_last(content: Vec<Value>) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut segment: Vec<Value> = Vec::new();
+    let flush = |segment: &mut Vec<Value>, result: &mut Vec<Value>| {
+        let (uses, others): (Vec<_>, Vec<_>) =
+            segment.drain(..).partition(|b| b["type"] == "tool_use");
+        result.extend(others);
+        result.extend(uses);
+    };
+    for block in content {
+        if matches!(
+            block["type"].as_str(),
+            Some("thinking" | "redacted_thinking" | "fallback")
+        ) {
+            flush(&mut segment, &mut result);
+            result.push(block);
+        } else {
+            segment.push(block);
+        }
+    }
+    flush(&mut segment, &mut result);
+    result
+}
+
+/// A converted history: the top-level system blocks, the messages and the
+/// betas they need.
+pub(crate) struct Converted {
+    pub system: Option<Vec<Value>>,
+    pub messages: Vec<Value>,
+    pub betas: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    System,
+    User,
+    Assistant,
+}
+fn block_of(role: MessageRole) -> Block {
+    match role {
+        MessageRole::System => Block::System,
+        MessageRole::Assistant => Block::Assistant,
+        _ => Block::User,
+    }
+}
+
+/// Convert a history, after dropping internal parts and closing calls
+/// without a result.
+pub(crate) fn convert(
+    messages: &[Message],
+    context: &Context<'_>,
+    notes: &mut Notes,
+) -> Result<Converted, Error> {
+    let messages = repair(messages)?;
+    let mut blocks: Vec<(Block, Vec<&Message>)> = Vec::new();
+    for msg in &messages {
+        let block = block_of(msg.role);
+        match blocks.last_mut() {
+            Some((last, run)) if *last == block => run.push(msg),
+            _ => blocks.push((block, vec![msg])),
+        }
+    }
+    let mut betas = Vec::new();
+    let mut system: Option<Vec<Value>> = None;
+    let mut out: Vec<Value> = Vec::new();
+    let mut last_user = None;
+    let count = blocks.len();
+    for (index, (block, run)) in blocks.into_iter().enumerate() {
+        let last_block = index + 1 == count;
+        match block {
+            Block::System => system_block(
+                index,
+                &run,
+                context,
+                notes,
+                &mut system,
+                &mut out,
+                &mut betas,
+            )?,
+            Block::User => {
+                let mut content = Vec::new();
+                for msg in run {
+                    let message_cache = cache_control(anthropic(msg.provider_metadata.as_ref()));
+                    let parts: Vec<&Part> = msg
+                        .parts
+                        .iter()
+                        .filter(|p| {
+                            matches!(p, Part::Text(_) | Part::File(_) | Part::ToolResult(_))
+                        })
+                        .collect();
+                    if msg.role == MessageRole::User && !parts.is_empty() {
+                        last_user = Some(out.len());
+                    }
+                    for (j, part) in parts.iter().enumerate() {
+                        let last = j + 1 == parts.len();
+                        let own = cache_control(part_metadata(part));
+                        match part {
+                            Part::Text(t) => {
+                                let cache = notes.cache(
+                                    own.or_else(|| last.then(|| message_cache.clone()).flatten()),
+                                    "user message part",
+                                    true,
+                                );
+                                content.push(with_cache(
+                                    json!({"type": "text", "text": t.text}),
+                                    cache,
+                                ));
+                            }
+                            Part::File(f) => {
+                                let cache = notes.cache(
+                                    own.or_else(|| last.then(|| message_cache.clone()).flatten()),
+                                    "user message part",
+                                    true,
+                                );
+                                content.push(user_file(f, cache, &mut betas)?);
+                            }
+                            Part::ToolResult(r) => {
+                                let content_cache = match r.get_model_input() {
+                                    ToolResultValue::Special(SpecialToolResult::Content(c)) => c
+                                        .value
+                                        .iter()
+                                        .find_map(|item| {
+                                            let md = match item {
+                                                ContentPart::Text(p) => {
+                                                    p.provider_metadata.as_ref()
+                                                }
+                                                ContentPart::File(p) => {
+                                                    p.provider_metadata.as_ref()
+                                                }
+                                            };
+                                            anthropic(md).map(|md| cache_control(Some(md)))
+                                        })
+                                        .flatten(),
+                                    _ => None,
+                                };
+                                let cache = notes.cache(
+                                    own.or(content_cache)
+                                        .or_else(|| last.then(|| message_cache.clone()).flatten()),
+                                    "tool result part",
+                                    true,
+                                );
+                                let mut result =
+                                    json!({"type": "tool_result", "tool_use_id": r.tool_call_id});
+                                let toolset = context
+                                    .names
+                                    .toolset(&r.tool_name)
+                                    .map(str::to_owned)
+                                    .or_else(|| {
+                                        string(part_metadata(part), "toolsetName")
+                                            .map(str::to_owned)
+                                    });
+                                if let Some(toolset) = toolset {
+                                    result["toolset_name"] = json!(toolset);
+                                }
+                                result["content"] =
+                                    result_content(r.get_model_input(), notes, &mut betas)?;
+                                if r.is_error() {
+                                    result["is_error"] = json!(true);
+                                }
+                                content.push(with_cache(result, cache));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                out.push(json!({"role": "user", "content": content}));
+            }
+            Block::Assistant => {
+                let content = assistant_block(&run, last_block, context, notes, &mut betas)?;
+                if !content.is_empty() {
+                    out.push(json!({"role": "assistant", "content": tool_uses_last(content)}));
+                }
+            }
+        }
+    }
+    prune_callers(&mut out, last_user, notes);
+    Ok(Converted {
+        system,
+        messages: out,
+        betas,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn system_block(
+    index: usize,
+    run: &[&Message],
+    context: &Context<'_>,
+    notes: &mut Notes,
+    system: &mut Option<Vec<Value>>,
+    out: &mut Vec<Value>,
+    betas: &mut Vec<String>,
+) -> Result<(), Error> {
+    struct Converted {
+        content: Vec<Value>,
+        options: SystemOptions,
+        tool_changes: usize,
+    }
+    let mut converted = Vec::new();
+    for msg in run {
+        let message_md = anthropic(msg.provider_metadata.as_ref());
+        let first_part_md = msg.parts.iter().find_map(part_metadata);
+        let options: SystemOptions = part_options(message_md, "system message")?;
+        let text = msg.text();
+        let changes = options.tool_changes.clone().unwrap_or_default();
+        let mut content = Vec::new();
+        if !text.is_empty()
+            || (changes.is_empty() && options.clear_at.is_none() && options.effort.is_none())
+        {
+            let cache = notes.cache(
+                cache_control(first_part_md).or_else(|| cache_control(message_md)),
+                "system message",
+                true,
+            );
+            content.push(with_cache(json!({"type": "text", "text": text}), cache));
+        }
+        for change in &changes {
+            let (kind, name) = match change {
+                ToolChange::ToolAddition { tool_name } => ("tool_addition", tool_name),
+                ToolChange::ToolRemoval { tool_name } => ("tool_removal", tool_name),
+            };
+            content.push(json!({"type": kind, "tool": {"type": "tool_reference",
+                "name": context.names.provider(name)}}));
+        }
+        converted.push(Converted {
+            content,
+            options,
+            tool_changes: changes.len(),
+        });
+    }
+    let tool_changes: usize = converted.iter().map(|c| c.tool_changes).sum();
+    let inline = converted
+        .iter()
+        .any(|c| c.options.clear_at.is_some() || c.options.effort.is_some());
+    if index == 0 || (system.is_none() && tool_changes == 0 && !inline) {
+        if tool_changes > 0 {
+            notes.note(
+                "toolChanges",
+                "tool changes on the first system message are not taken; they are left out",
+            );
+        }
+        for c in &converted {
+            if c.content.is_empty() && c.options.clear_at.is_none() {
+                if let Some(effort) = c.options.effort {
+                    out.push(json!({"role": "system", "content": [], "output_config": {"effort": effort.wire()}}));
+                    add_betas(betas, ["mid-conversation-output-config-2026-07-01"]);
+                }
+            } else if c.options.clear_at.is_some() || c.options.effort.is_some() {
+                notes.note(
+                    "clearAt and effort",
+                    "clearAt and effort on the first system text are not taken; they are left out",
+                );
+            }
+        }
+        *system = Some(
+            converted
+                .iter()
+                .flat_map(|c| c.content.iter().filter(|b| b["type"] == "text").cloned())
+                .collect(),
+        );
+    } else {
+        add_betas(betas, ["mid-conversation-system-2026-04-07"]);
+        for c in converted {
+            let mut message = json!({"role": "system", "content": c.content});
+            if c.options.clear_at.is_some() {
+                message["clear_at"] = json!("next_user_message");
+                add_betas(betas, ["mid-conversation-system-clear-at-2026-08-21"]);
+            }
+            if let Some(effort) = c.options.effort {
+                message["output_config"] = json!({"effort": effort.wire()});
+                add_betas(betas, ["mid-conversation-output-config-2026-07-01"]);
+            }
+            if c.tool_changes > 0 {
+                add_betas(betas, ["mid-conversation-tool-changes-2026-07-01"]);
+            }
+            out.push(message);
+        }
+    }
+    Ok(())
+}
+
+fn assistant_block(
+    run: &[&Message],
+    last_block: bool,
+    context: &Context<'_>,
+    notes: &mut Notes,
+    betas: &mut Vec<String>,
+) -> Result<Vec<Value>, Error> {
     let mut content = Vec::new();
-    for part in parts {
-        match part {
-            Part::Reasoning(p)=>if let Some(signature)=anthropic_metadata(&p.provider_metadata,"signature") && signature.as_str().is_some_and(|s|!s.is_empty()) {content.push(json!({"type":"thinking","thinking":p.text,"signature":signature}));},
-            Part::Text(p)=>content.push(json!({"type":"text","text":p.text})),
-            Part::ToolCall(p)=>content.push(json!({"type":"tool_use","id":p.tool_call_id,"name":p.tool_name,"input":serde_json::from_str::<Value>(&p.tool_args)?})),
-            Part::BuiltinToolCall(p)=>content.push(json!({"type":"server_tool_use","id":p.tool_call_id,"name":p.tool_name,"input":if p.tool_args.is_empty() {json!({})}else{serde_json::from_str::<Value>(&p.tool_args)?}})),
-            Part::BuiltinToolReturn(p)=>content.push(json!({"type":anthropic_metadata(&p.provider_metadata,"resultType").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).unwrap_or_else(||json!(format!("{}_tool_result",p.tool_name))),"tool_use_id":p.tool_call_id,"content":p.result})),
-            _=>{}
+    let mut mcp = BTreeSet::new();
+    for (j, msg) in run.iter().enumerate() {
+        let last_message = j + 1 == run.len();
+        let message_cache = cache_control(anthropic(msg.provider_metadata.as_ref()));
+        for (k, part) in msg.parts.iter().enumerate() {
+            let last_part = k + 1 == msg.parts.len();
+            let md = part_metadata(part);
+            let own = cache_control(md);
+            let fallback_cache = || last_part.then(|| message_cache.clone()).flatten();
+            match part {
+                Part::Text(t) => {
+                    match string(md, "type") {
+                        Some("compaction") => {
+                            if t.text.is_empty() {
+                                continue;
+                            }
+                            let cache = notes.cache(
+                                own.or_else(fallback_cache),
+                                "assistant message part",
+                                true,
+                            );
+                            let mut block = json!({"type": "compaction", "content": t.text});
+                            if let Some(signature) = string(md, "signature") {
+                                block["signature"] = json!(signature);
+                                add_betas(betas, ["compact-2026-09-04"]);
+                            }
+                            content.push(with_cache(block, cache));
+                        }
+                        Some("fallback") => {
+                            let from = md
+                                .and_then(|m| m.get("from"))
+                                .filter(|f| f["model"].is_string());
+                            let to = md
+                                .and_then(|m| m.get("to"))
+                                .filter(|t| t["model"].is_string());
+                            let (Some(from), Some(to)) = (from, to) else {
+                                notes.note("fallback", "fallback metadata needs from.model and to.model; it is left out",
+                            );
+                                continue;
+                            };
+                            add_betas(betas, ["server-side-fallback-2026-06-01"]);
+                            content.push(json!({"type": "fallback", "from": from, "to": to}));
+                        }
+                        Some("container_upload") => {}
+                        _ => {
+                            let cache = notes.cache(
+                                own.or_else(fallback_cache),
+                                "assistant message part",
+                                true,
+                            );
+                            let text = if last_block && last_message && last_part {
+                                t.text.trim().to_owned()
+                            } else {
+                                t.text.clone()
+                            };
+                            let mut block = json!({"type": "text", "text": text});
+                            if let Some(citations) =
+                                md.and_then(|m| m.get("citations")).filter(|c| !c.is_null())
+                            {
+                                block["citations"] = citations.clone();
+                            }
+                            content.push(with_cache(block, cache));
+                        }
+                    }
+                }
+                Part::Reasoning(r) => {
+                    if !context.send_reasoning {
+                        notes.note(
+                            "sendReasoning",
+                            "sending reasoning is turned off; the reasoning is left out",
+                        );
+                        continue;
+                    }
+                    if let Some(signature) = string(md, "signature").filter(|s| !s.is_empty()) {
+                        notes.cache(own, "thinking block", false);
+                        content.push(
+                            json!({"type": "thinking", "thinking": r.text, "signature": signature}),
+                        );
+                    } else if let Some(data) = string(md, "redactedData") {
+                        notes.cache(own, "redacted thinking block", false);
+                        content.push(json!({"type": "redacted_thinking", "data": data}));
+                    } else {
+                        notes.note("reasoning", "reasoning without a signature or redacted data cannot go back; it is left out",
+                        );
+                    }
+                }
+                Part::ToolCall(c) => {
+                    let cache =
+                        notes.cache(own.or_else(fallback_cache), "assistant message part", true);
+                    let input = tool_input(&c.tool_args);
+                    let toolset = context
+                        .names
+                        .toolset(&c.tool_name)
+                        .map(str::to_owned)
+                        .or_else(|| string(md, "toolsetName").map(str::to_owned));
+                    let mut block = match toolset {
+                        Some(toolset) => {
+                            let action = input.get("action").and_then(Value::as_str);
+                            if action.is_none() {
+                                notes.note(
+                                    "toolset call",
+                                    &format!("the toolset call of {:?} has no action", c.tool_name),
+                                );
+                            }
+                            json!({"type": "tool_use", "id": c.tool_call_id,
+                                "name": action.unwrap_or(&toolset), "toolset_name": toolset, "input": input})
+                        }
+                        None => {
+                            json!({"type": "tool_use", "id": c.tool_call_id, "name": c.tool_name, "input": input})
+                        }
+                    };
+                    if let Some(caller) = caller(md) {
+                        block["caller"] = caller;
+                    }
+                    content.push(with_cache(block, cache));
+                }
+                Part::BuiltinToolCall(c) => {
+                    let cache =
+                        notes.cache(own.or_else(fallback_cache), "assistant message part", true);
+                    if let Some(block) = builtin_call(c, context, cache, &mut mcp, notes) {
+                        content.push(block);
+                    }
+                }
+                Part::BuiltinToolReturn(r) => {
+                    let cache =
+                        notes.cache(own.or_else(fallback_cache), "assistant message part", true);
+                    if let Some(block) = builtin_result(r, context, cache, &mcp, notes) {
+                        content.push(block);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     Ok(content)
 }
-fn content_list(value: Value) -> Vec<Value> {
-    match value {
-        Value::Array(v) => v,
-        other => vec![json!({"type":"text","text":other})],
-    }
-}
-/// Convert messages after dropping internal parts and repairing orphaned calls.
-pub fn messages_to_anthropic(messages: &[Message]) -> Result<(Option<String>, Vec<Value>), Error> {
-    let mut systems = Vec::new();
-    let mut wire: Vec<Value> = Vec::new();
-    for msg in repair(messages)? {
-        let content = match msg.role {
-            MessageRole::System => {
-                systems.push(msg.text());
+
+/// Leave out, before the last user message, the caller of a call whose code
+/// execution call the history no longer holds.
+fn prune_callers(messages: &mut [Value], last_user: Option<usize>, notes: &mut Notes) {
+    let code_execution: BTreeSet<String> = messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "server_tool_use" && b["name"] == "code_execution")
+        .filter_map(|b| b["id"].as_str().map(str::to_owned))
+        .collect();
+    let mut warned = BTreeSet::new();
+    let end = last_user.unwrap_or(0);
+    for message in messages.iter_mut().take(end) {
+        if message["role"] != "assistant" {
+            continue;
+        }
+        for block in message["content"].as_array_mut().into_iter().flatten() {
+            let Some(caller) = block.get("caller") else {
+                continue;
+            };
+            let kind = caller["type"].as_str().unwrap_or_default();
+            let tool = caller["tool_id"].as_str().unwrap_or_default();
+            if kind == "direct" || code_execution.contains(tool) {
                 continue;
             }
-            MessageRole::Assistant => {
-                let c = assistant_content(&msg.parts)?;
-                if c.is_empty() {
-                    continue;
-                }
-                Value::Array(c)
+            let tool = tool.to_owned();
+            let id = block
+                .get("id")
+                .or_else(|| block.get("tool_use_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            block.as_object_mut().map(|o| o.remove("caller"));
+            if warned.insert(id.clone()) {
+                notes.note("caller", &format!(
+                        "the caller of tool call {id} is left out: its code execution call {tool} is missing from the history"
+                    ),
+                );
             }
-            MessageRole::Tool => {
-                let mut c = Vec::new();
-                for p in &msg.parts {
-                    if let Part::ToolResult(r) = p {
-                        let mut v = json!({"type":"tool_result","tool_use_id":r.tool_call_id,"content":tool_result_to_anthropic(r.get_model_input())?});
-                        if r.is_error() {
-                            v["is_error"] = json!(true);
-                        }
-                        c.push(v);
-                    }
-                }
-                if c.is_empty() {
-                    continue;
-                }
-                Value::Array(c)
-            }
-            MessageRole::User => {
-                if msg.parts.iter().any(|p| matches!(p, Part::File(_))) {
-                    Value::Array(
-                        msg.parts
-                            .iter()
-                            .filter_map(|p| match p {
-                                Part::Text(t) => Some(Ok(json!({"type":"text","text":t.text}))),
-                                Part::File(f) => Some(file_to_anthropic(f)),
-                                _ => None,
-                            })
-                            .collect::<Result<_, Error>>()?,
-                    )
-                } else {
-                    json!(msg.text())
-                }
-            }
-            MessageRole::Internal => continue,
-        };
-        let role = if msg.role == MessageRole::Assistant {
-            "assistant"
-        } else {
-            "user"
-        };
-        if let Some(prev) = wire.last_mut()
-            && prev["role"] == role
-        {
-            let mut merged = content_list(prev["content"].take());
-            merged.extend(content_list(content));
-            prev["content"] = json!(merged);
-        } else {
-            wire.push(json!({"role":role,"content":content}));
         }
     }
-    let system = systems.join("\n\n");
-    Ok(((!system.is_empty()).then_some(system), wire))
+}
+
+/// A user file as Anthropic takes it, with no part options.
+pub fn file_to_anthropic(part: &FilePart) -> Result<Value, Error> {
+    user_file(part, None, &mut Vec::new())
+}
+/// A tool result's content as Anthropic takes it.
+pub fn tool_result_to_anthropic(value: &ToolResultValue) -> Result<Value, Error> {
+    result_content(value, &mut Notes::new(""), &mut Vec::new())
+}
+/// Convert messages after dropping internal parts and repairing orphaned
+/// calls: the top-level system text and the messages.
+pub fn messages_to_anthropic(messages: &[Message]) -> Result<(Option<String>, Vec<Value>), Error> {
+    let names = ToolNames::default();
+    let context = Context {
+        send_reasoning: true,
+        names: &names,
+    };
+    let converted = convert(messages, &context, &mut Notes::new(""))?;
+    let system = converted.system.map(|blocks| {
+        blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    });
+    Ok((system.filter(|s| !s.is_empty()), converted.messages))
 }

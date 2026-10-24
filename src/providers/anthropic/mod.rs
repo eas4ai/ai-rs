@@ -29,8 +29,10 @@
 //! constraints become description text, matching the Python SDK's schema helper.
 //! Schemars nullable type arrays become `anyOf`. The core decodes the resulting
 //! assistant text through `StreamHandle::output`.
+mod capabilities;
 pub(crate) mod errors;
 pub(crate) mod messages;
+mod options;
 mod params;
 pub mod protocol;
 mod provider;
