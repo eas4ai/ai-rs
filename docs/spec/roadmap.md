@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: anthropic-whole
+Current: anthropic-system-placement
 
 ## rename-to-suprnova-ai
 
@@ -272,4 +272,25 @@ use only `claude-haiku-5-5`, with few and small calls (the developer,
 
 Done when the anthropic, openai, identity and checks mechanisms pass for
 every requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## anthropic-system-placement
+
+Requirements: ANT-011, PKG-002, PKG-006
+
+Send a later system message with content where Anthropic takes it
+(`src/providers/anthropic/messages.rs`): in place when it follows a user
+message, or an assistant message that ends in a server tool result, and
+comes before an assistant message or ends the history; otherwise just after
+the last user message before the model's next reply, with the user messages
+it separated sent as one and the move logged at debug; and fail with
+`Error::Validation` before any request when no user message follows it. A
+system message that holds only an effort stays in place. Rewrite the ANT-011
+tests in `tests/spec_anthropic.rs` and the test in
+`tests/anthropic_adapter.rs` that puts a system message between two user
+messages, and update the system message departure in `docs/PORT.md`. Check
+the fix with at most two calls on `claude-haiku-5-5`.
+
+Done when the anthropic, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
 adversary report have no open findings.

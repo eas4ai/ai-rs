@@ -263,13 +263,22 @@ Mechanism: anthropic
 Rationale: `convert-to-anthropic-prompt.ts`; TypeScript's core downloads a URL whose media type the provider does not list, and the crate does it through `AnthropicCompatibleProvider::with_download_transport`, as OpenAI's port does.
 Status: Agreed 2026-10-24
 
-[ANT-011] System messages MUST be sent as TypeScript sends them: the first
-run of system messages, when no system text came before it and it sets no
-tool changes, clear time or effort, as the top-level `system` list of text
-blocks; a later run as `{"role": "system", "content"}` messages in place,
-adding `mid-conversation-system-2026-04-07`. A system message's `anthropic`
-metadata MUST be read as `anthropicSystemMessageProviderOptions`: `clearAt`
-as `clear_at` with `mid-conversation-system-clear-at-2026-08-21`, `effort` as
+[ANT-011] System messages MUST be sent as TypeScript sends them, except
+where Anthropic refuses the place: the first run of system messages, when no
+system text came before it and it sets no tool changes, clear time or
+effort, as the top-level `system` list of text blocks; a later run as
+`{"role": "system", "content"}` messages, adding
+`mid-conversation-system-2026-04-07`. A later run with content MUST stay in
+place when it follows a user message, or an assistant message that ends in
+a server tool result, and comes before an assistant message or ends the
+history; otherwise it MUST move to just after the last user message before
+the next assistant message or the end, the user messages it separated MUST
+go as one, and the move MUST be logged; when no user message comes between
+its place and that point, the call MUST fail with `Error::Validation`
+before any request. A later run whose messages hold only an effort MUST stay
+in place. A system message's `anthropic` metadata MUST be read as
+`anthropicSystemMessageProviderOptions`: `clearAt` as `clear_at` with
+`mid-conversation-system-clear-at-2026-08-21`, `effort` as
 `output_config.effort` with `mid-conversation-output-config-2026-07-01`, and
 `toolChanges` as `tool_addition` and `tool_removal` blocks that name a tool
 by its Anthropic name, with `mid-conversation-tool-changes-2026-07-01`. An
@@ -277,9 +286,9 @@ effort-only first system message with empty text MUST be sent as `{"role":
 "system", "content": [], "output_config": {"effort"}}`, and tool changes, a
 clear time or an effort on the top-level system text MUST be left out and
 logged.
-Falsifier: A recorded body for the messages system, user, system, user sends the second system message in the top-level `system`, or not as a system message in place, or without its beta; a mid-conversation system message with `clearAt`, `effort` or a tool addition lacks its field or beta; an empty first system message with effort `low` is not that system message; or tool changes on the first system message are sent.
+Falsifier: A recorded body for the messages system, user, assistant text, system, user sends the second system message in the top-level `system`, or other than as a system message just after the last user message, or without its beta, or logs no move; one for system, user, system, user, assistant, user sends other than one user message holding both first user texts, then the second system message, then the assistant; one for system, user, system, assistant moves the second system message; the history system, user, assistant text, system sends a request or fails with another error kind; a later system message that ends the history after an assistant message ending in a web search result, or one with only an effort between assistant text and a user message, is moved; a mid-conversation system message with `clearAt`, `effort` or a tool addition lacks its field or beta; an empty first system message with effort `low` is not that system message; or tool changes on the first system message are sent.
 Mechanism: anthropic
-Rationale: `convert-to-anthropic-prompt.ts`; the Python port joined every system message into the top-level system text.
+Rationale: `convert-to-anthropic-prompt.ts`; the Python port joined every system message into the top-level system text; calls on `claude-haiku-5-5` (2026-10-24) showed Anthropic refuses a system message with content after assistant text ("role 'system' must follow a 'user' message or an 'assistant' message ending in a server tool result") or before a user message ("role 'system' must precede an 'assistant' message or end the array"), both of which TypeScript sends in place.
 Status: Agreed 2026-10-24
 
 [ANT-012] An assistant turn in history MUST be sent as
