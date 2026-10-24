@@ -632,7 +632,7 @@ fn openai_assistant(
                         out.push(json!({"type": "item_reference", "id": id}));
                     }
                 }
-                _ => out.push(host_call(kind, c, id)),
+                _ => out.push(host_call(kind, c, id, md)),
             }
             continue;
         }
@@ -768,7 +768,7 @@ fn openai_assistant(
 /// input is the reader's: `{"action"}` for shells, `{"call_id",
 /// "operation"}` for `apply_patch`, `{"actions", "pending_safety_checks",
 /// "status"}` for `computer`, and a JSON string for a custom tool.
-fn host_call(kind: &str, call: &ToolCallPart, id: Option<&str>) -> Value {
+fn host_call(kind: &str, call: &ToolCallPart, id: Option<&str>, md: Option<&Value>) -> Value {
     let input: Value = serde_json::from_str(&call.tool_args).unwrap_or(Value::Null);
     let mut item = match kind {
         "local_shell" => {
@@ -790,12 +790,18 @@ fn host_call(kind: &str, call: &ToolCallPart, id: Option<&str>) -> Value {
             "actions": input.get("actions").cloned().unwrap_or_else(|| json!([])),
             "pending_safety_checks": input.get("pending_safety_checks").cloned().unwrap_or_else(|| json!([])),
         }),
-        _ => json!({
-            "type": "custom_tool_call",
-            "call_id": call.tool_call_id,
-            "name": call.tool_name,
-            "input": input.as_str().map_or_else(|| call.tool_args.clone(), str::to_owned),
-        }),
+        _ => {
+            let mut item = json!({
+                "type": "custom_tool_call",
+                "call_id": call.tool_call_id,
+                "name": call.tool_name,
+                "input": input.as_str().map_or_else(|| call.tool_args.clone(), str::to_owned),
+            });
+            if let Some(flag) = own_or_raw(md, "async", Value::is_boolean) {
+                item["async"] = flag.clone();
+            }
+            item
+        }
     };
     if let Some(id) = id {
         item["id"] = json!(id);
@@ -1099,20 +1105,48 @@ impl Parallel {
 /// recorded (`convert-to-openai-responses-input.ts`).
 fn function_call(call: &ToolCallPart, md: Option<&Value>) -> Value {
     let mut item = json!({"type":"function_call","call_id":call.tool_call_id,"name":call.tool_name,"arguments":call.tool_args});
-    // The part's own namespace, then its raw item's: the first one that is a string.
-    let namespace = md.and_then(|m| {
-        [
-            m.get("namespace"),
-            m.get("raw_item").and_then(|raw| raw.get("namespace")),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|namespace| namespace.is_string())
-    });
-    if let Some(namespace) = namespace {
+    if let Some(namespace) = own_or_raw(md, "namespace", Value::is_string) {
         item["namespace"] = namespace.clone();
     }
+    if let Some(flag) = own_or_raw(md, "async", Value::is_boolean) {
+        item["async"] = flag.clone();
+    }
+    if let Some(caller) = caller(md) {
+        item["caller"] = caller;
+    }
     item
+}
+/// The part's own value of `key`, as TypeScript keeps it, then its raw
+/// item's, as the crate's reader keeps it: the first one `keep` accepts.
+fn own_or_raw<'a>(md: Option<&'a Value>, key: &str, keep: fn(&Value) -> bool) -> Option<&'a Value> {
+    let md = md?;
+    [md.get(key), md.get("raw_item").and_then(|raw| raw.get(key))]
+        .into_iter()
+        .flatten()
+        .find(|value| keep(value))
+}
+/// The caller of a call or its result in OpenAI's wire form. TypeScript
+/// keeps a program's id as `callerId`, OpenAI's items as `caller_id`.
+fn caller(md: Option<&Value>) -> Option<Value> {
+    let caller = own_or_raw(md, "caller", Value::is_object)?;
+    Some(match caller.get("callerId") {
+        Some(id) if caller["type"] == "program" => json!({"type": "program", "caller_id": id}),
+        _ => caller.clone(),
+    })
+}
+/// The callers of the history's calls, by call id: a program's call and its
+/// output both name the program (OAI-011).
+fn callers(messages: &[Message]) -> BTreeMap<String, Value> {
+    messages
+        .iter()
+        .flat_map(|m| &m.parts)
+        .filter_map(|part| match part {
+            Part::ToolCall(call) => {
+                Some((call.tool_call_id.clone(), caller(metadata(part, "openai"))?))
+            }
+            _ => None,
+        })
+        .collect()
 }
 /// What the call decides about how its history goes out.
 #[derive(Clone, Copy, Debug)]
@@ -1206,6 +1240,7 @@ pub(super) fn convert(
     };
     let dialect = dialect_of(wire);
     let requests = mcp_requests(&messages);
+    let callers = callers(&messages);
     let messages = repair(messages, openai_responses, &requests)?;
     let mut parallel = Parallel::collect(&messages, &history);
     parallel.requests = requests;
@@ -1428,6 +1463,12 @@ pub(super) fn convert(
                         };
                         if dialect == Dialect::Mistral {
                             entry["name"] = json!(r.tool_name);
+                        }
+                        if openai_responses
+                            && let Some(caller) = caller(metadata(p, "openai"))
+                                .or_else(|| callers.get(&r.tool_call_id).cloned())
+                        {
+                            entry["caller"] = caller;
                         }
                         out.push(entry);
                         if openai_responses
