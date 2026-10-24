@@ -167,6 +167,7 @@ pub(crate) static OPENAI_RESPONSES: ResponsesProfile = ResponsesProfile {
 
 /// OpenAI's own Chat Completions.
 pub(crate) static OPENAI: ChatProfile = ChatProfile {
+    api: errors::API,
     openai_own: true,
     // HST-018's rules, as a Responses stream has them (OAI-012).
     stream_error_kinds: true,
@@ -179,7 +180,7 @@ pub(crate) static COMPATIBLE: ChatProfile = COMPATIBLE_RULES;
 
 const COMPATIBLE_RULES: ChatProfile = ChatProfile {
     protocol_class_id: "openai_chat_completions",
-    api: errors::API,
+    api: errors::COMPATIBLE_API,
     include_usage: true,
     max_tokens_field: "max_completion_tokens",
     reasoning_field: "reasoning",
