@@ -4846,7 +4846,9 @@ async fn hst_033_deepseek_sends_its_options_as_typescript_sends_them() {
         "deepseek-v4-flash",
         vec![user_message("hello")],
         with_effort(
-            deepseek_entry(json!({"topLogprobs": 3, "userId": "user_1", "reasoningEffort": "xhigh"})),
+            deepseek_entry(
+                json!({"topLogprobs": 3, "userId": "user_1", "reasoningEffort": "xhigh"}),
+            ),
             Some("low"),
         ),
     )
@@ -4940,7 +4942,12 @@ async fn hst_033_invalid_deepseek_entries_fail_before_a_request() {
         json!({"logprobs": "yes"}),
         json!({"unknown": 1}),
     ] {
-        let message = validation("deepseek", "deepseek-v4-flash", deepseek_entry(value.clone())).await;
+        let message = validation(
+            "deepseek",
+            "deepseek-v4-flash",
+            deepseek_entry(value.clone()),
+        )
+        .await;
         assert!(message.contains("deepseek"), "{value}: {message}");
     }
 }

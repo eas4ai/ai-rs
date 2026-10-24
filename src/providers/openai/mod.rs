@@ -61,6 +61,7 @@ mod capabilities;
 mod chat;
 mod completions;
 mod decisions;
+mod deepseek;
 mod dialect;
 mod embedding;
 pub mod errors;
