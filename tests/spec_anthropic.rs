@@ -702,6 +702,63 @@ async fn ant_002_an_option_takes_precedence_over_its_core_parameter() {
     );
 }
 
+/// Core parameters with this reasoning summary and effort.
+fn summary_params(summary: Option<&str>, effort: Option<&str>) -> InferenceRequestParams {
+    InferenceRequestParams {
+        output: Some(suprnova_ai::models::params::OutputParams {
+            reasoning_summary: ProviderValue::Value(summary.map(str::to_owned)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .with_reasoning_effort(ProviderValue::Value(effort.map(str::to_owned)))
+}
+
+#[tokio::test]
+async fn ant_002_a_thinking_display_option_takes_precedence_over_the_summary() {
+    let (body, betas) = sent(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_anthropic(
+            summary_params(None, Some("high")),
+            json!({"thinking": {"type": "adaptive", "display": "updates"}}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "adaptive", "display": "updates"}),
+        "{body}"
+    );
+    assert!(
+        betas.contains(&"thinking-display-updates-2026-08-18".to_owned()),
+        "{betas:?}"
+    );
+}
+
+#[tokio::test]
+async fn ant_002_compaction_with_a_core_compaction_threshold_fails_before_a_request() {
+    // A core threshold goes as a context management edit (ANT-003), which
+    // Anthropic does not take together with compaction.
+    use suprnova_ai::models::params::{ContextManagementParams, TokenThreshold};
+    let params = InferenceRequestParams {
+        context_management: Some(ContextManagementParams {
+            compaction: Some(TokenThreshold(100_000)),
+        }),
+        ..Default::default()
+    };
+    let error = refused(
+        "claude-sonnet-4-6",
+        vec![user("hi")],
+        with_anthropic(params, json!({"compaction": {"type": "summarize"}})),
+    )
+    .await;
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn ant_002_unknown_and_invalid_options_fail_before_a_request() {
     for options in [
@@ -1136,6 +1193,26 @@ async fn ant_004_settings_typescript_changes_are_changed_and_logged() {
             "{model_id} {setting}: {logged:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn ant_004_a_summary_left_out_with_budget_thinking_is_logged() {
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-5",
+        vec![user("hi")],
+        with_params(summary_params(Some("detailed"), Some("high"))),
+    )
+    .await;
+    assert_eq!(body["thinking"]["type"], "enabled", "{body}");
+    assert!(body["thinking"].get("display").is_none(), "{body}");
+    assert!(
+        logs.take().contains(&(
+            "reasoning summary".to_owned(),
+            "claude-sonnet-4-5".to_owned()
+        )),
+        "no debug event for the summary"
+    );
 }
 
 #[tokio::test]
