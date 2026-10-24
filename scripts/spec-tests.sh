@@ -1,6 +1,6 @@
 # Sourced by the check scripts that run spec tests (check-core.sh,
-# check-hosts.sh, check-openai.sh, check-google.sh, check-vertex.sh,
-# check-operations.sh). The caller sets `tests` to the test targets and `reqs`
+# check-hosts.sh, check-openai.sh, check-anthropic.sh, check-google.sh,
+# check-vertex.sh, check-operations.sh). The caller sets `tests` to the test targets and `reqs`
 # to the requirements, and may define `extra_check REQ`, which fails REQ when
 # it returns nonzero.
 # `run_spec_tests` prints one `sudus: REQ: pass|fail` line for each

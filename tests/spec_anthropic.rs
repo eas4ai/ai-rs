@@ -922,6 +922,17 @@ async fn ant_004_a_temperature_on_a_model_that_rejects_sampling_is_left_out() {
     assert!(body.get("temperature").is_none(), "{body}");
 }
 
+/// A model, its messages and options, the setting that changes, the body
+/// pointer it touches, and the value sent there (`None` when it is left out).
+type ChangeCase = (
+    &'static str,
+    Vec<Message>,
+    StreamOptions,
+    &'static str,
+    &'static str,
+    Option<Value>,
+);
+
 #[tokio::test]
 async fn ant_004_settings_typescript_changes_are_changed_and_logged() {
     use suprnova_ai::models::params::{OutputParams, SamplerParams, TopPSamplerParams};
@@ -954,7 +965,7 @@ async fn ant_004_settings_typescript_changes_are_changed_and_logged() {
     let mut required = with_params(InferenceRequestParams::default());
     required.tools = vec![function_tool("weather")];
     required.tool_choice = Some(suprnova_ai::types::tools::ToolChoice::Required);
-    let cases: Vec<(&str, Vec<Message>, StreamOptions, &str, &str, Option<Value>)> = vec![
+    let cases: Vec<ChangeCase> = vec![
         (
             "claude-opus-5",
             vec![user("hi")],
