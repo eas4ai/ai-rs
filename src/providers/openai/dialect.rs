@@ -145,7 +145,7 @@ pub(super) fn request(
     model: &str,
     p: &InferenceRequestParams,
     body: &mut Map<String, Value>,
-) {
+) -> Result<(), Error> {
     match profile.dialect {
         Dialect::OpenAI => {}
         Dialect::VertexMaas => {
@@ -160,16 +160,7 @@ pub(super) fn request(
         Dialect::VertexXai => {
             body.remove("reasoning_effort");
         }
-        Dialect::DeepSeek => match effort(p) {
-            Some(Effort::Disabled) => {
-                body.remove("reasoning_effort");
-                body.insert("thinking".into(), json!({"type":"disabled"}));
-            }
-            Some(Effort::Level(_)) => {
-                body.insert("thinking".into(), json!({"type":"enabled"}));
-            }
-            None => {}
-        },
+        Dialect::DeepSeek => super::deepseek::Options::parse(p)?.apply(p, body),
         Dialect::Moonshot => {
             body.remove("reasoning_effort");
             match (moonshot_family(model), effort(p)) {
@@ -199,6 +190,7 @@ pub(super) fn request(
             }
         }
     }
+    Ok(())
 }
 
 /// A tool's parameter schema as the host takes it.
@@ -330,11 +322,11 @@ fn setting_name(setting: Setting) -> &'static str {
 }
 
 /// The reasoning a call asks for.
-enum Effort {
+pub(super) enum Effort {
     Disabled,
     Level(String),
 }
-fn effort(p: &InferenceRequestParams) -> Option<Effort> {
+pub(super) fn effort(p: &InferenceRequestParams) -> Option<Effort> {
     let ProviderValue::Value(reasoning) = &p.reasoning else {
         return None;
     };
@@ -415,12 +407,8 @@ pub(super) fn deepseek_legacy(model: &str) -> bool {
 }
 
 fn check_deepseek(model: &str, p: &InferenceRequestParams) -> Result<(), Error> {
-    let thinking = match effort(p) {
-        Some(Effort::Disabled) => false,
-        Some(Effort::Level(_)) => true,
-        None => model == "deepseek-reasoner" || !deepseek_legacy(model),
-    };
-    if thinking
+    let options = super::deepseek::Options::parse(p)?;
+    if options.thinking_on(model, p)
         && let Some(name) = sampling(p)
             .into_iter()
             .find(|name| matches!(*name, "temperature" | "top_p"))

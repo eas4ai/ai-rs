@@ -459,7 +459,7 @@ pub(crate) fn wire_request(
     };
     let mut body = params::build(&p, wire)?;
     match wire {
-        Wire::Chat(profile) => dialect::request(profile, model, &p, &mut body),
+        Wire::Chat(profile) => dialect::request(profile, model, &p, &mut body)?,
         Wire::Responses(profile) => dialect::responses_request(profile, model, &mut body),
     }
     if let Some(call) = &call {
