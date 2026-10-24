@@ -1,6 +1,6 @@
-//! The image models of Together AI (`togetherai-image-model.ts`, HST-029)
-//! and DeepInfra (`deepinfra-image-model.ts`, HST-030). Each call makes one
-//! image; `ops::generate_image` makes one call per
+//! The image models of Together AI (`togetherai-image-model.ts`, HST-029),
+//! DeepInfra (`deepinfra-image-model.ts`, HST-030) and Fireworks
+//! (`fireworks-image-model.ts`, HST-031). Each call makes one image; `ops::generate_image` makes one call per
 //! image (OPS-003). Warnings that TypeScript returns come back in
 //! `Item.warnings`.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -25,6 +25,7 @@ use crate::{
 pub(crate) enum Images {
     TogetherAI,
     DeepInfra,
+    Fireworks,
 }
 
 /// Generate the images of one call, fetching input image URLs through
@@ -41,6 +42,7 @@ pub(crate) async fn generate(
     match images {
         Images::TogetherAI => together(api, model, prompt, params, provider).await,
         Images::DeepInfra => deepinfra(api, downloads, model, prompt, params, provider).await,
+        Images::Fireworks => fireworks(api, downloads, model, prompt, params, provider).await,
     }
 }
 
@@ -526,4 +528,277 @@ fn without_data_prefix(text: &str) -> &str {
             !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         })
         .map_or(text, |(_, data)| data)
+}
+
+/// The Fireworks models that take a size, at `image_generation`.
+const FIREWORKS_SIZE_MODELS: [&str; 5] = [
+    "accounts/fireworks/models/playground-v2-5-1024px-aesthetic",
+    "accounts/fireworks/models/japanese-stable-diffusion-xl",
+    "accounts/fireworks/models/playground-v2-1024px-aesthetic",
+    "accounts/fireworks/models/stable-diffusion-xl-1024-v1-0",
+    "accounts/fireworks/models/SSD-1B",
+];
+/// The Fireworks Kontext models, whose workflows run as jobs to poll.
+const FIREWORKS_KONTEXT_MODELS: [&str; 2] = [
+    "accounts/fireworks/models/flux-kontext-pro",
+    "accounts/fireworks/models/flux-kontext-max",
+];
+const FIREWORKS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const FIREWORKS_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Fireworks' images, at the URL of the model's backend
+/// (`fireworks-image-model.ts`).
+async fn fireworks(
+    api: &'static ApiProfile,
+    downloads: Option<&dyn DownloadTransport>,
+    model: &Model,
+    prompt: ImagePrompt,
+    params: ImageParams,
+    provider: &dyn Provider,
+) -> Result<Item<Vec<FilePart>>, Error> {
+    let options = entry(&params, "fireworks")?;
+    let integer = |v: &Value| v.is_i64() || v.is_u64();
+    for (option, expected, ok) in [
+        (
+            "guidance_scale",
+            "a number",
+            Value::is_number as fn(&Value) -> bool,
+        ),
+        ("num_inference_steps", "an integer", integer),
+        ("webhook_url", "a string", Value::is_string),
+        ("webhook_secret", "a string", Value::is_string),
+        ("prompt_upsampling", "a boolean", Value::is_boolean),
+        ("cfg_scale", "a number", Value::is_number),
+        ("steps", "an integer", integer),
+    ] {
+        typed(&options, "fireworks", option, expected, ok)?;
+    }
+    typed(&options, "fireworks", "output_format", "jpeg or png", |v| {
+        v == "jpeg" || v == "png"
+    })?;
+    typed(
+        &options,
+        "fireworks",
+        "safety_tolerance",
+        "an integer from 0 to 6",
+        |v| v.as_u64().is_some_and(|t| t <= 6),
+    )?;
+    let id = model.id.as_str();
+    let size_model = FIREWORKS_SIZE_MODELS.contains(&id);
+    let kontext = FIREWORKS_KONTEXT_MODELS.contains(&id);
+    let mut warnings = Vec::new();
+    if !size_model && params.size.is_some() {
+        warnings.push(warning(
+            "unsupported",
+            Some("size"),
+            "This model does not support the `size` option. Use `aspectRatio` instead.",
+        ));
+    }
+    if size_model && params.aspect_ratio.is_some() {
+        warnings.push(warning(
+            "unsupported",
+            Some("aspectRatio"),
+            "This model does not support the `aspectRatio` option.",
+        ));
+    }
+    if prompt.images.len() > 1 {
+        warnings.push(warning(
+            "other",
+            None,
+            "Fireworks only supports a single input image. Additional images are ignored.",
+        ));
+    }
+    if prompt.mask.is_some() {
+        warnings.push(warning(
+            "unsupported",
+            Some("mask"),
+            "Fireworks Kontext models do not support explicit masks. Use the prompt to describe \
+             the areas to edit.",
+        ));
+    }
+    let mut body = json!({});
+    if let Some(text) = &prompt.text {
+        body["prompt"] = json!(text);
+    }
+    if let Some(ratio) = params.aspect_ratio.as_ref().filter(|_| !size_model) {
+        body["aspect_ratio"] = json!(ratio);
+    }
+    if let Some(seed) = params.seed {
+        body["seed"] = json!(seed);
+    }
+    body["samples"] = json!(params.n);
+    if let Some(first) = prompt.images.first() {
+        body["input_image"] = json!(data_url(first));
+    }
+    if let Some(value) = params.size.as_ref().filter(|_| size_model) {
+        let (width, height) = size(value)?;
+        body["width"] = json!(width.to_string());
+        body["height"] = json!(height.to_string());
+    }
+    if let Value::Object(fields) = &mut body {
+        fields.extend(options);
+    }
+    let model_segments = model_path(id)?;
+    let path = |first: &'static str, last: Option<&'static str>| {
+        let mut path = vec![first];
+        path.extend(model_segments.iter().copied());
+        path.extend(last);
+        path
+    };
+    let url_path = if size_model {
+        path("image_generation", None)
+    } else if kontext {
+        path("workflows", None)
+    } else {
+        path("workflows", Some("text_to_image"))
+    };
+    let config = provider.config();
+    let transport = transport(provider)?;
+    let post = |path: &[&str], body: Value| {
+        http::request(
+            api,
+            config,
+            "POST",
+            path,
+            Some(body),
+            Default::default(),
+            Default::default(),
+        )
+    };
+    let bytes = if kontext {
+        let submitted = http::json(
+            api,
+            transport,
+            post(&url_path, body)?,
+            provider.name(),
+            Some(id),
+        )
+        .await?;
+        let request_id = submitted["request_id"].as_str().ok_or_else(|| {
+            http::response_error(
+                provider.name(),
+                "Fireworks image response has no request_id",
+            )
+        })?;
+        let poll = path("workflows", Some("get_result"));
+        let polled = tokio::time::timeout(FIREWORKS_POLL_TIMEOUT, async {
+            loop {
+                let status = http::json(
+                    api,
+                    transport,
+                    post(&poll, json!({"id": request_id}))?,
+                    provider.name(),
+                    Some(id),
+                )
+                .await?;
+                match status["status"].as_str() {
+                    Some("Ready") => {
+                        return status["result"]["sample"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                http::response_error(
+                                    provider.name(),
+                                    "Fireworks poll response is Ready but missing result.sample",
+                                )
+                            });
+                    }
+                    Some(failed @ ("Error" | "Failed")) => {
+                        return Err(http::response_error(
+                            provider.name(),
+                            format!("Fireworks image generation failed with status: {failed}"),
+                        ));
+                    }
+                    _ => tokio::time::sleep(FIREWORKS_POLL_INTERVAL).await,
+                }
+            }
+        })
+        .await;
+        let sample = match polled {
+            Ok(sample) => sample?,
+            Err(_) => {
+                return Err(crate::errors::ProviderError::new(
+                    crate::errors::ProviderErrorKind::DeadlineExceeded,
+                    format!(
+                        "Fireworks image generation timed out after {} ms",
+                        FIREWORKS_POLL_TIMEOUT.as_millis()
+                    ),
+                )
+                .with_provider(provider.name())
+                .into());
+            }
+        };
+        download_sample(api, downloads, &sample, provider, id).await?
+    } else {
+        let response = http::send(
+            api,
+            transport,
+            post(&url_path, body)?,
+            provider.name(),
+            Some(id),
+        )
+        .await?;
+        let (_, bytes) =
+            http::read_body_with_limit(api, provider.name(), response, DEFAULT_MAX_BYTES).await?;
+        bytes.to_vec()
+    };
+    let mut item = Item::new(vec![image(provider, bytes)?]);
+    item.warnings = warnings;
+    Ok(item)
+}
+
+/// Download a Kontext job's sample: with the key from the base URL's
+/// origin, through the download transport without it from another.
+async fn download_sample(
+    api: &'static ApiProfile,
+    downloads: Option<&dyn DownloadTransport>,
+    sample: &str,
+    provider: &dyn Provider,
+    model_id: &str,
+) -> Result<Vec<u8>, Error> {
+    let config = provider.config();
+    let origin = |url: &str| url::Url::parse(url).ok().map(|url| url.origin());
+    let sample_origin = origin(sample)
+        .filter(|origin| origin.is_tuple())
+        .ok_or_else(|| {
+            http::response_error(provider.name(), "Fireworks sample is not an HTTP URL")
+        })?;
+    if Some(sample_origin) == origin(&config.base_url()) {
+        let request = http::request_to(
+            api,
+            sample,
+            config,
+            "GET",
+            &[],
+            None,
+            Default::default(),
+            Default::default(),
+        )?;
+        let response = http::send(
+            api,
+            transport(provider)?,
+            request,
+            provider.name(),
+            Some(model_id),
+        )
+        .await?;
+        let (_, bytes) =
+            http::read_body_with_limit(api, provider.name(), response, DEFAULT_MAX_BYTES).await?;
+        return Ok(bytes.to_vec());
+    }
+    let downloads = downloads.ok_or_else(|| {
+        invalid(format!(
+            "the Fireworks sample {sample} is on another origin than the base URL; build the \
+             provider with with_download_transport to fetch it without the key"
+        ))
+    })?;
+    let (bytes, _) = files::download(downloads, sample, DEFAULT_MAX_BYTES)
+        .await
+        .map_err(|e| {
+            http::response_error(
+                provider.name(),
+                format!("could not fetch the Fireworks sample: {e}"),
+            )
+        })?;
+    Ok(bytes.to_vec())
 }

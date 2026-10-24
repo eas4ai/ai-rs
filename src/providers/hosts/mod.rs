@@ -143,15 +143,15 @@ impl Models {
         embeddings: false,
         images: None,
     };
-    /// Embeddings on the compatible protocol.
-    pub(crate) const EMBEDDINGS: Self = Self {
-        embeddings: true,
-        images: None,
-    };
     /// DeepInfra's: embeddings and images.
     pub(crate) const DEEPINFRA: Self = Self {
         embeddings: true,
         images: Some(images::Images::DeepInfra),
+    };
+    /// Fireworks': embeddings and images.
+    pub(crate) const FIREWORKS: Self = Self {
+        embeddings: true,
+        images: Some(images::Images::Fireworks),
     };
     /// Together AI's: embeddings and images.
     pub(crate) const TOGETHER_AI: Self = Self {
