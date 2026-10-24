@@ -317,6 +317,7 @@ fn register(
     downloads: Option<Arc<dyn DownloadTransport>>,
 ) -> Result<(), Error> {
     let mut next = registry.clone();
+    let protocol_downloads = downloads.clone();
     let build = move |config| {
         let provider = HostProvider::new(host, config, transport.clone());
         match &downloads {
@@ -334,7 +335,11 @@ fn register(
         let config = serde_json::from_value(value)?;
         Ok(Arc::new(build(config)))
     })?;
-    next.register_protocol_factory(host.protocol.class_id(), move |_| Ok(host.protocol(None)))?;
+    // A model's own protocol gets the registry's download transport back
+    // too.
+    next.register_protocol_factory(host.protocol.class_id(), move |_| {
+        Ok(host.protocol(protocol_downloads.clone()))
+    })?;
     *registry = next;
     Ok(())
 }
