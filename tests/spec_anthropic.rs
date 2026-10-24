@@ -354,6 +354,73 @@ async fn ant_001_betas_go_in_one_header_once_each() {
 }
 
 #[tokio::test]
+async fn ant_001_a_snapshot_cannot_make_another_server_anthropic() {
+    // The registered provider decides whether a restored one is Anthropic's
+    // own API, as it decides its credentials and endpoint.
+    let env: std::collections::BTreeMap<String, String> = [
+        ("ANTHROPIC_AUTH_TOKEN".to_owned(), "tok-1".to_owned()),
+        ("ANTHROPIC_API_KEY".to_owned(), "sk-ant-env".to_owned()),
+    ]
+    .into();
+    let metadata = suprnova_ai::providers::ModelsDevProvider {
+        id: "other".into(),
+        api: Some("https://other.test".into()),
+        npm: Some("@ai-sdk/anthropic".into()),
+        env: vec![],
+    };
+    let transport = Recorder::new([text_reply()]);
+    let other: Arc<dyn suprnova_ai::Provider> = Arc::new(
+        AnthropicCompatibleProvider::from_modelsdev(
+            &metadata,
+            ProviderConfig {
+                env,
+                ..Default::default()
+            },
+            transport.clone(),
+        )
+        .unwrap(),
+    );
+    let mut registry = suprnova_ai::ProviderRegistry::new();
+    suprnova_ai::providers::anthropic::register(&mut registry, config(), transport.clone())
+        .unwrap();
+    registry.register(other.name(), other.clone()).unwrap();
+    let mut snapshot = other.to_value().unwrap();
+    snapshot["anthropic_api"] = json!(true);
+    let restored = registry.restore_provider(snapshot).unwrap();
+    assert!(!restored.is_configured());
+    run(
+        &Model::new("claude-sonnet-4-6", restored),
+        vec![user("hi")],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(transport.url(0), "https://other.test/v1/messages");
+    assert_eq!(transport.header(0, "authorization"), None);
+    assert_eq!(transport.header(0, "x-api-key"), None);
+}
+
+#[tokio::test]
+async fn ant_001_a_token_alone_configures_the_provider() {
+    let transport = Recorder::new([json_reply(json!({"id": "claude-sonnet-4-6"}))]);
+    let provider: Arc<dyn suprnova_ai::Provider> = Arc::new(AnthropicCompatibleProvider::new(
+        ProviderConfig {
+            env: [("ANTHROPIC_AUTH_TOKEN".to_owned(), "tok-1".to_owned())].into(),
+            ..Default::default()
+        },
+        transport.clone(),
+    ));
+    assert!(provider.is_configured());
+    let model = Model::new("claude-sonnet-4-6", provider.clone());
+    provider.probe(&model).await.unwrap();
+    assert_eq!(
+        transport.header(0, "authorization").as_deref(),
+        Some("Bearer tok-1")
+    );
+    let bare = AnthropicCompatibleProvider::new(ProviderConfig::default(), Recorder::new([]));
+    assert!(!suprnova_ai::Provider::is_configured(&bare));
+}
+
+#[tokio::test]
 async fn ant_001_anthropic_credentials_go_only_to_anthropic() {
     // Another host behind the Messages protocol gets neither Anthropic's
     // token nor Anthropic's key, whatever the env snapshot holds.
