@@ -900,6 +900,9 @@ fn place_system(messages: Vec<Value>, notes: &mut Notes) -> Result<Vec<Value>, E
     };
     let mut out: Vec<Value> = Vec::with_capacity(messages.len());
     let mut pending: Vec<Value> = Vec::new();
+    // Whether a moved run left the last output message, a user message,
+    // next to the coming one: only those two go as one.
+    let mut separated = false;
     let mut messages = messages.into_iter().enumerate().peekable();
     while let Some((i, mut message)) = messages.next() {
         match roles[i].as_deref() {
@@ -925,7 +928,9 @@ fn place_system(messages: Vec<Value>, notes: &mut Notes) -> Result<Vec<Value>, E
                 );
                 if !content || (pending.is_empty() && after && before) {
                     out.extend(run);
+                    separated = false;
                 } else {
+                    separated = out.last().is_some_and(|m| m["role"] == "user");
                     notes.note(
                         "system message",
                         "Anthropic does not take a system message with content here; it moves to \
@@ -936,7 +941,7 @@ fn place_system(messages: Vec<Value>, notes: &mut Notes) -> Result<Vec<Value>, E
             }
             Some("user") => {
                 match out.last_mut() {
-                    Some(last) if last["role"] == "user" => {
+                    Some(last) if separated && last["role"] == "user" => {
                         if let (Some(merged), Value::Array(content)) =
                             (last["content"].as_array_mut(), message["content"].take())
                         {
@@ -945,6 +950,7 @@ fn place_system(messages: Vec<Value>, notes: &mut Notes) -> Result<Vec<Value>, E
                     }
                     _ => out.push(message),
                 }
+                separated = false;
                 if matches!(next_role(i + 1).as_deref(), None | Some("assistant")) {
                     out.append(&mut pending);
                 }
@@ -954,6 +960,7 @@ fn place_system(messages: Vec<Value>, notes: &mut Notes) -> Result<Vec<Value>, E
                     return Err(no_user());
                 }
                 out.push(message);
+                separated = false;
             }
         }
     }
