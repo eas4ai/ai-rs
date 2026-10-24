@@ -3779,3 +3779,54 @@ async fn ant_020_evaluation_makes_one_messages_call() {
     .unwrap();
     assert_eq!(transport.url(0), "https://api.anthropic.com/v1/messages");
 }
+
+#[tokio::test]
+async fn ant_020_evaluation_sends_the_decision_prompt_and_reads_the_answer() {
+    use suprnova_ai::providers::operations::{EvaluationInput, Question};
+    let transport = Recorder::new([message(
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "{\"q0\": 0.25}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+        ],
+        json!({"output_tokens": 1}),
+        "end_turn",
+    )]);
+    let questions = [(
+        "urgent".to_owned(),
+        Question::Noul {
+            instructions: EvaluationInput::Text("Is it urgent".into()),
+            criteria: None,
+        },
+    )]
+    .into();
+    let item = suprnova_ai::ops::experimental::evaluate(
+        &model("claude-sonnet-4-6", transport.clone()),
+        EvaluationInput::Text("the shipment is late".into()),
+        questions,
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transport.count(), 1);
+    let body = transport.body(0);
+    assert!(
+        body["system"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Decide every answer against the shared state"),
+        "{body}"
+    );
+    let turn = body["messages"][0]["content"].to_string();
+    assert!(
+        turn.contains("Shared state:") && turn.contains("the shipment is late"),
+        "{turn}"
+    );
+    assert_eq!(
+        body["output_config"]["format"]["schema"]["properties"]["q0"]["type"], "number",
+        "{body}"
+    );
+    assert_eq!(body["thinking"], json!({"type": "disabled"}), "{body}");
+    assert_eq!(item.value["urgent"], json!({"type": "noul", "noul": 0.25}));
+}
