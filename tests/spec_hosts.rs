@@ -4163,17 +4163,30 @@ async fn hst_031_a_kontext_model_polls_and_downloads_from_the_base_origin_with_t
         model_id,
         transport.clone(),
         prompt("a cat", vec![MediaInput::Bytes(PNG.to_vec())], None),
-        image_params(None, Some("1:1"), None, None),
+        image_params(
+            Some("1024x768"),
+            Some("1:1"),
+            Some(7),
+            Some(("fireworks", json!({"safety_tolerance": 2}))),
+        ),
     )
     .await
     .unwrap();
     let requests = fireworks_requests(&transport);
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[0].url, format!("{FIREWORKS}/workflows/{model_id}"));
-    let submitted: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    // The whole body: the size is warned and left out, as for every model
+    // that is not a size model.
     assert_eq!(
-        submitted["input_image"],
-        format!("data:image/png;base64,{}", b64(PNG))
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        json!({"prompt": "a cat", "aspect_ratio": "1:1", "seed": 7, "samples": 1,
+            "input_image": format!("data:image/png;base64,{}", b64(PNG)),
+            "safety_tolerance": 2})
+    );
+    assert!(
+        warned(&item.warnings, "unsupported", Some("size")),
+        "{:?}",
+        item.warnings
     );
     for poll in &requests[1..3] {
         assert_eq!(
