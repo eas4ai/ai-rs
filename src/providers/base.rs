@@ -88,7 +88,12 @@ impl ProviderConfig {
 
     pub fn is_configured(&self) -> bool {
         (self.api_key_env.is_none() || self.api_key().is_some_and(|v| !v.is_empty()))
-            && self.config_envs.iter().all(|key| self.value(key).is_some())
+            && self.has_config_envs()
+    }
+
+    /// Whether every `config_envs` value the base URL names is set.
+    pub(crate) fn has_config_envs(&self) -> bool {
+        self.config_envs.iter().all(|key| self.value(key).is_some())
     }
 
     /// Serialize the configuration without its credentials: the API key value,

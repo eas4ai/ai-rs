@@ -242,7 +242,9 @@ impl Provider for AnthropicCompatibleProvider {
             .auth_token_env
             .and_then(|env| self.config.env.get(env))
             .is_some_and(|token| !token.is_empty());
-        (token || self.api_key().is_some_and(|key| !key.is_empty())) && self.config.is_configured()
+        // A token authenticates in place of the key (ANT-001).
+        (token || self.api_key().is_some_and(|key| !key.is_empty()))
+            && self.config.has_config_envs()
     }
     fn to_value(&self) -> Result<Value, Error> {
         let mut value = self.config.snapshot()?;
@@ -342,12 +344,16 @@ pub fn register(
             .get("anthropic_version")
             .and_then(Value::as_str)
             .unwrap_or("2023-06-01");
-        // A snapshot from before the field was kept is Anthropic's own API
-        // only when it has Anthropic's name.
-        let anthropic_api = value
+        // The provider registered under the snapshot's name decides whether
+        // it is Anthropic's own API, as it decides the credentials and the
+        // endpoint: a changed snapshot cannot send Anthropic's token or key
+        // to another server.
+        let anthropic_api = registry
+            .get_provider(name)?
+            .to_value()?
             .get("anthropic_api")
             .and_then(Value::as_bool)
-            .unwrap_or(name == "anthropic");
+            .unwrap_or(false);
         let mut provider =
             AnthropicCompatibleProvider::build(config, transport.clone(), anthropic_api)
                 .with_name(name)
