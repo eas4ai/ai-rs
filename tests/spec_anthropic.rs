@@ -753,7 +753,10 @@ async fn ant_002_compaction_with_a_core_compaction_threshold_fails_before_a_requ
         with_anthropic(params, json!({"compaction": {"type": "summarize"}})),
     )
     .await;
-    assert!(matches!(error, suprnova_ai::Error::Validation(_)), "{error:?}");
+    assert!(
+        matches!(error, suprnova_ai::Error::Validation(_)),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]
@@ -2471,6 +2474,53 @@ async fn ant_010_a_text_url_is_downloaded_first() {
         matches!(error, suprnova_ai::Error::Validation(_)),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn ant_010_other_files_in_a_tool_result_are_left_out_and_logged() {
+    use suprnova_ai::types::messages::{ContentOutput, ContentPart, ToolResultPart};
+    // Only images and PDFs go in a tool result, by bytes, URL or file id.
+    let content = ContentOutput::new(vec![
+        ContentPart::Text(TextPart::new("Loaded")),
+        ContentPart::File(file(
+            FileData::Text("https://a.test/data.csv".into()),
+            "text/csv",
+            None,
+        )),
+        ContentPart::File(file(FileData::Text("file_abc".into()), "audio/wav", None)),
+        ContentPart::File(file(FileData::Text("file_pdf".into()), "application/pdf", None)),
+    ]);
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("read"),
+            assistant(vec![Part::ToolCall(ToolCallPart::new(
+                "toolu_1", "read", "{}",
+            ))]),
+            Message::new(
+                MessageRole::Tool,
+                vec![Part::ToolResult(ToolResultPart::new(
+                    "toolu_1", "read", content,
+                ))],
+            ),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        body["messages"][2]["content"][0]["content"],
+        json!([
+            {"type": "text", "text": "Loaded"},
+            {"type": "document", "source": {"type": "file", "file_id": "file_pdf"}}]),
+        "{body}"
+    );
+    let logged = logs.take();
+    let notes = logged
+        .iter()
+        .filter(|(setting, model)| setting == "tool result content" && model == "claude-sonnet-4-6")
+        .count();
+    assert_eq!(notes, 2, "{logged:?}");
 }
 
 #[tokio::test]
