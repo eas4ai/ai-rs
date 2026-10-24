@@ -3228,6 +3228,18 @@ async fn ant_014_usage_iterations_finish_and_metadata_follow_typescript() {
 }
 
 #[tokio::test]
+async fn ant_014_a_missing_stop_reason_finishes_as_other() {
+    let reply = sse(&[
+        json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-4-6",
+            "content": [], "stop_reason": null, "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": null}, "usage": {"output_tokens": 1}}),
+        json!({"type": "message_stop"}),
+    ]);
+    let handle = streamed("claude-sonnet-4-6", reply, StreamOptions::default()).await;
+    assert_eq!(handle.finish_reason(), Some("other"));
+}
+
+#[tokio::test]
 async fn ant_014_finish_reasons_follow_typescript() {
     for (reason, expected) in [
         ("end_turn", "stop"),
