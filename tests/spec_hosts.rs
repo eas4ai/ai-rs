@@ -5860,3 +5860,388 @@ async fn hst_039_invalid_minimax_media_parts_fail_before_a_request() {
         );
     }
 }
+
+// HST-040
+
+use suprnova_ai::providers::operations::{FrameImage, FrameType, VideoParams, VideoPrompt};
+
+const MINIMAX_URL: &str = "https://api.minimax.io/anthropic";
+const JPEG: &[u8] = b"\xff\xd8\xff\xe0\x00\x10JFIF";
+
+/// A MiniMax video model on a provider with a download transport, which a
+/// video call needs, on this base URL.
+fn minimax_video_model(
+    base_url: &str,
+    model_id: &str,
+    transport: Arc<Recorder>,
+    downloads: Option<Arc<Downloads>>,
+) -> Model {
+    let config = ProviderConfig {
+        default_base_url: base_url.into(),
+        ..key_config()
+    };
+    let provider = minimax::provider(config, transport);
+    let provider = match downloads {
+        Some(downloads) => provider.with_download_transport(downloads),
+        None => provider,
+    };
+    Model::new(model_id, Arc::new(provider))
+}
+fn video_prompt(text: &str) -> VideoPrompt {
+    VideoPrompt {
+        text: Some(text.into()),
+        ..Default::default()
+    }
+}
+fn video_params(entry: Option<Value>) -> VideoParams {
+    VideoParams {
+        provider_options: entry
+            .map(|value| [("minimax".to_owned(), value)].into())
+            .unwrap_or_default(),
+        ..Default::default()
+    }
+}
+fn frame(image: MediaInput, frame_type: FrameType) -> FrameImage {
+    FrameImage { image, frame_type }
+}
+fn url_input(url: &str, media_type: &str) -> MediaInput {
+    MediaInput::File(FilePart::from_url(url, Some(media_type)).unwrap())
+}
+/// Start a job on a MiniMax model; the request it sent and the started item.
+async fn minimax_start(
+    model_id: &str,
+    prompt: VideoPrompt,
+    params: VideoParams,
+) -> (
+    Arc<Recorder>,
+    suprnova_ai::providers::operations::Item<suprnova_ai::providers::operations::VideoJob>,
+) {
+    let transport = Recorder::new([json_reply(json!({"task_id": "t1"}))]);
+    let model = minimax_video_model(
+        MINIMAX_URL,
+        model_id,
+        transport.clone(),
+        Some(Arc::new(Downloads::default())),
+    );
+    let item = suprnova_ai::ops::start_video(&model, prompt, params, Default::default())
+        .await
+        .unwrap();
+    (transport, item)
+}
+fn content_roles(body: &Value) -> Vec<(String, String)> {
+    body["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|part| {
+            (
+                part["type"].as_str().unwrap().to_owned(),
+                part["role"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn hst_040_a_text_to_video_call_sends_the_body_typescript_sends() {
+    let (transport, item) =
+        minimax_start("MiniMax-H3", video_prompt("a cat"), video_params(None)).await;
+    let request = transport.request();
+    assert_eq!(request.url, "https://api.minimax.io/v2/video_generation");
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        transport.header("authorization").as_deref(),
+        Some("Bearer sk-test")
+    );
+    assert!(transport.header("x-api-key").is_none());
+    assert_eq!(
+        transport.body(),
+        json!({"model": "MiniMax-H3", "content": [{"type": "text", "text": "a cat"}],
+            "resolution": "2K", "duration": 5, "ratio": "16:9"})
+    );
+    assert!(item.warnings.is_empty(), "{:?}", item.warnings);
+    assert_eq!(item.value.operation, json!("t1"));
+    assert_eq!(
+        item.provider_metadata.as_ref().unwrap()["minimax"],
+        json!({"taskId": "t1", "resolvedInputs": {"imageCount": 0, "referenceVideoUrls": []}})
+    );
+    // Another model takes every resolution, and a named tier in any case.
+    let (transport, _) = minimax_start(
+        "MiniMax-Hailuo-02",
+        video_prompt("a cat"),
+        VideoParams {
+            resolution: Some("480p".into()),
+            aspect_ratio: Some("9:16".into()),
+            ..video_params(None)
+        },
+    )
+    .await;
+    let body = transport.body();
+    assert_eq!(body["resolution"], "480P", "{body}");
+    assert_eq!(body["ratio"], "9:16", "{body}");
+}
+
+#[tokio::test]
+async fn hst_040_frames_set_the_resolution_tier_and_drop_the_ratio() {
+    let prompt = VideoPrompt {
+        text: Some("a cat".into()),
+        image: None,
+        frame_images: vec![
+            frame(MediaInput::Bytes(PNG.to_vec()), FrameType::FirstFrame),
+            frame(
+                MediaInput::File(
+                    FilePart::from_bytes(JPEG.to_vec(), Some("image/jpeg"), None).unwrap(),
+                ),
+                FrameType::LastFrame,
+            ),
+        ],
+        references: vec![],
+    };
+    let params = VideoParams {
+        duration: Some(20),
+        resolution: Some("1366x768".into()),
+        aspect_ratio: Some("1:1".into()),
+        ..video_params(None)
+    };
+    let (transport, item) = minimax_start("MiniMax-H3-Max", prompt, params).await;
+    let body = transport.body();
+    assert_eq!(
+        body["content"][1],
+        json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", b64(PNG))}, "role": "first_frame"}),
+        "{body}"
+    );
+    assert_eq!(
+        body["content"][2],
+        json!({"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{}", b64(JPEG))}, "role": "last_frame"}),
+        "{body}"
+    );
+    assert_eq!(body["content"].as_array().unwrap().len(), 3, "{body}");
+    assert_eq!(body["resolution"], "768P", "{body}");
+    assert_eq!(body["duration"], 15, "{body}");
+    assert!(body.get("ratio").is_none(), "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("duration")),
+        "{:?}",
+        item.warnings
+    );
+    assert!(
+        warned(&item.warnings, "unsupported", Some("aspectRatio")),
+        "{:?}",
+        item.warnings
+    );
+    assert_eq!(
+        item.provider_metadata.as_ref().unwrap()["minimax"]["resolvedInputs"],
+        json!({"imageCount": 2, "referenceVideoUrls": []})
+    );
+    // A plain image is the first frame, and a last frame without a first is
+    // warned about and left out.
+    let prompt = VideoPrompt {
+        text: None,
+        image: Some(MediaInput::Url("https://img.test/first.png".into())),
+        frame_images: vec![],
+        references: vec![],
+    };
+    let (transport, _) = minimax_start("MiniMax-H3", prompt, video_params(None)).await;
+    let body = transport.body();
+    assert_eq!(
+        body["content"][0],
+        json!({"type": "text", "text": ""}),
+        "{body}"
+    );
+    assert_eq!(
+        body["content"][1],
+        json!({"type": "image_url", "image_url": {"url": "https://img.test/first.png"}, "role": "first_frame"}),
+        "{body}"
+    );
+    let prompt = VideoPrompt {
+        text: Some("a cat".into()),
+        image: None,
+        frame_images: vec![frame(MediaInput::Bytes(PNG.to_vec()), FrameType::LastFrame)],
+        references: vec![],
+    };
+    let (transport, item) = minimax_start("MiniMax-H3", prompt, video_params(None)).await;
+    let body = transport.body();
+    assert_eq!(body["content"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["ratio"], "16:9", "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("frameImages")),
+        "{:?}",
+        item.warnings
+    );
+}
+
+#[tokio::test]
+async fn hst_040_references_go_by_media_type_within_their_limits() {
+    let prompt = VideoPrompt {
+        text: Some("a cat".into()),
+        image: None,
+        frame_images: vec![],
+        references: vec![
+            url_input("https://img.test/1.png", "image/png"),
+            url_input("https://img.test/2.png", "image/png"),
+            url_input("https://v.test/a.mp4", "video/mp4"),
+        ],
+    };
+    let params = VideoParams {
+        duration: Some(3),
+        ..video_params(Some(json!({
+            "ratio": "adaptive", "aigcWatermark": true,
+            "referenceAudioUrls": ["https://a.test/1.mp3", "https://a.test/2.mp3", "https://a.test/3.mp3", "https://a.test/4.mp3"]
+        })))
+    };
+    let (transport, item) = minimax_start("MiniMax-H3", prompt, params).await;
+    let body = transport.body();
+    assert_eq!(
+        content_roles(&body),
+        vec![
+            ("image_url".to_owned(), "reference_image".to_owned()),
+            ("image_url".to_owned(), "reference_image".to_owned()),
+            ("video_url".to_owned(), "reference_video".to_owned()),
+            ("audio_url".to_owned(), "reference_audio".to_owned()),
+            ("audio_url".to_owned(), "reference_audio".to_owned()),
+            ("audio_url".to_owned(), "reference_audio".to_owned()),
+        ],
+        "{body}"
+    );
+    assert_eq!(
+        body["content"][3],
+        json!({"type": "video_url", "video_url": {"url": "https://v.test/a.mp4"}, "role": "reference_video"}),
+        "{body}"
+    );
+    assert_eq!(
+        body["content"][4],
+        json!({"type": "audio_url", "audio_url": {"url": "https://a.test/1.mp3"}, "role": "reference_audio"}),
+        "{body}"
+    );
+    assert_eq!(body["ratio"], "adaptive", "{body}");
+    assert_eq!(body["aigc_watermark"], true, "{body}");
+    assert_eq!(body["duration"], 4, "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("referenceAudioUrls")),
+        "{:?}",
+        item.warnings
+    );
+    assert!(
+        warned(&item.warnings, "unsupported", Some("duration")),
+        "{:?}",
+        item.warnings
+    );
+    assert_eq!(
+        item.provider_metadata.as_ref().unwrap()["minimax"]["resolvedInputs"],
+        json!({"imageCount": 2, "referenceVideoUrls": ["https://v.test/a.mp4"]})
+    );
+    // A URL reference without a media type goes as an image with a warning;
+    // MiniMax-H3-Max takes no references.
+    let prompt = VideoPrompt {
+        text: Some("a cat".into()),
+        image: None,
+        frame_images: vec![],
+        references: vec![MediaInput::Url("https://img.test/x".into())],
+    };
+    let (transport, item) = minimax_start("MiniMax-H3", prompt.clone(), video_params(None)).await;
+    let body = transport.body();
+    assert_eq!(
+        content_roles(&body),
+        vec![("image_url".to_owned(), "reference_image".to_owned())],
+        "{body}"
+    );
+    assert!(body.get("ratio").is_none(), "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("inputReferences")),
+        "{:?}",
+        item.warnings
+    );
+    let (transport, item) = minimax_start("MiniMax-H3-Max", prompt, video_params(None)).await;
+    let body = transport.body();
+    assert_eq!(body["content"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["resolution"], "768P", "{body}");
+    assert!(
+        warned(&item.warnings, "unsupported", Some("inputReferences")),
+        "{:?}",
+        item.warnings
+    );
+}
+
+#[tokio::test]
+async fn hst_040_fps_seed_and_audio_are_warned_about_and_left_out() {
+    let params = VideoParams {
+        fps: Some(24),
+        seed: Some(7),
+        generate_audio: Some(true),
+        ..video_params(None)
+    };
+    let (transport, item) = minimax_start("MiniMax-H3", video_prompt("a cat"), params).await;
+    let body = transport.body();
+    for key in ["fps", "seed", "generate_audio", "generateAudio"] {
+        assert!(body.get(key).is_none(), "{key} in {body}");
+    }
+    for feature in ["fps", "seed", "generateAudio"] {
+        assert!(
+            warned(&item.warnings, "unsupported", Some(feature)),
+            "{feature}: {:?}",
+            item.warnings
+        );
+    }
+}
+
+#[tokio::test]
+async fn hst_040_a_video_call_that_cannot_be_served_fails_before_a_request() {
+    let start = |base_url: &str, downloads: bool, prompt: VideoPrompt, params: VideoParams| {
+        let transport = Recorder::new([json_reply(json!({"task_id": "t1"}))]);
+        let model = minimax_video_model(
+            base_url,
+            "MiniMax-H3",
+            transport.clone(),
+            downloads.then(|| Arc::new(Downloads::default())),
+        );
+        async move {
+            let error = suprnova_ai::ops::start_video(&model, prompt, params, Default::default())
+                .await
+                .unwrap_err();
+            assert_eq!(transport.count(), 0, "{error:?}");
+            error
+        }
+    };
+    let error = start(
+        MINIMAX_URL,
+        false,
+        video_prompt("a cat"),
+        video_params(None),
+    )
+    .await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    let error = start(
+        "https://proxy.test/v1",
+        true,
+        video_prompt("a cat"),
+        video_params(None),
+    )
+    .await;
+    assert!(matches!(error, Error::Configuration(_)), "{error:?}");
+    let prompt = VideoPrompt {
+        image: Some(MediaInput::Bytes(vec![1, 2, 3])),
+        ..video_prompt("a cat")
+    };
+    let error = start(MINIMAX_URL, true, prompt, video_params(None)).await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    for entry in [
+        json!({"resolution": "1080P"}),
+        json!({"ratio": "2:1"}),
+        json!({"aigcWatermark": "yes"}),
+        json!({"referenceAudioUrls": "https://a.test/1.mp3"}),
+        json!({"pollTimeoutMs": 1000}),
+        json!({"pollIntervalMs": 1000}),
+        json!({"unknown": 1}),
+        json!("fast"),
+    ] {
+        let error = start(
+            MINIMAX_URL,
+            true,
+            video_prompt("a cat"),
+            video_params(Some(entry.clone())),
+        )
+        .await;
+        assert!(matches!(error, Error::Validation(_)), "{entry}: {error:?}");
+    }
+}
