@@ -159,6 +159,102 @@ struct Parser {
     asks_logprobs: bool,
     /// The prediction token counts of OpenAI's own Chat Completions.
     chat_metadata: serde_json::Map<String, Value>,
+    /// What a DeepSeek stream reports for its `deepseek` metadata.
+    deepseek: Option<DeepSeekMetadata>,
+}
+
+/// What a DeepSeek stream reports beside the core usage, for the final
+/// message's `deepseek` metadata (HST-036), as the `finish` part of
+/// `deepseek-chat-language-model.ts` gives it: each field absent when the
+/// stream did not carry it.
+#[derive(Default)]
+struct DeepSeekMetadata {
+    cache_hit: Option<Value>,
+    cache_miss: Option<Value>,
+    object: Option<Value>,
+    fingerprint: Option<Value>,
+    choice_index: Option<Value>,
+    role: Option<Value>,
+    /// The `type` of each tool call, by its index.
+    tool_call_types: BTreeMap<u64, Value>,
+    content_logprobs: Vec<Value>,
+    reasoning_logprobs: Vec<Value>,
+}
+impl DeepSeekMetadata {
+    /// The latest `object` and `system_fingerprint` of a chunk.
+    fn chunk(&mut self, data: &Value) {
+        for (field, slot) in [
+            ("object", &mut self.object),
+            ("system_fingerprint", &mut self.fingerprint),
+        ] {
+            if !data[field].is_null() {
+                *slot = Some(data[field].clone());
+            }
+        }
+    }
+    fn usage(&mut self, usage: &Value) {
+        for (field, slot) in [
+            ("prompt_cache_hit_tokens", &mut self.cache_hit),
+            ("prompt_cache_miss_tokens", &mut self.cache_miss),
+        ] {
+            if usage[field].is_number() {
+                *slot = Some(usage[field].clone());
+            }
+        }
+    }
+    fn choice(&mut self, choice: &Value, delta: &Value) {
+        if !choice["index"].is_null() {
+            self.choice_index = Some(choice["index"].clone());
+        }
+        if !delta["role"].is_null() {
+            self.role = Some(delta["role"].clone());
+        }
+        for (field, list) in [
+            ("content", &mut self.content_logprobs),
+            ("reasoning_content", &mut self.reasoning_logprobs),
+        ] {
+            if let Some(values) = choice["logprobs"][field].as_array() {
+                list.extend(values.iter().cloned());
+            }
+        }
+    }
+    /// A tool call delta's `type`, keyed by its index, else its place in the
+    /// chunk.
+    fn tool_call(&mut self, position: usize, call: &Value) {
+        if !call["type"].is_null() {
+            let index = call["index"].as_u64().unwrap_or(position as u64);
+            self.tool_call_types.insert(index, call["type"].clone());
+        }
+    }
+    fn entry(self) -> Value {
+        let mut entry = serde_json::Map::new();
+        let mut put = |key: &str, value: Option<Value>| {
+            if let Some(value) = value {
+                entry.insert(key.into(), value);
+            }
+        };
+        put("promptCacheHitTokens", self.cache_hit);
+        put("promptCacheMissTokens", self.cache_miss);
+        put("responseObject", self.object);
+        put("choiceIndex", self.choice_index);
+        put("messageRole", self.role);
+        if !self.tool_call_types.is_empty() {
+            let types: Vec<Value> = self.tool_call_types.into_values().collect();
+            put("toolCallTypes", Some(json!(types)));
+        }
+        let mut logprobs = serde_json::Map::new();
+        if !self.content_logprobs.is_empty() {
+            logprobs.insert("content".into(), json!(self.content_logprobs));
+        }
+        if !self.reasoning_logprobs.is_empty() {
+            logprobs.insert("reasoning_content".into(), json!(self.reasoning_logprobs));
+        }
+        if !logprobs.is_empty() {
+            put("logprobs", Some(Value::Object(logprobs)));
+        }
+        put("systemFingerprint", self.fingerprint);
+        Value::Object(entry)
+    }
 }
 /// `hold_reasoning` keeps each reasoning block open until its item ends, so
 /// that every block carries the item's final encrypted content; an unstored
@@ -231,6 +327,10 @@ pub(super) fn parse(
         logprobs: Vec::new(),
         asks_logprobs,
         chat_metadata: serde_json::Map::new(),
+        deepseek: match wire {
+            Wire::Chat(profile) if profile.dialect == Dialect::DeepSeek => Some(Default::default()),
+            _ => None,
+        },
     };
     stream::try_unfold(state, |mut p| async move {
         loop {
@@ -303,6 +403,11 @@ impl Parser {
         }
         self.start();
         self.finish_sources();
+        if let Some(deepseek) = self.deepseek.take() {
+            self.metadata
+                .get_or_insert_with(Default::default)
+                .insert("deepseek".into(), deepseek.entry());
+        }
         if self.responses {
             for id in std::mem::take(&mut self.texts) {
                 self.queue.push_back(block("text_end", &id, None));
@@ -336,6 +441,9 @@ impl Parser {
             self.response_model = Some(string(data, "model").into());
         }
         let dialect = self.chat.map_or(Dialect::OpenAI, |c| c.dialect);
+        if let Some(deepseek) = &mut self.deepseek {
+            deepseek.chunk(data);
+        }
         let first = data["choices"].as_array().and_then(|c| c.first());
         // Moonshot AI can put usage in the choice; a top-level usage wins
         // whichever comes first.
@@ -386,12 +494,18 @@ impl Parser {
                     }
                 }
             }
+            if let Some(deepseek) = &mut self.deepseek {
+                deepseek.usage(value);
+            }
             self.usage = Some(u);
         }
         let Some(choice) = first else {
             return Ok(());
         };
         let delta = &choice["delta"];
+        if let Some(deepseek) = &mut self.deepseek {
+            deepseek.choice(choice, delta);
+        }
         if self.openai_chat() {
             if let Some(logprobs) = choice["logprobs"]["content"].as_array() {
                 self.logprobs.extend(logprobs.iter().cloned());
@@ -458,6 +572,9 @@ impl Parser {
                 .is_some_and(|c| c.json_drops_tool_calls_after_text);
         if let Some(calls) = delta["tool_calls"].as_array() {
             for (position, tc) in calls.iter().enumerate() {
+                if let Some(deepseek) = &mut self.deepseek {
+                    deepseek.tool_call(position, tc);
+                }
                 // A call without an index, as Mistral and Moonshot AI send
                 // them, is keyed by its place in the chunk; a new id under a
                 // key is a new call.
