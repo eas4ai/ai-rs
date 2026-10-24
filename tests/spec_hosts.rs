@@ -5552,3 +5552,123 @@ async fn hst_037_deepseek_file_info_download_and_delete_are_unsupported() {
     );
     assert_eq!(transport.count(), 0);
 }
+
+// HST-038
+
+/// Options with `anthropic` and `minimax` entries, over disabled core
+/// reasoning when `reasoning` is false.
+fn minimax_entries(anthropic: Option<Value>, minimax: Option<Value>) -> StreamOptions {
+    let mut options = StreamOptions::default();
+    if let Some(value) = anthropic {
+        options = with_entry(options, "anthropic", value);
+    }
+    if let Some(value) = minimax {
+        options = with_entry(options, "minimax", value);
+    }
+    options
+}
+
+#[tokio::test]
+async fn hst_038_the_minimax_entry_is_read_over_the_anthropic_entry() {
+    let body = minimax_body(
+        "MiniMax-M3.1",
+        minimax_entries(
+            Some(json!({"effort": "high"})),
+            Some(json!({"effort": "low"})),
+        ),
+    )
+    .await;
+    assert_eq!(body["output_config"]["effort"], "low", "{body}");
+    // An effort in the entry wins over the core reasoning setting.
+    let body = minimax_body(
+        "MiniMax-M3.1",
+        with_effort(
+            minimax_entries(None, Some(json!({"effort": "medium"}))),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body["output_config"]["effort"], "medium", "{body}");
+    assert!(body.get("thinking").is_none(), "{body}");
+    let body = minimax_body(
+        "MiniMax-M2",
+        with_effort(
+            minimax_entries(None, Some(json!({"effort": "high"}))),
+            Some("low"),
+        ),
+    )
+    .await;
+    assert_eq!(body["output_config"]["effort"], "high", "{body}");
+    // The entry takes every anthropic option.
+    let body = minimax_body(
+        "MiniMax-M2",
+        minimax_entries(None, Some(json!({"thinking": {"type": "disabled"}}))),
+    )
+    .await;
+    assert_eq!(body["thinking"], json!({"type": "disabled"}), "{body}");
+    let body = minimax_body(
+        "MiniMax-M2",
+        minimax_entries(
+            Some(json!({"thinking": {"type": "disabled"}, "metadata": {"userId": "u1"}})),
+            Some(json!({"thinking": {"type": "enabled", "budgetTokens": 2048}})),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 2048}),
+        "{body}"
+    );
+    assert_eq!(body["metadata"], json!({"user_id": "u1"}), "{body}");
+}
+
+#[tokio::test]
+async fn hst_038_the_final_metadata_is_also_given_under_minimax_when_the_entry_was_used() {
+    let transport = Recorder::new([messages_text()]);
+    let first = model("minimax", "MiniMax-M3.1", transport);
+    let (handle, events) = call(
+        &first,
+        vec![user_message("hello")],
+        minimax_entries(None, Some(json!({"effort": "low"}))),
+    )
+    .await;
+    ok(&events);
+    let metadata = handle.message().provider_metadata.clone().unwrap();
+    assert_eq!(metadata["minimax"], metadata["anthropic"], "{metadata:?}");
+    assert_eq!(
+        metadata["minimax"]["stopReason"], "end_turn",
+        "{metadata:?}"
+    );
+    let transport = Recorder::new([messages_text()]);
+    let second = model("minimax", "MiniMax-M3.1", transport);
+    let (handle, events) = call(
+        &second,
+        vec![user_message("hello")],
+        minimax_entries(Some(json!({"effort": "low"})), None),
+    )
+    .await;
+    ok(&events);
+    let metadata = handle.message().provider_metadata.clone().unwrap();
+    assert!(metadata.get("minimax").is_none(), "{metadata:?}");
+    assert_eq!(
+        metadata["anthropic"]["stopReason"], "end_turn",
+        "{metadata:?}"
+    );
+}
+
+#[tokio::test]
+async fn hst_038_an_invalid_minimax_entry_fails_before_a_request() {
+    for value in [
+        json!("fast"),
+        json!({"effort": "huge"}),
+        json!({"unknown": 1}),
+    ] {
+        let message = validation(
+            "minimax",
+            "MiniMax-M3.1",
+            minimax_entries(None, Some(value.clone())),
+        )
+        .await;
+        assert!(message.contains("minimax"), "{value}: {message}");
+    }
+}
