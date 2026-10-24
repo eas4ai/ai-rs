@@ -168,6 +168,73 @@ async fn ant_001_an_auth_token_goes_as_a_bearer_token() {
     assert_eq!(transport.url(0), "https://api.anthropic.com/v1/messages");
 }
 
+#[tokio::test]
+async fn ant_001_a_token_with_an_api_key_value_fails_before_a_request() {
+    let transport = Recorder::new([]);
+    let config = ProviderConfig {
+        env: [("ANTHROPIC_AUTH_TOKEN".to_owned(), "tok-1".to_owned())].into(),
+        ..config()
+    };
+    let model = Model::new(
+        "claude-sonnet-4-6",
+        Arc::new(AnthropicCompatibleProvider::new(config, transport.clone())),
+    );
+    let mut handle = suprnova_ai::stream(&model, vec![user("hi")], StreamOptions::default());
+    let error = handle.next().await.unwrap().unwrap_err();
+    assert!(
+        matches!(error, suprnova_ai::Error::Configuration(_)),
+        "{error:?}"
+    );
+    assert!(transport.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ant_001_betas_go_in_one_header_once_each() {
+    use suprnova_ai::models::params::{ContextManagementParams, TokenThreshold};
+    let transport = Recorder::new([text_reply()]);
+    let config = ProviderConfig {
+        headers: [(
+            "anthropic-beta".to_owned(),
+            "b1, compact-2026-01-12".to_owned(),
+        )]
+        .into(),
+        ..config()
+    };
+    let model = Model::new(
+        "claude-sonnet-4-6",
+        Arc::new(AnthropicCompatibleProvider::new(config, transport.clone())),
+    );
+    let params = InferenceRequestParams {
+        context_management: Some(ContextManagementParams {
+            compaction: Some(TokenThreshold(100_000)),
+        }),
+        ..Default::default()
+    };
+    run(
+        &model,
+        vec![user("hi")],
+        StreamOptions {
+            params: Some(params),
+            ..Default::default()
+        },
+    )
+    .await;
+    let requests = transport.requests.lock().unwrap();
+    let betas: Vec<&String> = requests[0]
+        .headers
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("anthropic-beta"))
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(betas.len(), 1, "{betas:?}");
+    let mut names: Vec<&str> = betas[0].split(',').collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["b1", "compact-2026-01-12", "context-management-2025-06-27"]
+    );
+}
+
 // ANT-002
 
 #[tokio::test]
