@@ -52,7 +52,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.together.xyz/v1",
     api_key_env: "TOGETHER_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
-    models: Models::EMBEDDINGS,
+    models: Models::TOGETHER_AI,
 };
 
 /// Build the Together AI provider. An unset base URL becomes `https://api.together.xyz/v1` and an
