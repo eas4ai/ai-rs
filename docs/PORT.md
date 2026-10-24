@@ -176,7 +176,16 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   which it leaves out, where TypeScript warns for a size by mistake. A
   DeepInfra image goes to the base URL without its last segment `openai`, so
   a base URL that does not end in `/openai` fails with
-  `Error::Configuration`.
+  `Error::Configuration`. Other departures from TypeScript: an image size
+  that is not `<width>x<height>` fails with `Error::Validation`, where
+  TypeScript sends `NaN` or the split text; Fireworks' chat entry values are
+  checked, and its image options refuse `null`, where TypeScript sends them
+  unchecked; Fireworks images leave out the size or aspect ratio they warn
+  about, which TypeScript sends; a Fireworks Kontext result on another
+  origin than the base URL is fetched without the key through the download
+  transport, so it needs one, where TypeScript fetches it itself; Fireworks
+  image errors take the body's message, where TypeScript uses the HTTP
+  status text; and the deprecated `openai-compatible` entry is not read.
 - Chat Completions tool call deltas without an index, as Mistral and Moonshot
   AI send them, are told apart by their place in the chunk and their id; Python
   merges them. Text that follows reasoning, or reasoning that follows text,
