@@ -243,11 +243,11 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   the Python port: the default output limit is the model's limit, not 8,192;
   a system message after the first goes as a mid-conversation system
   message, not joined to the first, in place where Anthropic takes it and
-  otherwise just after the last user message before the model's reply;
-  input tokens count cache writes;
-  tool call arguments that are not a JSON object go as `rawInvalidInput`;
-  `pause_turn` finishes as `stop`; and the output schema is TypeScript's
-  sanitized schema. Built-in tool calls and results use TypeScript's shapes,
+  otherwise just after the last user message before the model's reply
+  (TypeScript sends it in place, which Anthropic refuses); input tokens
+  count cache writes; tool call arguments that are not a JSON object go as
+  `rawInvalidInput`; `pause_turn` finishes as `stop`; and the output schema
+  is TypeScript's sanitized schema. Built-in tool calls and results use TypeScript's shapes,
   sources are in the final message metadata under `anthropic.sources`, and a
   fallback or container upload block is an empty text part with `anthropic`
   metadata. MiniMax and Vertex AI's Anthropic models share these rules with
