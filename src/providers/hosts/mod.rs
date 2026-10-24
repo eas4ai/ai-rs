@@ -58,6 +58,7 @@ pub mod minimax;
 pub mod mistral;
 mod models;
 pub mod moonshotai;
+mod rerank;
 pub mod togetherai;
 pub mod xai;
 pub mod zai;
@@ -136,31 +137,37 @@ pub(crate) struct Models {
     pub embeddings: bool,
     /// The host's image model (HST-029 to HST-031).
     pub images: Option<images::Images>,
+    /// Together AI's reranking (HST-032).
+    pub reranking: bool,
 }
 impl Models {
     /// The language model alone.
     pub(crate) const CHAT: Self = Self {
         embeddings: false,
         images: None,
+        reranking: false,
     };
     /// DeepInfra's: embeddings and images.
     pub(crate) const DEEPINFRA: Self = Self {
         embeddings: true,
         images: Some(images::Images::DeepInfra),
+        reranking: false,
     };
     /// Fireworks': embeddings and images.
     pub(crate) const FIREWORKS: Self = Self {
         embeddings: true,
         images: Some(images::Images::Fireworks),
+        reranking: false,
     };
-    /// Together AI's: embeddings and images.
+    /// Together AI's: embeddings, images and reranking.
     pub(crate) const TOGETHER_AI: Self = Self {
         embeddings: true,
         images: Some(images::Images::TogetherAI),
+        reranking: true,
     };
     /// Whether the host serves a model kind beside its language model.
     fn beside_chat(self) -> bool {
-        self.embeddings || self.images.is_some()
+        self.embeddings || self.images.is_some() || self.reranking
     }
 }
 impl Host {
