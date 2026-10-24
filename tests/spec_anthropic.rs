@@ -2209,6 +2209,49 @@ async fn ant_009_an_error_without_a_code_goes_back_unavailable() {
 }
 
 #[tokio::test]
+async fn ant_009_a_code_execution_result_without_a_type_is_left_out_and_logged() {
+    use suprnova_ai::types::messages::{BuiltinToolCallPart, BuiltinToolReturnPart};
+    let call = BuiltinToolCallPart {
+        id: "c".into(),
+        tool_call_id: "srv_1".into(),
+        tool_name: "code_execution".into(),
+        tool_args: r#"{"code": "print(1)"}"#.into(),
+        provider_metadata: None,
+    };
+    let result = BuiltinToolReturnPart {
+        id: "r".into(),
+        tool_call_id: "srv_1".into(),
+        tool_name: "code_execution".into(),
+        result: json!({"stdout": "1"}),
+        is_error: false,
+        provider_metadata: None,
+    };
+    let (logs, _guard) = capture_logs();
+    let (body, _) = sent(
+        "claude-sonnet-4-6",
+        vec![
+            user("hi"),
+            assistant(vec![
+                Part::BuiltinToolCall(call),
+                Part::BuiltinToolReturn(result),
+            ]),
+            user("more"),
+        ],
+        StreamOptions::default(),
+    )
+    .await;
+    let sent_blocks = body["messages"].to_string();
+    assert!(!sent_blocks.contains("tool_result"), "{body}");
+    assert!(
+        logs.take().contains(&(
+            "provider tool result".to_owned(),
+            "claude-sonnet-4-6".to_owned()
+        )),
+        "no debug event for the result"
+    );
+}
+
+#[tokio::test]
 async fn ant_009_a_caller_goes_back_only_while_its_code_execution_call_is_there() {
     use suprnova_ai::types::messages::BuiltinToolCallPart;
     let program = |id: &str| {
@@ -2488,7 +2531,11 @@ async fn ant_010_other_files_in_a_tool_result_are_left_out_and_logged() {
             None,
         )),
         ContentPart::File(file(FileData::Text("file_abc".into()), "audio/wav", None)),
-        ContentPart::File(file(FileData::Text("file_pdf".into()), "application/pdf", None)),
+        ContentPart::File(file(
+            FileData::Text("file_pdf".into()),
+            "application/pdf",
+            None,
+        )),
     ]);
     let (logs, _guard) = capture_logs();
     let (body, _) = sent(
