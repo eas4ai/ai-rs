@@ -3,7 +3,7 @@
 //! (`MiniMax-M3.1`, `minimax-m4`) always reason: a reasoning effort goes out as
 //! `output_config.effort` with `minimal` as `low`, and disabled reasoning
 //! becomes effort `low`. Older models keep the Anthropic mapping.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -49,6 +49,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.minimax.io/anthropic",
     api_key_env: "MINIMAX_API_KEY",
     protocol: HostProtocol::Messages(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Whether a model id names MiniMax 3.1 or later, read as the TypeScript SDK

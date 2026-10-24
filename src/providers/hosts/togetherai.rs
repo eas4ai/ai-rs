@@ -1,7 +1,7 @@
 //! Together AI over Chat Completions. Only `deepseek-ai/DeepSeek-V4-Flash-0731`
 //! takes an output schema as a JSON schema; other models get JSON mode, which
 //! does not enforce the schema.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -52,6 +52,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.together.xyz/v1",
     api_key_env: "TOGETHER_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
+    models: Models::EMBEDDINGS,
 };
 
 /// Build the Together AI provider. An unset base URL becomes `https://api.together.xyz/v1` and an

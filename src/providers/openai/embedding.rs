@@ -147,9 +147,10 @@ pub(super) async fn embed(
     if let Some(user) = options.user {
         body["user"] = json!(user);
     }
-    // An OpenAI-compatible server gets no OpenAI organization or project.
+    // A host's errors read as its chat errors do (HST-028); another
+    // OpenAI-compatible server gets no OpenAI organization or project.
     let api = match protocol.compatible {
-        Some(_) => &errors::COMPATIBLE_API,
+        Some(_) => crate::providers::hosts::chat_api(provider).unwrap_or(&errors::COMPATIBLE_API),
         None => &errors::API,
     };
     let request = http_request(
@@ -166,14 +167,7 @@ pub(super) async fn embed(
             provider.name()
         ))
     })?;
-    let response = http::json(
-        &errors::API,
-        transport,
-        request,
-        provider.name(),
-        Some(&model.id),
-    )
-    .await?;
+    let response = http::json(api, transport, request, provider.name(), Some(&model.id)).await?;
     let bad = || {
         http::response_error(
             provider.name(),

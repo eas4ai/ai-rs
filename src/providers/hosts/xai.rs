@@ -11,7 +11,7 @@
 //! references to stored items, with the item ids this provider keeps in part
 //! metadata under `xai`. Built-in tools, such as web and X search, fail with
 //! `Error::UnsupportedOperation`.
-use super::{Host, HostProtocol, HostProvider};
+use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
     providers::{
@@ -57,6 +57,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.x.ai/v1",
     api_key_env: "XAI_API_KEY",
     protocol: HostProtocol::Responses(&PROFILE),
+    models: Models::CHAT,
 };
 
 /// Build the xAI provider. An unset base URL becomes `https://api.x.ai/v1`
