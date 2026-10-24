@@ -19,10 +19,14 @@ pub(super) fn metadata(values: Value) -> Metadata {
 }
 /// The `anthropic` entry of a part's or message's metadata.
 fn anthropic(metadata: Option<&Metadata>) -> Option<&Value> {
-    metadata?.get("anthropic").filter(|v| v.is_object())
+    entry(metadata, "anthropic")
 }
-fn part_metadata(part: &Part) -> Option<&Value> {
-    anthropic(match part {
+/// The object under `key` in a part's or message's metadata.
+fn entry<'a>(metadata: Option<&'a Metadata>, key: &str) -> Option<&'a Value> {
+    metadata?.get(key).filter(|v| v.is_object())
+}
+fn part_metadata_map(part: &Part) -> Option<&Metadata> {
+    match part {
         Part::Text(p) => p.provider_metadata.as_ref(),
         Part::Reasoning(p) => p.provider_metadata.as_ref(),
         Part::ToolCall(p) => p.provider_metadata.as_ref(),
@@ -31,7 +35,10 @@ fn part_metadata(part: &Part) -> Option<&Value> {
         Part::File(p) => p.provider_metadata.as_ref(),
         Part::ToolResult(p) => p.provider_metadata.as_ref(),
         _ => None,
-    })
+    }
+}
+fn part_metadata(part: &Part) -> Option<&Value> {
+    anthropic(part_metadata_map(part))
 }
 fn string<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a str> {
     value?.get(key)?.as_str()
@@ -247,13 +254,20 @@ fn with_cache(mut block: Value, cache: Option<Value>) -> Value {
     block
 }
 
-/// A user file as an `image`, `document` or `container_upload` block.
+/// A user file as an `image`, `document` or `container_upload` block, or as
+/// the host's own media block for a model that takes one.
 fn user_file(
     file: &FilePart,
     cache: Option<Value>,
     betas: &mut Vec<String>,
+    context: &Context<'_>,
 ) -> Result<Value, Error> {
     let mt = file.media_type.as_str();
+    if let Some(key) = context.host_key
+        && (mt.starts_with("image/") || mt.starts_with("video/"))
+    {
+        return host_media(file, key, cache);
+    }
     let options: FileOptions =
         part_options(anthropic(file.provider_metadata.as_ref()), "file part")?;
     let text = file.data.as_text();
@@ -324,6 +338,63 @@ fn user_file(
         )));
     };
     Ok(with_cache(block, cache))
+}
+
+/// A user image or video as a host's own block
+/// (`convert-to-minimax-media-part.ts`, HST-039): `{"type": "image" |
+/// "video", "source"}` with a base64, URL or `mm_file://` source and the
+/// part's `detail` (an image) or `fps` (a video) from its metadata under the
+/// host's key. An image cannot name an uploaded file.
+fn host_media(file: &FilePart, key: &str, cache: Option<Value>) -> Result<Value, Error> {
+    let image = file.media_type.starts_with("image/");
+    let kind = if image { "image" } else { "video" };
+    let text = file.data.as_text();
+    let mut source = if let Some(id) = text.filter(|t| t.starts_with("mm_file://")) {
+        if image {
+            return Err(Error::Validation(format!(
+                "a {key} image cannot name an uploaded file; only a video can"
+            )));
+        }
+        json!({"type": "url", "url": id})
+    } else if let Some(url) = text.filter(|t| media::is_downloadable_url(t)) {
+        json!({"type": "url", "url": url})
+    } else {
+        json!({
+            "type": "base64",
+            "media_type": full_media_type(file)?,
+            "data": base64(&file.data),
+        })
+    };
+    let options = entry(file.provider_metadata.as_ref(), key);
+    if image {
+        match options
+            .and_then(|o| o.get("detail"))
+            .filter(|v| !v.is_null())
+        {
+            None => {}
+            Some(detail) if matches!(detail.as_str(), Some("low" | "default" | "high")) => {
+                source["detail"] = detail.clone();
+            }
+            Some(detail) => {
+                return Err(Error::Validation(format!(
+                    "{key} image option detail must be low, default or high, not {detail}"
+                )));
+            }
+        }
+    } else {
+        match options.and_then(|o| o.get("fps")).filter(|v| !v.is_null()) {
+            None => {}
+            Some(fps) if fps.as_f64().is_some_and(|fps| (0.2..=5.0).contains(&fps)) => {
+                source["fps"] = fps.clone();
+            }
+            Some(fps) => {
+                return Err(Error::Validation(format!(
+                    "{key} video option fps must be a number from 0.2 to 5, not {fps}"
+                )));
+            }
+        }
+    }
+    Ok(with_cache(json!({"type": kind, "source": source}), cache))
 }
 
 /// A file of a tool result's content, or `None` with a log when Anthropic
@@ -423,6 +494,28 @@ fn error_code(result: &Value) -> Value {
 pub(crate) struct Context<'a> {
     pub send_reasoning: bool,
     pub names: &'a ToolNames,
+    /// The host's own metadata key for a model that takes the host's media
+    /// blocks (HST-039): its part options live there, and its cache control
+    /// is read there before `anthropic`, as `get-cache-control.ts` reads it.
+    pub host_key: Option<&'static str>,
+}
+impl Context<'_> {
+    /// Whether a part's or message's metadata has an entry this call reads.
+    fn has_entry(&self, metadata: Option<&Metadata>) -> bool {
+        self.host_key
+            .is_some_and(|key| entry(metadata, key).is_some())
+            || anthropic(metadata).is_some()
+    }
+    /// The cache control of a part's or message's metadata: the host's
+    /// entry first, then the `anthropic` entry (ANT-015).
+    fn cache_of(&self, metadata: Option<&Metadata>) -> Option<Value> {
+        self.host_key
+            .and_then(|key| cache_control(entry(metadata, key)))
+            .or_else(|| cache_control(anthropic(metadata)))
+    }
+    fn part_cache(&self, part: &Part) -> Option<Value> {
+        self.cache_of(part_metadata_map(part))
+    }
 }
 
 /// A built-in call of the history as a `server_tool_use` or `mcp_tool_use`.
@@ -757,7 +850,7 @@ pub(crate) fn convert(
             Block::User => {
                 let mut content = Vec::new();
                 for msg in run {
-                    let message_cache = cache_control(anthropic(msg.provider_metadata.as_ref()));
+                    let message_cache = context.cache_of(msg.provider_metadata.as_ref());
                     let parts: Vec<&Part> = msg
                         .parts
                         .iter()
@@ -770,7 +863,7 @@ pub(crate) fn convert(
                     }
                     for (j, part) in parts.iter().enumerate() {
                         let last = j + 1 == parts.len();
-                        let own = cache_control(part_metadata(part));
+                        let own = context.part_cache(part);
                         match part {
                             Part::Text(t) => {
                                 let cache = notes.cache(
@@ -789,7 +882,7 @@ pub(crate) fn convert(
                                     "user message part",
                                     true,
                                 );
-                                content.push(user_file(f, cache, &mut betas)?);
+                                content.push(user_file(f, cache, &mut betas, context)?);
                             }
                             Part::ToolResult(r) => {
                                 let content_cache = match r.get_model_input() {
@@ -805,7 +898,7 @@ pub(crate) fn convert(
                                                     p.provider_metadata.as_ref()
                                                 }
                                             };
-                                            anthropic(md).map(|md| cache_control(Some(md)))
+                                            context.has_entry(md).then(|| context.cache_of(md))
                                         })
                                         .flatten(),
                                     _ => None,
@@ -988,7 +1081,17 @@ fn system_block(
     let mut converted = Vec::new();
     for msg in run {
         let message_md = anthropic(msg.provider_metadata.as_ref());
-        let first_part_md = msg.parts.iter().find_map(part_metadata);
+        // The first part with an entry gives the cache control, else the
+        // message does.
+        let first_part_cache = msg
+            .parts
+            .iter()
+            .find_map(|part| {
+                context
+                    .has_entry(part_metadata_map(part))
+                    .then(|| context.part_cache(part))
+            })
+            .flatten();
         let options: SystemOptions = part_options(message_md, "system message")?;
         let text = msg.text();
         let changes = options.tool_changes.clone().unwrap_or_default();
@@ -997,7 +1100,9 @@ fn system_block(
             || (changes.is_empty() && options.clear_at.is_none() && options.effort.is_none())
         {
             let cache = notes.cache(
-                cache_control(first_part_md).or_else(|| cache_control(message_md)),
+                first_part_cache
+                    .clone()
+                    .or_else(|| context.cache_of(msg.provider_metadata.as_ref())),
                 "system message",
                 true,
             );
@@ -1079,11 +1184,11 @@ fn assistant_block(
     let mut mcp = BTreeSet::new();
     for (j, msg) in run.iter().enumerate() {
         let last_message = j + 1 == run.len();
-        let message_cache = cache_control(anthropic(msg.provider_metadata.as_ref()));
+        let message_cache = context.cache_of(msg.provider_metadata.as_ref());
         for (k, part) in msg.parts.iter().enumerate() {
             let last_part = k + 1 == msg.parts.len();
             let md = part_metadata(part);
-            let own = cache_control(md);
+            let own = context.part_cache(part);
             let fallback_cache = || last_part.then(|| message_cache.clone()).flatten();
             match part {
                 Part::Text(t) => {
@@ -1259,7 +1364,13 @@ fn prune_callers(messages: &mut [Value], last_user: Option<usize>, notes: &mut N
 
 /// A user file as Anthropic takes it, with no part options.
 pub fn file_to_anthropic(part: &FilePart) -> Result<Value, Error> {
-    user_file(part, None, &mut Vec::new())
+    let names = ToolNames::default();
+    let context = Context {
+        send_reasoning: true,
+        names: &names,
+        host_key: None,
+    };
+    user_file(part, None, &mut Vec::new(), &context)
 }
 /// A tool result's content as Anthropic takes it.
 pub fn tool_result_to_anthropic(value: &ToolResultValue) -> Result<Value, Error> {
@@ -1276,6 +1387,7 @@ pub fn messages_to_anthropic(messages: &[Message]) -> Result<(Option<String>, Ve
     let context = Context {
         send_reasoning: true,
         names: &names,
+        host_key: None,
     };
     let converted = convert(messages, &context, &mut Notes::new(""))?;
     let system = converted.system.map(|blocks| {

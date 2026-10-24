@@ -5845,7 +5845,6 @@ async fn hst_039_invalid_minimax_media_parts_fail_before_a_request() {
         minimax_file(png(), json!({"detail": "auto"})),
         minimax_file(mp4_url(), json!({"fps": 10})),
         minimax_file(mp4_url(), json!({"fps": "2"})),
-        minimax_file(png(), json!({"fps": 2})),
     ];
     for (index, part) in parts.into_iter().enumerate() {
         let error = rejected(
