@@ -1,4 +1,4 @@
-//! Tests for HST-001 to HST-025 in docs/spec/hosts.md. Each test name starts
+//! Tests for HST-001 to HST-041 in docs/spec/hosts.md. Each test name starts
 //! with the requirement it checks; scripts/check-hosts.sh selects them by it.
 //! A recording transport keeps every request the crate sends and answers it
 //! with a reply written in the test, so no request leaves the machine. The
@@ -4824,4 +4824,123 @@ fn hst_031_a_kontext_call_without_a_tokio_runtime_fails_before_a_request() {
     .unwrap_err();
     assert!(matches!(error, Error::Configuration(_)), "{error:?}");
     assert_eq!(transport.count(), 0);
+}
+
+// HST-033 to HST-041: DeepSeek and MiniMax, whole.
+
+/// The options with the provider entry `key` added to their parameters.
+fn with_entry(mut options: StreamOptions, key: &str, value: Value) -> StreamOptions {
+    let params = options.params.take().unwrap_or_default();
+    options.params = Some(params.with_provider_param(key, value));
+    options
+}
+/// Options holding only a `deepseek` entry.
+fn deepseek_entry(value: Value) -> StreamOptions {
+    with_entry(StreamOptions::default(), "deepseek", value)
+}
+
+#[tokio::test]
+async fn hst_033_deepseek_sends_its_options_as_typescript_sends_them() {
+    let body = host_body(
+        "deepseek",
+        "deepseek-v4-flash",
+        vec![user_message("hello")],
+        with_effort(
+            deepseek_entry(json!({"topLogprobs": 3, "userId": "user_1", "reasoningEffort": "xhigh"})),
+            Some("low"),
+        ),
+    )
+    .await;
+    assert_eq!(body["logprobs"], true, "{body}");
+    assert_eq!(body["top_logprobs"], 3, "{body}");
+    assert_eq!(body["user_id"], "user_1", "{body}");
+    assert_eq!(body["reasoning_effort"], "max", "{body}");
+    assert_eq!(body["thinking"], json!({"type": "enabled"}), "{body}");
+    for key in ["topLogprobs", "userId", "reasoningEffort", "deepseek"] {
+        assert!(body.get(key).is_none(), "{key} in {body}");
+    }
+    let body = host_body(
+        "deepseek",
+        "deepseek-v4-flash",
+        vec![user_message("hello")],
+        deepseek_entry(json!({"logprobs": true})),
+    )
+    .await;
+    assert_eq!(body["logprobs"], true, "{body}");
+    assert!(body.get("top_logprobs").is_none(), "{body}");
+    let body = host_body(
+        "deepseek",
+        "deepseek-v4-flash",
+        vec![user_message("hello")],
+        deepseek_entry(json!({"thinking": {"type": "adaptive"}})),
+    )
+    .await;
+    assert_eq!(body["thinking"], json!({"type": "enabled"}), "{body}");
+    // The option's effort wins over the core effort, which still turns
+    // thinking on.
+    let body = host_body(
+        "deepseek",
+        "deepseek-v4-flash",
+        vec![user_message("hello")],
+        with_effort(
+            deepseek_entry(json!({"reasoningEffort": "medium"})),
+            Some("low"),
+        ),
+    )
+    .await;
+    assert_eq!(body["reasoning_effort"], "high", "{body}");
+    assert_eq!(body["thinking"], json!({"type": "enabled"}), "{body}");
+}
+
+#[tokio::test]
+async fn hst_033_the_thinking_option_decides_thinking_and_the_sampling_rule() {
+    // Disabled thinking takes a temperature and sends no effort.
+    let body = host_body(
+        "deepseek",
+        "deepseek-v4-flash",
+        vec![user_message("hello")],
+        with_entry(
+            temperature(0.2),
+            "deepseek",
+            json!({"thinking": {"type": "disabled"}, "reasoningEffort": "high"}),
+        ),
+    )
+    .await;
+    assert_eq!(body["thinking"], json!({"type": "disabled"}), "{body}");
+    assert_eq!(body["temperature"], 0.2, "{body}");
+    assert!(body.get("reasoning_effort").is_none(), "{body}");
+    // Enabled thinking on a model that does not think by itself makes a
+    // temperature fail (HST-009).
+    let message = validation(
+        "deepseek",
+        "deepseek-chat",
+        with_entry(
+            temperature(0.2),
+            "deepseek",
+            json!({"thinking": {"type": "enabled"}}),
+        ),
+    )
+    .await;
+    assert!(message.contains("temperature"), "{message}");
+}
+
+#[tokio::test]
+async fn hst_033_invalid_deepseek_entries_fail_before_a_request() {
+    for value in [
+        json!("fast"),
+        json!({"topLogprobs": 21}),
+        json!({"topLogprobs": 2.5}),
+        json!({"topLogprobs": -1}),
+        json!({"userId": "user 1"}),
+        json!({"userId": "a".repeat(513)}),
+        json!({"userId": ""}),
+        json!({"thinking": {"type": "auto"}}),
+        json!({"thinking": "enabled"}),
+        json!({"reasoningEffort": "minimal"}),
+        json!({"logprobs": "yes"}),
+        json!({"unknown": 1}),
+    ] {
+        let message = validation("deepseek", "deepseek-v4-flash", deepseek_entry(value.clone())).await;
+        assert!(message.contains("deepseek"), "{value}: {message}");
+    }
 }
