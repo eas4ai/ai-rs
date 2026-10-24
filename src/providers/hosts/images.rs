@@ -1,5 +1,6 @@
-//! The image models of Together AI (`togetherai-image-model.ts`, HST-029).
-//! Each call makes one image; `ops::generate_image` makes one call per
+//! The image models of Together AI (`togetherai-image-model.ts`, HST-029)
+//! and DeepInfra (`deepinfra-image-model.ts`, HST-030). Each call makes one
+//! image; `ops::generate_image` makes one call per
 //! image (OPS-003). Warnings that TypeScript returns come back in
 //! `Item.warnings`.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -7,8 +8,10 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Error, Model, Provider,
+    models::files::{self, DEFAULT_MAX_BYTES, DownloadTransport},
     providers::{
         http::{self, ApiProfile},
+        multipart::Multipart,
         operations::{ImageParams, ImagePrompt, Item, MediaInput, Warning},
     },
     types::{
@@ -21,12 +24,15 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Images {
     TogetherAI,
+    DeepInfra,
 }
 
-/// Generate the images of one call.
+/// Generate the images of one call, fetching input image URLs through
+/// `downloads` where the host takes images as bytes.
 pub(crate) async fn generate(
     images: Images,
     api: &'static ApiProfile,
+    downloads: Option<&dyn DownloadTransport>,
     model: &Model,
     prompt: ImagePrompt,
     params: ImageParams,
@@ -34,6 +40,7 @@ pub(crate) async fn generate(
 ) -> Result<Item<Vec<FilePart>>, Error> {
     match images {
         Images::TogetherAI => together(api, model, prompt, params, provider).await,
+        Images::DeepInfra => deepinfra(api, downloads, model, prompt, params, provider).await,
     }
 }
 
@@ -268,4 +275,255 @@ fn transport(provider: &dyn Provider) -> Result<&dyn crate::transport::HttpTrans
             provider.name()
         ))
     })
+}
+
+/// A model id as URL path segments. An id with an empty, `.` or `..`
+/// segment, or a control character, would name another path.
+fn model_path(id: &str) -> Result<Vec<&str>, Error> {
+    let segments: Vec<&str> = id.split('/').collect();
+    if segments
+        .iter()
+        .any(|s| s.is_empty() || *s == "." || *s == ".." || s.chars().any(char::is_control))
+    {
+        return Err(invalid(format!(
+            "{id:?} is not a model id that can go in a URL path"
+        )));
+    }
+    Ok(segments)
+}
+
+/// The bytes and media type of an input image, fetching a URL through the
+/// download transport.
+async fn image_bytes(
+    input: &MediaInput,
+    downloads: Option<&dyn DownloadTransport>,
+    host: &str,
+) -> Result<(Vec<u8>, String), Error> {
+    let download = |url: &str| {
+        let url = url.to_owned();
+        async move {
+            let downloads = downloads.ok_or_else(|| {
+                invalid(format!(
+                    "{host} takes input images as bytes; build the provider with \
+                     with_download_transport to fetch {url}"
+                ))
+            })?;
+            let (bytes, media_type) = files::download(downloads, &url, DEFAULT_MAX_BYTES)
+                .await
+                .map_err(|e| invalid(format!("could not fetch the image {url}: {e}")))?;
+            Ok::<_, Error>((bytes.to_vec(), media_type))
+        }
+    };
+    let detected = |bytes: &[u8]| {
+        media::detect_image_media_type(bytes)
+            .unwrap_or("application/octet-stream")
+            .to_owned()
+    };
+    match input {
+        MediaInput::Bytes(bytes) => Ok((bytes.clone(), detected(bytes))),
+        MediaInput::Url(url) => {
+            let (bytes, media_type) = download(url).await?;
+            let media_type = media_type.unwrap_or_else(|| detected(&bytes));
+            Ok((bytes, media_type))
+        }
+        MediaInput::File(file) => match &file.data {
+            FileData::Bytes(bytes) => Ok((bytes.clone(), file.media_type.clone())),
+            FileData::Text(text) if media::is_downloadable_url(text) => {
+                let (bytes, _) = download(text).await?;
+                Ok((bytes, file.media_type.clone()))
+            }
+            FileData::Text(text) => {
+                let encoded = match media::split_data_url(text) {
+                    (_, Some(data)) => data,
+                    _ => text.as_str(),
+                };
+                let bytes = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| invalid("an input image is neither a URL nor base64 data"))?;
+                Ok((bytes, file.media_type.clone()))
+            }
+        },
+    }
+}
+
+/// The extension of an image media type, for a form filename.
+fn extension(media_type: &str) -> &str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    }
+}
+
+/// An entry value as a form field's text: arrays repeat the field, as
+/// `convertToFormData` does, and `null` sends nothing.
+fn form_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Null => vec![],
+        Value::String(text) => vec![text.clone()],
+        Value::Array(items) => items.iter().flat_map(form_values).collect(),
+        other => vec![other.to_string()],
+    }
+}
+
+/// DeepInfra's images: `POST <root>/inference/<model>`, or with input
+/// images `POST <base>/images/edits` as a form (`deepinfra-image-model.ts`).
+async fn deepinfra(
+    api: &'static ApiProfile,
+    downloads: Option<&dyn DownloadTransport>,
+    model: &Model,
+    prompt: ImagePrompt,
+    params: ImageParams,
+    provider: &dyn Provider,
+) -> Result<Item<Vec<FilePart>>, Error> {
+    let options = entry(&params, "deepinfra")?;
+    for (option, expected, ok) in [
+        (
+            "negative_prompt",
+            "a string",
+            Value::is_string as fn(&Value) -> bool,
+        ),
+        ("num_inference_steps", "a number", Value::is_number),
+        ("guidance_scale", "a number", Value::is_number),
+        ("guidance", "a number", Value::is_number),
+        ("quality", "a string", Value::is_string),
+        ("style", "a string", Value::is_string),
+        ("user", "a string", Value::is_string),
+    ] {
+        typed(&options, "deepinfra", option, expected, ok)?;
+    }
+    typed(&options, "deepinfra", "response_format", "b64_json", |v| {
+        v == "b64_json"
+    })?;
+    let config = provider.config();
+    let (request, edit) = if prompt.images.is_empty() {
+        let base = config.base_url();
+        let root = base
+            .trim_end_matches('/')
+            .strip_suffix("/openai")
+            .ok_or_else(|| {
+                Error::Configuration(format!(
+                    "DeepInfra images go to the root of the base URL, which is the base URL \
+                     without its last segment openai; {base} does not end in /openai"
+                ))
+            })?;
+        let mut path = vec!["inference"];
+        path.extend(model_path(&model.id)?);
+        let mut body = json!({});
+        if let Some(text) = &prompt.text {
+            body["prompt"] = json!(text);
+        }
+        body["num_images"] = json!(params.n);
+        if let Some(ratio) = &params.aspect_ratio {
+            body["aspect_ratio"] = json!(ratio);
+        }
+        if let Some(value) = &params.size {
+            let (width, height) = size(value)?;
+            body["width"] = json!(width.to_string());
+            body["height"] = json!(height.to_string());
+        }
+        if let Some(seed) = params.seed {
+            body["seed"] = json!(seed);
+        }
+        if let Value::Object(fields) = &mut body {
+            fields.extend(options);
+        }
+        let request = http::request_to(
+            api,
+            root,
+            config,
+            "POST",
+            &path,
+            Some(body),
+            Default::default(),
+            Default::default(),
+        )?;
+        (request, false)
+    } else {
+        let mut form = Multipart::new();
+        form.text("model", &model.id);
+        if let Some(text) = &prompt.text {
+            form.text("prompt", text);
+        }
+        for (index, input) in prompt.images.iter().enumerate() {
+            let (bytes, media_type) = image_bytes(input, downloads, "DeepInfra").await?;
+            let name = format!("image-{index}.{}", extension(&media_type));
+            form.file("image", &name, &media_type, &bytes);
+        }
+        if let Some(mask) = &prompt.mask {
+            let (bytes, media_type) = image_bytes(mask, downloads, "DeepInfra").await?;
+            form.file(
+                "mask",
+                &format!("mask.{}", extension(&media_type)),
+                &media_type,
+                &bytes,
+            );
+        }
+        form.text("n", &params.n.to_string());
+        if let Some(size) = &params.size {
+            form.text("size", size);
+        }
+        for (option, value) in &options {
+            for text in form_values(value) {
+                form.text(option, &text);
+            }
+        }
+        let request = http::request(
+            api,
+            config,
+            "POST",
+            &["images", "edits"],
+            None,
+            Default::default(),
+            Default::default(),
+        )?;
+        (form.into_request(request), true)
+    };
+    let response = http::json(
+        api,
+        transport(provider)?,
+        request,
+        provider.name(),
+        Some(&model.id),
+    )
+    .await?;
+    let bad = |what: &str| {
+        http::response_error(
+            provider.name(),
+            format!("DeepInfra image response has no {what}"),
+        )
+    };
+    let images = if edit {
+        response["data"]
+            .as_array()
+            .ok_or_else(|| bad("data"))?
+            .iter()
+            .map(|item| {
+                let text = item["b64_json"].as_str().ok_or_else(|| bad("b64_json"))?;
+                base64_image(provider, text)
+            })
+            .collect::<Result<Vec<_>, Error>>()?
+    } else {
+        response["images"]
+            .as_array()
+            .ok_or_else(|| bad("images"))?
+            .iter()
+            .map(|item| {
+                let text = item.as_str().ok_or_else(|| bad("image text"))?;
+                base64_image(provider, without_data_prefix(text))
+            })
+            .collect::<Result<Vec<_>, Error>>()?
+    };
+    Ok(Item::new(images))
+}
+
+/// An image without a leading `data:image/<type>;base64,`.
+fn without_data_prefix(text: &str) -> &str {
+    text.strip_prefix("data:image/")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .filter(|(kind, _)| {
+            !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map_or(text, |(_, data)| data)
 }

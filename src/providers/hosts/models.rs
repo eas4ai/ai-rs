@@ -78,7 +78,17 @@ impl ProviderProtocol for HostModels {
         let Some(kind) = self.models.images else {
             return Err(Error::UnsupportedOperation("generate_image".into()));
         };
-        images::generate(kind, &self.chat.0.api, model, prompt, params, provider).await
+        let downloads = self.chat.1.as_deref();
+        images::generate(
+            kind,
+            &self.chat.0.api,
+            downloads,
+            model,
+            prompt,
+            params,
+            provider,
+        )
+        .await
     }
     /// Each host's image model makes one image per call.
     fn image_limits(&self, _model: &Model) -> CallLimits {

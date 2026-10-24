@@ -293,7 +293,7 @@ pub(crate) fn transport_error(api: &ApiProfile, provider: &str, error: Transport
 
 /// The message of an error body: `{"error": {"message": ...}}`,
 /// `{"error": "<text>"}` or `{"message": ...}`, the top level first when the
-/// profile says so.
+/// profile says so, or else DeepInfra's `{"detail": {"error": ...}}`.
 pub(crate) fn error_message<'a>(api: &ApiProfile, body: &'a Value) -> Option<&'a str> {
     let text = |value: Option<&'a Value>| {
         value
@@ -305,7 +305,10 @@ pub(crate) fn error_message<'a>(api: &ApiProfile, body: &'a Value) -> Option<&'a
     let top = text(body.get("message"));
     let first = if api.top_level_first { top } else { nested };
     let second = if api.top_level_first { nested } else { top };
-    first.or_else(|| text(error)).or(second)
+    first
+        .or_else(|| text(error))
+        .or(second)
+        .or_else(|| text(body.pointer("/detail/error")))
 }
 
 /// A field of an error body from its `error` object and its top level, in
