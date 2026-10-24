@@ -4515,6 +4515,60 @@ async fn oai_023_result_lines_give_each_outcome() {
     assert!(matches!(results[4].outcome, BatchOutcome::Failed { .. }));
 }
 
+/// A transport that answers a completed batch, then an output file whose
+/// body sends one result line and never ends.
+#[derive(Default)]
+struct OpenEndedResults {
+    requests: Mutex<Vec<HttpRequest>>,
+}
+impl HttpTransport for OpenEndedResults {
+    fn send(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            requests.len() - 1
+        };
+        Box::pin(async move {
+            let body = match index {
+                0 => stream::iter([Ok(Bytes::from(batch_object("completed").to_string()))]).boxed(),
+                _ => {
+                    let line = json!({"custom_id": "c", "error": {"code": "batch_cancelled", "message": "cancelled"}});
+                    stream::iter([Ok(Bytes::from(format!("{line}\n")))])
+                        .chain(stream::pending())
+                        .boxed()
+                }
+            };
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn oai_023_a_result_arrives_before_its_file_ends() {
+    // The results read each file line by line, so a file of any size gives
+    // its first result before the rest of it arrives.
+    let transport = Arc::new(OpenEndedResults::default());
+    let provider = OpenAICompatibleProvider::new(config(), transport.clone());
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        suprnova_ai::ops::batch::results(&provider, "batch_1", Default::default())
+            .await
+            .unwrap()
+            .next()
+            .await
+    })
+    .await
+    .expect("no result before the output file ended")
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.id, "c");
+    // The error file is asked for only after the output file ends.
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
+}
+
 // OAI-024
 
 use suprnova_ai::providers::operations::{
