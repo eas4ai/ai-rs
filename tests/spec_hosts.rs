@@ -5687,3 +5687,177 @@ async fn hst_037_a_file_time_the_clock_cannot_hold_is_left_out() {
         Some("2027-01-15T09:00:00.000Z")
     );
 }
+
+// HST-039
+
+/// The body a MiniMax model sends for these messages; the call must succeed.
+async fn minimax_messages_body(model_id: &str, messages: Vec<Message>) -> Value {
+    let transport = Recorder::new([messages_text()]);
+    let model = model("minimax", model_id, transport.clone());
+    let (_, events) = call(&model, messages, Default::default()).await;
+    ok(&events);
+    transport.body()
+}
+/// The part with this `minimax` metadata.
+fn minimax_file(mut file: FilePart, metadata: Value) -> FilePart {
+    file.provider_metadata = Some([("minimax".to_owned(), metadata)].into());
+    file
+}
+fn mp4_url() -> FilePart {
+    FilePart::from_url("https://v.test/a.mp4", Some("video/mp4")).unwrap()
+}
+
+#[tokio::test]
+async fn hst_039_minimax_3_1_sends_images_and_videos_as_its_own_blocks() {
+    let mut text = TextPart::new("look");
+    text.provider_metadata = Some(
+        [(
+            "minimax".to_owned(),
+            json!({"cacheControl": {"type": "ephemeral"}}),
+        )]
+        .into(),
+    );
+    let message = Message::new(
+        MessageRole::User,
+        vec![
+            Part::Text(text),
+            Part::File(minimax_file(
+                FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap(),
+                json!({"detail": "high"}),
+            )),
+            Part::File(minimax_file(mp4_url(), json!({"fps": 2}))),
+            Part::File(file_id_part("mm_file://abc", "video/mp4")),
+            Part::File(FilePart::from_url(image_url("u"), Some("image/png")).unwrap()),
+        ],
+    );
+    let body = minimax_messages_body("MiniMax-M3.1", vec![message]).await;
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "look", "cache_control": {"type": "ephemeral"}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[1],
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(PNG), "detail": "high"}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[2],
+        json!({"type": "video", "source": {"type": "url", "url": "https://v.test/a.mp4", "fps": 2}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[3],
+        json!({"type": "video", "source": {"type": "url", "url": "mm_file://abc"}}),
+        "{body}"
+    );
+    assert_eq!(
+        content[4],
+        json!({"type": "image", "source": {"type": "url", "url": image_url("u")}}),
+        "{body}"
+    );
+    // The `anthropic` cache control still applies when `minimax` sets none,
+    // and a message's `minimax` cache control marks its last part.
+    let mut anthropic_text = TextPart::new("old");
+    anthropic_text.provider_metadata = Some(
+        [(
+            "anthropic".to_owned(),
+            json!({"cacheControl": {"type": "ephemeral", "ttl": "1h"}}),
+        )]
+        .into(),
+    );
+    let mut message = Message::new(
+        MessageRole::User,
+        vec![Part::Text(anthropic_text), text_part("last")],
+    );
+    message.provider_metadata = Some(
+        [(
+            "minimax".to_owned(),
+            json!({"cacheControl": {"type": "ephemeral"}}),
+        )]
+        .into(),
+    );
+    let body = minimax_messages_body("MiniMax-M3.1", vec![message]).await;
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content[0]["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"}),
+        "{body}"
+    );
+    assert_eq!(
+        content[1]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_039_earlier_minimax_models_keep_the_anthropic_conversion() {
+    // A video fails as the Anthropic adapter fails it.
+    let error = rejected(
+        "minimax",
+        "MiniMax-M2",
+        vec![user_file(mp4_url())],
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    // An image goes as an Anthropic image block, without MiniMax's detail,
+    // and the `minimax` cache control is not read.
+    let mut text = TextPart::new("look");
+    text.provider_metadata = Some(
+        [(
+            "minimax".to_owned(),
+            json!({"cacheControl": {"type": "ephemeral"}}),
+        )]
+        .into(),
+    );
+    let message = Message::new(
+        MessageRole::User,
+        vec![
+            Part::Text(text),
+            Part::File(minimax_file(
+                FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap(),
+                json!({"detail": "high"}),
+            )),
+        ],
+    );
+    let body = minimax_messages_body("MiniMax-M2", vec![message]).await;
+    let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content[0],
+        json!({"type": "text", "text": "look"}),
+        "{body}"
+    );
+    assert_eq!(
+        content[1],
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(PNG)}}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_039_invalid_minimax_media_parts_fail_before_a_request() {
+    let png = || FilePart::from_bytes(PNG.to_vec(), Some("image/png"), None).unwrap();
+    let parts = [
+        file_id_part("mm_file://abc", "image/png"),
+        minimax_file(png(), json!({"detail": "auto"})),
+        minimax_file(mp4_url(), json!({"fps": 10})),
+        minimax_file(mp4_url(), json!({"fps": "2"})),
+        minimax_file(png(), json!({"fps": 2})),
+    ];
+    for (index, part) in parts.into_iter().enumerate() {
+        let error = rejected(
+            "minimax",
+            "MiniMax-M3.1",
+            vec![user_file(part)],
+            Default::default(),
+        )
+        .await;
+        assert!(
+            matches!(error, Error::Validation(_)),
+            "part {index}: {error:?}"
+        );
+    }
+}
