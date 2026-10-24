@@ -38,9 +38,10 @@ struct FileOptions {
 
 /// An id that goes into a URL path as one segment. A URL path drops a `.`
 /// or `..` segment, so such an id, like an empty one, would send the call
-/// to another endpoint.
+/// to another endpoint. The URL parser also drops a tab, CR or LF inside a
+/// segment, so an id with a control character is refused too.
 pub(super) fn path_id<'a>(what: &str, id: &'a str) -> Result<&'a str, Error> {
-    if id.trim().is_empty() || id == "." || id == ".." {
+    if id.trim().is_empty() || id == "." || id == ".." || id.chars().any(char::is_control) {
         return Err(invalid(format!("{id:?} is not an OpenAI {what} id")));
     }
     Ok(id)
