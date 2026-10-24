@@ -1772,6 +1772,8 @@ async fn hst_012_moonshot_schemas_go_out_as_mfjs() {
 #[derive(Default)]
 struct Downloads {
     urls: Mutex<Vec<String>>,
+    /// The headers of each request, in the order of `urls`.
+    headers: Mutex<Vec<Vec<(String, String)>>>,
     text: bool,
     fail: bool,
 }
@@ -1790,6 +1792,7 @@ impl suprnova_ai::models::files::DownloadTransport for Downloads {
         _addresses: Vec<std::net::IpAddr>,
     ) -> BoxFuture<'_, Result<HttpResponse, suprnova_ai::models::files::DownloadError>> {
         self.urls.lock().unwrap().push(request.url);
+        self.headers.lock().unwrap().push(request.headers);
         let (status, content_type, body): (u16, &str, &'static [u8]) = if self.fail {
             (404, "text/plain", b"missing")
         } else if self.text {
@@ -6244,4 +6247,221 @@ async fn hst_040_a_video_call_that_cannot_be_served_fails_before_a_request() {
         .await;
         assert!(matches!(error, Error::Validation(_)), "{entry}: {error:?}");
     }
+}
+
+// HST-041
+
+use suprnova_ai::providers::operations::{VideoJob, VideoStatus};
+
+fn task(status: &str, extra: Value) -> (u16, Vec<u8>) {
+    let mut task = json!({"id": "t1", "status": status});
+    if let (Some(task), Some(extra)) = (task.as_object_mut(), extra.as_object()) {
+        task.extend(extra.clone());
+    }
+    json_reply(json!({"task": task}))
+}
+fn minimax_job(model_id: &str) -> VideoJob {
+    VideoJob {
+        provider: "minimax".into(),
+        model_id: model_id.into(),
+        operation: json!("t1"),
+    }
+}
+async fn minimax_status(replies: Vec<(u16, Vec<u8>)>) -> Result<VideoStatus, Error> {
+    let transport = Recorder::new(replies);
+    let model = minimax_video_model(
+        MINIMAX_URL,
+        "MiniMax-H3",
+        transport,
+        Some(Arc::new(Downloads::default())),
+    );
+    suprnova_ai::ops::video_status(&model, &minimax_job("MiniMax-H3"), Default::default()).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn hst_041_a_job_is_checked_with_the_key_and_its_video_fetched_without_it() {
+    let video_url = "https://cdn.minimax.test/v.mp4";
+    let transport = Recorder::new([
+        json_reply(json!({"task_id": "t1"})),
+        task("running", json!({})),
+        task(
+            "succeeded",
+            json!({"content": {"url": video_url}, "duration": 5, "ratio": "16:9",
+                "resolution": "2K", "usage": {"total_seconds": 5}}),
+        ),
+    ]);
+    let downloads = Arc::new(Downloads::default());
+    let model = minimax_video_model(
+        MINIMAX_URL,
+        "MiniMax-H3",
+        transport.clone(),
+        Some(downloads.clone()),
+    );
+    let prompt = VideoPrompt {
+        text: Some("a cat".into()),
+        image: Some(MediaInput::Bytes(PNG.to_vec())),
+        frame_images: vec![],
+        references: vec![],
+    };
+    let options = suprnova_ai::ops::VideoOptions {
+        poll_interval: std::time::Duration::from_secs(1),
+        ..Default::default()
+    };
+    let item = suprnova_ai::ops::generate_video(&model, prompt, video_params(None), options)
+        .await
+        .unwrap();
+    let requests = transport.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    for request in &requests[1..] {
+        assert_eq!(request.method, "GET");
+        assert_eq!(
+            request.url,
+            "https://api.minimax.io/v2/query/video_generation/t1"
+        );
+        assert!(
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                    && value == "Bearer sk-test"),
+            "{request:?}"
+        );
+    }
+    assert_eq!(*downloads.urls.lock().unwrap(), vec![video_url.to_owned()]);
+    let download_headers = downloads.headers.lock().unwrap()[0].clone();
+    assert!(
+        !download_headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                || value.contains("sk-test")),
+        "{download_headers:?}"
+    );
+    assert_eq!(item.value.len(), 1);
+    assert_eq!(item.value[0].media_type, "video/mp4");
+    assert_eq!(item.value[0].data.as_bytes().unwrap(), &[1, 2, 3]);
+    assert_eq!(
+        item.provider_metadata.as_ref().unwrap()["minimax"],
+        json!({
+            "taskId": "t1", "videoUrl": video_url,
+            "resolvedInputs": {"imageCount": 1, "referenceVideoUrls": []},
+            "duration": 5, "ratio": "16:9", "resolution": "2K", "usage": {"totalSeconds": 5}
+        })
+    );
+    assert!(item.warnings.is_empty(), "{:?}", item.warnings);
+}
+
+#[tokio::test]
+async fn hst_041_a_failed_cancelled_or_expired_task_fails_and_others_are_pending() {
+    let status = minimax_status(vec![task(
+        "failed",
+        json!({"error": {"message": "m", "code": 7}}),
+    )])
+    .await
+    .unwrap();
+    let VideoStatus::Failed { message } = status else {
+        panic!("{status:?}");
+    };
+    for needle in ["m", "7", "t1"] {
+        assert!(message.contains(needle), "{needle}: {message}");
+    }
+    for status in ["cancelled", "expired"] {
+        let result = minimax_status(vec![task(status, json!({}))]).await.unwrap();
+        let VideoStatus::Failed { message } = result else {
+            panic!("{status}: {result:?}");
+        };
+        assert!(message.contains("t1"), "{status}: {message}");
+    }
+    for status in ["queued", "running", "processing"] {
+        let result = minimax_status(vec![task(status, json!({}))]).await.unwrap();
+        assert_eq!(result, VideoStatus::Pending, "{status}");
+    }
+    let completed = minimax_status(vec![task(
+        "succeeded",
+        json!({"content": {"url": "https://cdn.minimax.test/v.mp4"}}),
+    )])
+    .await
+    .unwrap();
+    let VideoStatus::Completed(item) = completed else {
+        panic!("{completed:?}");
+    };
+    assert_eq!(
+        item.value[0].data.as_text(),
+        Some("https://cdn.minimax.test/v.mp4")
+    );
+    assert_eq!(
+        item.provider_metadata.as_ref().unwrap()["minimax"],
+        json!({"taskId": "t1", "videoUrl": "https://cdn.minimax.test/v.mp4"})
+    );
+}
+
+#[tokio::test]
+async fn hst_041_a_missing_task_id_or_url_and_an_error_body_are_reported() {
+    let error = minimax_status(vec![task("succeeded", json!({"content": {}}))])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    assert!(error.to_string().contains("t1"), "{error}");
+    let transport = Recorder::new([json_reply(json!({"object": "task"}))]);
+    let model = minimax_video_model(
+        MINIMAX_URL,
+        "MiniMax-H3",
+        transport,
+        Some(Arc::new(Downloads::default())),
+    );
+    let error = suprnova_ai::ops::start_video(
+        &model,
+        video_prompt("a cat"),
+        video_params(None),
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    let error = minimax_status(vec![(400, br#"{"error": {"message": "bad"}}"#.to_vec())])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)), "{error:?}");
+    assert!(error.to_string().contains("bad"), "{error}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn hst_041_a_minimax_video_model_makes_one_video_per_job() {
+    let done = || {
+        task(
+            "succeeded",
+            json!({"content": {"url": "https://cdn.minimax.test/v.mp4"}}),
+        )
+    };
+    let transport = Recorder::new([
+        json_reply(json!({"task_id": "t1"})),
+        json_reply(json!({"task_id": "t2"})),
+        done(),
+        done(),
+    ]);
+    let model = minimax_video_model(
+        MINIMAX_URL,
+        "MiniMax-H3",
+        transport.clone(),
+        Some(Arc::new(Downloads::default())),
+    );
+    let params = VideoParams {
+        n: 2,
+        ..video_params(None)
+    };
+    let options = suprnova_ai::ops::VideoOptions {
+        poll_interval: std::time::Duration::from_secs(1),
+        ..Default::default()
+    };
+    let item = suprnova_ai::ops::generate_video(&model, video_prompt("a cat"), params, options)
+        .await
+        .unwrap();
+    let starts = transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.ends_with("/v2/video_generation"))
+        .count();
+    assert_eq!(starts, 2);
+    assert_eq!(item.value.len(), 2);
 }
