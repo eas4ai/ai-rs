@@ -4227,9 +4227,14 @@ async fn hst_031_a_failed_or_slow_kontext_job_fails_the_call() {
 
 #[tokio::test]
 async fn hst_031_invalid_fireworks_entries_fail_before_a_request() {
+    // Fireworks' schema takes no null for an option, unlike Together AI's
+    // and DeepInfra's.
     for entry in [
         json!({"output_format": "gif"}),
         json!({"safety_tolerance": 7}),
+        json!({"output_format": null}),
+        json!({"safety_tolerance": null}),
+        json!({"steps": null}),
     ] {
         let transport = Recorder::new([]);
         let error = image(
