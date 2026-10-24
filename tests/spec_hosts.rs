@@ -6516,3 +6516,43 @@ async fn hst_040_a_start_asked_for_several_videos_warns_and_starts_one_job() {
     let (_, item) = minimax_start("MiniMax-H3", video_prompt("a cat"), video_params(None)).await;
     assert!(item.warnings.is_empty(), "{:?}", item.warnings);
 }
+
+#[tokio::test]
+async fn hst_039_an_uploaded_file_id_is_refused_for_a_minimax_image_and_sent_for_a_video() {
+    // An Anthropic `file_` id names an uploaded file too (ANT-010): no image
+    // may name one, and a video's id goes as an mm_file:// URL.
+    let error = rejected(
+        "minimax",
+        "MiniMax-M3.1",
+        vec![user_file(file_id_part("file_abc", "image/png"))],
+        Default::default(),
+    )
+    .await;
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    let body = minimax_messages_body(
+        "MiniMax-M3.1",
+        vec![user_file(file_id_part("file_abc", "video/mp4"))],
+    )
+    .await;
+    assert_eq!(
+        body["messages"][0]["content"][1],
+        json!({"type": "video", "source": {"type": "url", "url": "mm_file://file_abc"}}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hst_038_a_null_minimax_entry_reads_nothing_and_copies_no_metadata() {
+    let transport = Recorder::new([messages_text()]);
+    let model = model("minimax", "MiniMax-M3.1", transport.clone());
+    let (handle, events) = call(
+        &model,
+        vec![user_message("hello")],
+        minimax_entries(None, Some(Value::Null)),
+    )
+    .await;
+    ok(&events);
+    let metadata = handle.message().provider_metadata.clone().unwrap();
+    assert!(!metadata.contains_key("minimax"), "{metadata:?}");
+    assert!(transport.body().get("output_config").is_none());
+}
