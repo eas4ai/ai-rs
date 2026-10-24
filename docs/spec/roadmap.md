@@ -1,6 +1,6 @@
 # Roadmap
 
-Current: fireworks-kontext-downloads
+Current: deepseek-minimax-whole
 
 ## rename-to-suprnova-ai
 
@@ -331,6 +331,33 @@ test to the HST-031 tests in `tests/spec_hosts.rs`, change any existing
 Kontext test that runs without a download transport, and say in the
 Fireworks module doc and `docs/PORT.md` that Kontext needs one. No live
 calls: Kontext is paid, so the check uses recorded requests only.
+
+Done when the hosts, identity and checks mechanisms pass for every
+requirement above, their receipts are current, and the review and the
+adversary report have no open findings.
+
+## deepseek-minimax-whole
+
+Requirements: HST-033, HST-034, HST-035, HST-036, HST-037, HST-038, HST-039, HST-040, HST-041, PKG-002, PKG-006
+
+Port DeepSeek (`@ai-sdk/deepseek` 3.0.70) and MiniMax (`@ai-sdk/minimax`
+3.0.62) whole. DeepSeek: the `deepseek` chat options, message names and
+prefix completion, strict tools on a `/beta` base URL, image parts by file
+id, URL, detail and `file_data`, the final metadata, and the files API
+through `ops::upload_file` on the `providers::hosts::deepseek` provider.
+MiniMax: the `minimax` options and metadata, the 3.1+ image and video parts
+and cache control key, and the H3 video models through
+`ops::generate_video`, `ops::start_video` and `ops::video_status` on the
+`providers::hosts::minimax` provider, which needs a download transport for
+them (`register_with_downloads`). Video calls return TypeScript's warnings
+in `Item.warnings` and make one video per call (OPS-003). Update
+`README.md`, `docs/PORT.md` and the two host module docs. The tests of each
+requirement in `tests/spec_hosts.rs` are named after it, and
+`scripts/check-hosts.sh` reports one result per requirement. Live calls: at
+most four on DeepSeek (`deepseek-v4-flash` chat and one small image
+upload), none on MiniMax, which has no key here, so MiniMax is checked with
+recorded requests only. This is the second of the four commitments that
+port the remaining hosts whole; Mistral and xAI follow.
 
 Done when the hosts, identity and checks mechanisms pass for every
 requirement above, their receipts are current, and the review and the

@@ -546,3 +546,200 @@ Falsifier: A recorded call with two JSON documents, `top_n` 1 and `rankFields: [
 Mechanism: hosts
 Rationale: `reranking/togetherai-reranking-model.ts`.
 Status: Agreed 2026-10-24
+
+## DeepSeek and MiniMax, whole
+
+The rest of `@ai-sdk/deepseek` 3.0.70 and `@ai-sdk/minimax` 3.0.62: DeepSeek's
+own chat options, message options, strict tools, image parts and files API,
+and MiniMax's own options, media parts and video models. A host's own
+options are the entry under its name (`deepseek` or `minimax`) in a call's
+provider params, in a message's or part's provider metadata, or in an
+operation's provider options. A DeepSeek file id is `file-` followed by the
+id, as the files API returns it; a file part names an uploaded file by that
+id as its text data. A MiniMax uploaded video is named by `mm_file://`
+followed by its id the same way.
+
+[HST-033] A DeepSeek chat call MUST read the `deepseek` entry as
+`deepseek-chat-language-model.ts` reads it: `logprobs` true, or any
+`topLogprobs`, MUST send `logprobs: true`, and `topLogprobs` MUST be sent as
+`top_logprobs`; `userId` MUST be sent as `user_id`; `thinking.type` MUST be
+sent as `thinking.type`, with `adaptive` sent as `enabled`, in place of the
+core reasoning setting, and it decides whether thinking is on for HST-009's
+temperature and top-p rule; `reasoningEffort` MUST be sent as
+`reasoning_effort`, with `medium` sent as `high` and `xhigh` as `max`, in
+place of the core effort, and MUST NOT be sent while thinking is disabled. A
+`topLogprobs` that is not an integer from 0 to 20, a `userId` longer than
+512 characters or with a character other than ASCII letters, digits, `_` and
+`-`, a `thinking.type` other than `adaptive`, `enabled` or `disabled`, a
+`reasoningEffort` other than `low`, `medium`, `high`, `xhigh` or `max`, or
+an entry that is not an object MUST fail with `Error::Validation` before any
+request.
+Falsifier: A recorded `deepseek-v4-flash` body for the entry `{"topLogprobs": 3, "userId": "user_1", "reasoningEffort": "xhigh"}` and core effort `low` lacks `logprobs: true`, `top_logprobs: 3`, `user_id: "user_1"` or `reasoning_effort: "max"`; one for `{"logprobs": true}` lacks `logprobs: true` or sends `top_logprobs`; one for `{"thinking": {"type": "adaptive"}}` sends a `thinking.type` other than `enabled`; one for `{"thinking": {"type": "disabled"}, "reasoningEffort": "high"}` with temperature 0.2 lacks `thinking.type: "disabled"` or `temperature: 0.2`, or sends `reasoning_effort`; one for `deepseek-chat` with `{"thinking": {"type": "enabled"}}` and a temperature sends a request or fails with another error kind; or one of the invalid entries sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `deepseek-chat-language-model-options.ts` and `getArgs`; `strictJsonSchema` is not read, since DeepSeek's provider never turns on JSON schema output.
+Status: Agreed 2026-10-24
+
+[HST-034] A DeepSeek message whose `deepseek` metadata holds `name` MUST
+send it as the message's `name` for a system, user or assistant message,
+and leave it out for a tool message. An assistant message whose `deepseek`
+metadata holds `prefix: true` MUST be sent with `prefix: true` when it is
+the last message and the base URL ends in `/beta`; a `prefix` other than
+`true`, on another role, on an assistant message that is not last, or on a
+base URL that does not end in `/beta` MUST fail with `Error::Validation`
+before any request. A strict function tool (`Tool::is_strict`) MUST be sent
+with `strict: true` when the base URL ends in `/beta`; a strict tool on
+another base URL, or a request with a strict and a non-strict function tool,
+MUST fail with `Error::Validation` before any request.
+Falsifier: A recorded body with `name` on a system, a user and an assistant message lacks one of them or sends one on a tool message; a body for a base URL ending in `/beta` whose last assistant message sets `prefix: true` lacks `prefix: true`, or one whose strict tool lacks `strict: true`; or a prefix on a user message, on an assistant message before the last, or on the default base URL, a strict tool on the default base URL, or a strict tool beside a non-strict one on a `/beta` base URL, sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `convert-to-deepseek-chat-messages.ts` and `deepseek-prepare-tools.ts`; `deepseek-provider.ts` turns both beta features on only for a base URL ending in `/beta`.
+Status: Agreed 2026-10-24
+
+[HST-035] A DeepSeek user image part MUST be sent as `image_url` with the
+URL as given, or a data URL for bytes (with `image/jpg` sent as
+`image/jpeg`), and the part's `deepseek` metadata `imageDetail` as `detail`;
+a part whose text data is a DeepSeek file id MUST be sent as `{"type":
+"file", "file_id"}`; and a part with bytes whose metadata holds `fileData:
+true` MUST be sent as `{"type": "file", "file_data": <the data URL>}` with
+its filename as `filename` when it has one. An image URL longer than 8192
+characters, `fileData` on a URL, `fileData` with `imageDetail`, a `fileData`
+other than `true`, or an `imageDetail` other than `low`, `high`, `original`
+or `auto` MUST fail with `Error::Validation` before any request. An image in
+a tool result's content MUST be sent the same way, except that `fileData` is
+not read there.
+Falsifier: A recorded body for a user message with a 100-character image URL and `imageDetail: "high"`, a PNG given as bytes, a PNG given as bytes with `fileData: true` and a filename, and a part with text `file-api-abc123` of type `image/png` sends the URL part other than `{"type": "image_url", "image_url": {"url": <the URL>, "detail": "high"}}`, the bytes other than an `image_url` data URL, the `fileData` part other than `{"type": "file", "file_data": <the data URL>, "filename": <the name>}`, or the id other than `{"type": "file", "file_id": "file-api-abc123"}`; a tool result with such an id and an image URL with `imageDetail: "low"` sends other parts; or one of the invalid parts sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `convert-to-deepseek-chat-messages.ts` and `deepseek-file-part-options.ts`; HST-010 keeps the media types.
+Status: Agreed 2026-10-24
+
+[HST-036] The final message of a DeepSeek call MUST carry a `deepseek`
+metadata entry with `promptCacheHitTokens` and `promptCacheMissTokens` from
+the usage, `responseObject`, `choiceIndex`, `messageRole`, `toolCallTypes`
+(the `type` of each tool call, in index order), `logprobs` with the
+`content` and `reasoning_content` entries the choices carried, and
+`systemFingerprint`, each absent when the response did not report it.
+Falsifier: A recorded stream whose chunks carry `object: "chat.completion.chunk"`, `system_fingerprint: "fp_1"`, a choice index 0, a delta role `assistant`, one function tool call, two content logprobs and a usage with `prompt_cache_hit_tokens` 60 and `prompt_cache_miss_tokens` 40 ends with a final message whose `deepseek` metadata lacks `promptCacheHitTokens: 60`, `promptCacheMissTokens: 40`, `responseObject: "chat.completion.chunk"`, `choiceIndex: 0`, `messageRole: "assistant"`, `toolCallTypes: ["function"]`, the two logprobs under `logprobs.content` or `systemFingerprint: "fp_1"`; or a stream without logprobs or a fingerprint reports them.
+Mechanism: hosts
+Rationale: The `finish` part of `doStream` in `deepseek-chat-language-model.ts`.
+Status: Agreed 2026-10-24
+
+[HST-037] `ops::upload_file` with the DeepSeek provider MUST send `POST
+<base>/files` as multipart with the file (and its filename when it has
+one), `purpose: user_data`, and, for a `deepseek` option `expiresAfter`,
+`expires_after[anchor]: created_at` and `expires_after[seconds]`, and return
+the `deepseek` provider reference of the response's `id`, the response's
+filename else the given one, the given media type, the size (`bytes`), the
+creation and expiry times (`created_at` and `expires_at` seconds, as RFC
+3339) and the metadata `{object, filename, purpose, bytes, createdAt,
+expiresAt}`, each absent when the response lacks it. Before any request it
+MUST fail with `Error::Validation` when the file is larger than 64 MiB, the
+filename is longer than 512 characters, the file's detected media type is
+not GIF, JPEG, PNG or WebP, the declared media type (before any `;`,
+trimmed, in lower case) is neither one of those nor generic (empty,
+`application/binary`, `application/octet-stream`, `binary/octet-stream`,
+`image` or `image/*`), or it is generic while no type is detected and the
+filename does not end in `.gif`, `.jpg`, `.jpeg`, `.png` or `.webp`; and
+when `expiresAfter` is not an integer from 3600 to 2592000. File info,
+download and delete MUST fail with `Error::UnsupportedOperation` before any
+request.
+Falsifier: A recorded upload of a PNG named `a.png` with `expiresAfter: 3600` goes to another URL, sends another form, or returns other than the reference `deepseek` to the response's id, the response's filename, `image/png`, the response's `bytes`, `created_at` and `expires_at`, or the stated metadata; a 65 MiB file, a 513-character filename, a PNG declared `application/pdf`, a file declared `image/jpeg` whose bytes are a PDF, `application/octet-stream` bytes with no detectable type named `a.bin`, or `expiresAfter: 60` sends a request or fails with another error kind; `application/octet-stream` PNG bytes, or bytes with no detectable type named `a.webp`, fail; or file info, download or delete sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `deepseek-files.ts`, which uploads only.
+Status: Agreed 2026-10-24
+
+[HST-038] A MiniMax call MUST read the `minimax` entry with the rules of
+the `anthropic` entry, each key of `minimax` over the same key of
+`anthropic`, and an `effort` in either entry MUST win over the core
+reasoning setting of HST-007. When the call's provider params hold a
+`minimax` entry, the final message's `anthropic` metadata MUST also be given
+under `minimax`.
+Falsifier: A recorded `MiniMax-M3.1` body for `{"anthropic": {"effort": "high"}, "minimax": {"effort": "low"}}` sends an effort other than `low`; one for `{"minimax": {"effort": "medium"}}` and disabled core reasoning sends an effort other than `medium` or a `thinking` field; a `MiniMax-M2` body for `{"minimax": {"thinking": {"type": "disabled"}}}` lacks `thinking.type: "disabled"`; or a stream for a call with a `minimax` entry ends with a final message without a `minimax` metadata entry equal to its `anthropic` one, or one for a call without the entry ends with a `minimax` metadata entry.
+Mechanism: hosts
+Rationale: `anthropic-language-model.ts` reads a host's own key beside `anthropic` and names its metadata after it when the key was used; `minimax-chat-language-model.ts` skips its effort mapping when either entry sets `effort`.
+Status: Agreed 2026-10-24
+
+[HST-039] For a MiniMax model of version 3.1 or later, a user file part of
+an `image/*` or `video/*` media type MUST be sent as `{"type": "image" |
+"video", "source"}` with the source `{"type": "base64", "media_type",
+"data"}` for bytes, `{"type": "url", "url"}` for a URL, and `{"type": "url",
+"url": <the text>}` for a video whose text data starts with `mm_file://`;
+the part's `minimax` metadata `detail` (`low`, `default` or `high`) for an
+image and `fps` (0.2 to 5) for a video MUST go into the source; and such a
+model MUST read a part's or message's cache control (ANT-015) from its
+`minimax` metadata before its `anthropic` metadata. An image whose text data
+starts with `mm_file://`, or a `detail` or `fps` outside those values, MUST
+fail with `Error::Validation` before any request. Other media types, and
+every file part for an earlier model, MUST be sent as the Anthropic adapter
+sends them.
+Falsifier: A recorded `MiniMax-M3.1` body for a user message with a PNG given as bytes and `detail: "high"`, an `https` MP4 URL with `fps: 2`, a video part with text `mm_file://abc`, and a text part with `minimax.cacheControl` sends other blocks than `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": <base64>, "detail": "high"}}`, `{"type": "video", "source": {"type": "url", "url": <the URL>, "fps": 2}}` and `{"type": "video", "source": {"type": "url", "url": "mm_file://abc"}}`, or lacks `cache_control` on the text; a `MiniMax-M2` body with an MP4 sends a request or fails with another error kind; or an image with text `mm_file://abc`, `detail: "auto"` or `fps: 10` sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `convert-to-minimax-media-part.ts`, `minimax-media-options.ts`, and the `cacheControlProviderOptionsName` of `minimax-chat-language-model.ts`.
+Status: Agreed 2026-10-24
+
+MiniMax's video API takes a resolution tier, so `minimax-video-model.ts`
+maps a core resolution to one through a closed table: `480x480`,
+`1120x480`, `854x480`, `640x480`, `480x854` and `480x640` are `480P`;
+`768x768`, `1792x768`, `1366x768`, `1024x768`, `768x1366` and `768x1024`
+are `768P`; and `2048x2048`, `2560x1080`, `2560x1440`, `2048x1536`,
+`1440x2560` and `1536x2048` are `2K`. A core resolution that names a tier
+in any case is that tier. A text-to-video call is one whose content holds
+the prompt alone.
+
+[HST-040] `ops::generate_video` and `ops::start_video` with the MiniMax
+provider MUST send `POST <root>/v2/video_generation` with `authorization:
+Bearer <key>`, where the root is the base URL without its trailing
+`/anthropic`, and `{"model", "content", "resolution", "duration", "ratio",
+"aigc_watermark"}`. `content` MUST start with `{"type": "text", "text": <the
+prompt, or "">}`, then the first frame (the `first_frame` frame image, else
+the image) and the last frame as `{"type": "image_url", "image_url":
+{"url"}, "role": "first_frame" | "last_frame"}`, or, without frames and for a
+model other than `MiniMax-H3-Max`, the references by media type as
+`image_url` with role `reference_image` (at most 9) and `video_url` with
+role `reference_video` (at most 3), then the `minimax` option
+`referenceAudioUrls` as `audio_url` with role `reference_audio` (at most 3,
+only beside a reference image or video); a URL goes as given and bytes as a
+data URL of their media type. The `minimax` options `resolution` (`480P`,
+`768P` or `2K`) and `ratio` (`adaptive`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`
+or `9:16`) MUST win over the core resolution and aspect ratio; the
+resolution MUST be one the model supports (`MiniMax-H3`: `768P` and `2K`,
+default `2K`; `MiniMax-H3-Max`: `480P` and `768P`, default `768P`; other
+models: all three, default `2K`); a text-to-video call MUST default its
+ratio to `16:9` and MUST NOT send `adaptive`; a call with frames MUST send no
+ratio; the duration MUST default to 5 and be clamped to 4 to 15 for
+`MiniMax-H3` and 5 to 15 otherwise; and `aigcWatermark` MUST be sent as
+`aigc_watermark`. What TypeScript warns about MUST be returned in
+`Item.warnings` and left out: a frame or reference that is not an image or
+video, a last frame without a first, references with frames or on
+`MiniMax-H3-Max`, references past a limit, a reference URL without a media
+type (sent as an image), audio without a reference image or video, a
+resolution the model does not support or the table does not name, an
+aspect ratio outside the list or ignored, a clamped duration, and `fps`,
+`seed` and `generate_audio`. Before any request the call MUST fail with
+`Error::Validation` when the provider has no download transport, bare bytes
+have no detectable image media type, a `minimax` option has another type or
+value than stated, or the entry holds `pollIntervalMs` or `pollTimeoutMs`,
+which `VideoOptions` sets in this crate; and with `Error::Configuration`
+when the base URL does not end in `/anthropic`.
+Falsifier: A recorded `MiniMax-H3` call with the prompt `a cat`, no media and no options goes to another URL or credential, or sends a body other than `{"model": "MiniMax-H3", "content": [{"type": "text", "text": "a cat"}], "resolution": "2K", "duration": 5, "ratio": "16:9"}`; a `MiniMax-H3-Max` call with a PNG first frame, a JPEG last frame, a duration of 20, the core resolution `1366x768` and aspect ratio `1:1` sends other than two `image_url` data URL parts with roles `first_frame` and `last_frame`, `resolution: "768P"` and `duration: 15`, sends a `ratio`, or lacks the duration and aspect ratio warnings; a `MiniMax-H3` call with two image URL references, one `video/mp4` URL reference, four `referenceAudioUrls`, the options `ratio: "adaptive"` and `aigcWatermark: true`, and a duration of 3 sends other than two `reference_image`, one `reference_video` and three `reference_audio` parts, `ratio: "adaptive"`, `aigc_watermark: true` and `duration: 4`, or lacks the audio and duration warnings; a `MiniMax-H3-Max` call with a reference sends it or lacks its warning; a call with `fps`, `seed` and `generate_audio` sends one of them or lacks their warnings; or a call on a provider without a download transport, on the base URL `https://proxy.test/v1`, with bytes that are no image, with the option `resolution: "1080P"`, or with `pollTimeoutMs: 1000`, sends a request or fails with another error kind.
+Mechanism: hosts
+Rationale: `getArgs` and `doStart` in `minimax-video-model.ts`; `minimax-provider.ts` roots video calls at `https://api.minimax.io`, the Messages base URL without `/anthropic`; the download transport is checked before a job is started and billed, as HST-031 checks it; TypeScript's `webhookUrl` has no core counterpart.
+Status: Agreed 2026-10-24
+
+[HST-041] A MiniMax video job MUST be the start response's `task_id`, and
+its status `GET <root>/v2/query/video_generation/<task_id>` with the bearer
+key: `task.status` `succeeded` completes with one `video/mp4` file part at
+`task.content.url`, which `generate_video` downloads through the download
+transport without the key; `failed`, `cancelled` and `expired` fail with a
+message naming the task id and, for `failed`, the task's error message and
+code; any other status is pending. The completed item's `minimax` metadata
+MUST hold `taskId`, `videoUrl`, `resolvedInputs` (`imageCount`, the frame
+and reference images sent, and `referenceVideoUrls`, the URL references
+sent as videos), and `duration`, `ratio`, `resolution` and `usage`
+(`totalSeconds`, `inputSeconds` and `outputSeconds`) when the task reports
+them. A start response without `task_id`, or a `succeeded` task without a
+URL, MUST fail with `Error::Provider`, and an error body's `error.message`
+MUST be the error's message. A MiniMax video model makes one video per call.
+Falsifier: A scripted job for a call with one first frame whose start returns `task_id: "t1"` and whose status is `running`, then `succeeded` with a `content.url` on another origin, `duration` 5, `ratio` `16:9`, `resolution` `2K` and `usage.total_seconds` 5, is checked at another URL or without the key, is reported other than pending then completed, fetches the URL with the key or not through the download transport, or completes with other `minimax` metadata than `{taskId: "t1", videoUrl: <the URL>, resolvedInputs: {imageCount: 1, referenceVideoUrls: []}, duration: 5, ratio: "16:9", resolution: "2K", usage: {totalSeconds: 5}}`; a `failed` task with error message `m` and code 7 does not fail with a message holding `m`, `7` and `t1`; a `cancelled` or `expired` task does not fail; a start response without `task_id` or a `succeeded` task without a URL gives another error kind; an HTTP 400 body `{"error": {"message": "bad"}}` gives another message; or `n` of 2 makes other than two jobs.
+Mechanism: hosts
+Rationale: `doStatus` and `doGenerate` in `minimax-video-model.ts`; TypeScript's core fetches a result URL without credentials, and its `pollIntervalMs` and `pollTimeoutMs` are `VideoOptions` here (OPS-004).
+Status: Agreed 2026-10-24
