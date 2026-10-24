@@ -2774,6 +2774,39 @@ fn chat_body(model: &str, messages: Vec<Message>, options: &StreamOptions) -> Va
 }
 
 #[test]
+fn oai_014_openai_params_merge_into_the_openai_options() {
+    use suprnova_ai::providers::openai::OpenAIParams;
+    // No store leaves the call's parameters as they are: no `store: null`,
+    // which the options refuse.
+    let params = OpenAIParams::default().apply(InferenceRequestParams::default());
+    assert_eq!(params.provider_params, None);
+    let options = StreamOptions {
+        params: Some(params),
+        ..Default::default()
+    };
+    assert!(
+        chat_body("gpt-4.1", vec![user("hi")], &options)
+            .get("store")
+            .is_none()
+    );
+    // A store joins the options already there, on both APIs.
+    let mut options = openai(json!({"user": "u"}));
+    options.params = options
+        .params
+        .map(|p| OpenAIParams { store: Some(false) }.apply(p));
+    for body in [
+        chat_body("gpt-4.1", vec![user("hi")], &options),
+        body_for("gpt-4.1", vec![user("hi")], &options),
+    ] {
+        assert_eq!(
+            (&body["user"], &body["store"]),
+            (&json!("u"), &json!(false)),
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn oai_014_each_chat_option_goes_out_under_its_wire_name() {
     let cases = [
         (

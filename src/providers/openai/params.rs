@@ -14,8 +14,22 @@ pub struct OpenAIParams {
 }
 impl OpenAIParams {
     pub const KEY: &str = "openai";
-    pub fn apply(self, params: InferenceRequestParams) -> InferenceRequestParams {
-        params.with_provider_param(Self::KEY, json!({"store":self.store}))
+    /// Merge these options into the call's `openai` provider parameters,
+    /// keeping the options already there. With `store` `None` the
+    /// parameters stay as they are.
+    pub fn apply(self, mut params: InferenceRequestParams) -> InferenceRequestParams {
+        if let Some(store) = self.store {
+            let options = params
+                .provider_params
+                .get_or_insert_with(Default::default)
+                .entry(Self::KEY.to_owned())
+                .or_insert_with(|| json!({}));
+            // Another value is not OpenAI options, and the call refuses it.
+            if let Value::Object(options) = options {
+                options.insert("store".into(), json!(store));
+            }
+        }
+        params
     }
 }
 pub(super) fn invalid(message: impl Into<String>) -> Error {

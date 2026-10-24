@@ -29,7 +29,8 @@
 //! those hosts directly. An explicit
 //! protocol overrides the default. Custom providers using
 //! these protocols implement `Provider::shared_transport` for owned streams.
-//! `params::OpenAIParams::apply` stores options under the stable `openai` key.
+//! `params::OpenAIParams::apply` merges `store` into the options under the
+//! stable `openai` key.
 //! Built-in tool arguments use snake_case JSON objects, as in the Python wire format.
 //!
 //! The language models are `OpenAIResponsesProtocol` (the default),
