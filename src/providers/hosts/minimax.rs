@@ -9,10 +9,14 @@
 //! images and videos as `image` and `video` blocks with the part's `minimax`
 //! `detail` or `fps`, a video `mm_file://` id as a URL, and cache control
 //! from `minimax` metadata before `anthropic`. Older models keep the
-//! Anthropic mapping and conversion.
+//! Anthropic mapping and conversion. The video models (`MiniMax-H3`,
+//! `MiniMax-H3-Max`) run as jobs through `ops::generate_video` at the root
+//! of the base URL, and need a download transport for the finished video
+//! (`register_with_downloads`).
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
+    models::files::DownloadTransport,
     providers::{
         anthropic::protocol::MessagesProfile,
         http::{ApiProfile, Auth},
@@ -62,7 +66,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.minimax.io/anthropic",
     api_key_env: "MINIMAX_API_KEY",
     protocol: HostProtocol::Messages(&PROFILE),
-    models: Models::CHAT,
+    models: Models::MINIMAX,
 };
 
 /// Whether a model id names MiniMax 3.1 or later, read as the TypeScript SDK
@@ -99,13 +103,27 @@ pub fn provider(config: ProviderConfig, transport: Arc<dyn HttpTransport>) -> Ho
 }
 
 /// Register the MiniMax provider under `minimax` and `@ai-sdk/minimax`, with
-/// snapshot restoration that uses this transport.
+/// snapshot restoration that uses this transport. Its video models need a
+/// download transport: use [`register_with_downloads`].
 pub fn register(
     registry: &mut ProviderRegistry,
     config: ProviderConfig,
     transport: Arc<dyn HttpTransport>,
 ) -> Result<(), Error> {
     super::register(&HOST, registry, config, transport, None)
+}
+
+/// [`register`] with the download transport that fetches a finished video,
+/// which comes from another origin than the base URL; a video call on a
+/// provider without one fails with `Error::Validation` before its job
+/// starts.
+pub fn register_with_downloads(
+    registry: &mut ProviderRegistry,
+    config: ProviderConfig,
+    transport: Arc<dyn HttpTransport>,
+    downloads: Arc<dyn DownloadTransport>,
+) -> Result<(), Error> {
+    super::register(&HOST, registry, config, transport, Some(downloads))
 }
 
 #[cfg(test)]

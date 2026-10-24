@@ -38,7 +38,9 @@
 //! `ops::generate_image` and, for Together AI, `ops::rerank` work with the
 //! provider's models. DeepSeek reads its `deepseek` options entry, message
 //! options and image parts as its package does (HST-033 to HST-036), and
-//! `ops::upload_file` uploads images to its files API (HST-037).
+//! `ops::upload_file` uploads images to its files API (HST-037). MiniMax
+//! reads its `minimax` entry and 3.1's media blocks (HST-038, HST-039), and
+//! `ops::generate_video` runs its video models as jobs (HST-040, HST-041).
 //! `list_models` and `probe` return `Error::UnsupportedOperation` for every
 //! host.
 use crate::{
@@ -72,6 +74,7 @@ mod models;
 pub mod moonshotai;
 mod rerank;
 pub mod togetherai;
+mod video;
 pub mod xai;
 pub mod zai;
 
@@ -163,6 +166,8 @@ pub(crate) struct Models {
     /// DeepSeek's files API, upload only (HST-037), which the provider
     /// serves.
     pub files: bool,
+    /// MiniMax's video model (HST-040, HST-041).
+    pub videos: Option<video::Videos>,
 }
 impl Models {
     /// The language model alone.
@@ -171,10 +176,16 @@ impl Models {
         images: None,
         reranking: false,
         files: false,
+        videos: None,
     };
     /// DeepSeek's: the language model and the files API.
     pub(crate) const DEEPSEEK: Self = Self {
         files: true,
+        ..Self::CHAT
+    };
+    /// MiniMax's: the language model and the video model.
+    pub(crate) const MINIMAX: Self = Self {
+        videos: Some(video::Videos::MiniMax),
         ..Self::CHAT
     };
     /// DeepInfra's: embeddings and images.
@@ -183,6 +194,7 @@ impl Models {
         images: Some(images::Images::DeepInfra),
         reranking: false,
         files: false,
+        videos: None,
     };
     /// Fireworks': embeddings and images.
     pub(crate) const FIREWORKS: Self = Self {
@@ -190,6 +202,7 @@ impl Models {
         images: Some(images::Images::Fireworks),
         reranking: false,
         files: false,
+        videos: None,
     };
     /// Together AI's: embeddings, images and reranking.
     pub(crate) const TOGETHER_AI: Self = Self {
@@ -197,10 +210,11 @@ impl Models {
         images: Some(images::Images::TogetherAI),
         reranking: true,
         files: false,
+        videos: None,
     };
     /// Whether the host serves a model kind beside its language model.
     fn beside_chat(self) -> bool {
-        self.embeddings || self.images.is_some() || self.reranking
+        self.embeddings || self.images.is_some() || self.reranking || self.videos.is_some()
     }
 }
 impl Host {
@@ -221,6 +235,9 @@ impl Host {
         match self.protocol {
             HostProtocol::Chat(profile) if self.models.beside_chat() => Arc::new(
                 models::HostModels::new(HostChatProtocol(profile, downloads), self.models),
+            ),
+            HostProtocol::Messages(profile) if self.models.beside_chat() => Arc::new(
+                models::MessagesModels::new(HostMessagesProtocol(profile), self.models),
             ),
             _ => self.protocol.protocol(downloads),
         }
@@ -290,16 +307,18 @@ impl HostProvider {
     }
     /// Download the media URLs that a Chat Completions host cannot fetch
     /// before each request: images, videos and text for Moonshot AI, audio
-    /// and PDFs for the hosts that take them as OpenAI does; and for image
+    /// and PDFs for the hosts that take them as OpenAI does; for image
     /// calls, the image URLs DeepInfra edits and a Fireworks Kontext result
-    /// on another origin than the base URL, which comes without the key.
+    /// on another origin than the base URL, which comes without the key;
+    /// and for MiniMax video calls, the video, which comes the same way.
     /// Without one, such a URL fails with `Error::Validation`, and so does
-    /// every Fireworks Kontext call, before its job starts, wherever its
-    /// result would be. Responses and Messages hosts send no downloaded media
-    /// and ignore it. Download transports must honor the core DNS-pinning
-    /// contract. A snapshot does not keep the transport; a restore through a
-    /// registry made with the host module's `register_with_downloads`
-    /// (Moonshot AI, DeepInfra and Fireworks) gets it back.
+    /// every Fireworks Kontext call and every MiniMax video call, before its
+    /// job starts, wherever its result would be. Responses hosts send no
+    /// downloaded media and ignore it. Download transports must honor the
+    /// core DNS-pinning contract. A snapshot does not keep the transport; a
+    /// restore through a registry made with the host module's
+    /// `register_with_downloads` (Moonshot AI, DeepInfra, Fireworks and
+    /// MiniMax) gets it back.
     #[must_use]
     pub fn with_download_transport(mut self, downloads: Arc<dyn DownloadTransport>) -> Self {
         self.downloads = Some(downloads);
@@ -328,6 +347,9 @@ impl Provider for HostProvider {
     }
     fn is_configured(&self) -> bool {
         self.api_key().is_some_and(|key| !key.is_empty()) && self.config.is_configured()
+    }
+    fn download_transport(&self) -> Option<Arc<dyn DownloadTransport>> {
+        self.downloads.clone()
     }
     /// Upload a file to a host with a files API (DeepSeek, HST-037). File
     /// info, download and delete stay unsupported, as the TypeScript package
