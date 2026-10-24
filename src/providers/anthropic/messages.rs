@@ -853,9 +853,114 @@ pub(crate) fn convert(
     prune_callers(&mut out, last_user, notes);
     Ok(Converted {
         system,
-        messages: out,
+        messages: place_system(out, notes)?,
         betas,
     })
+}
+
+/// Whether Anthropic takes a system message with content after this
+/// message: a user message, or an assistant message that ends in a server
+/// tool result.
+fn takes_system_after(message: &Value) -> bool {
+    match message["role"].as_str() {
+        Some("user") => true,
+        Some("assistant") => message["content"]
+            .as_array()
+            .and_then(|content| content.last())
+            .and_then(|block| block["type"].as_str())
+            .is_some_and(|kind| kind.ends_with("_tool_result") && kind != "tool_result"),
+        _ => false,
+    }
+}
+
+/// Put each run of later system messages where Anthropic takes it (ANT-011).
+/// A run with content stays when it follows a user message, or an assistant
+/// message that ends in a server tool result, and comes before an assistant
+/// message or ends the history. Elsewhere it moves to just after the last
+/// user message before the next assistant message or the end, and the user
+/// messages it separated go as one. A run of effort-only messages renders
+/// nothing, and Anthropic takes it anywhere.
+fn place_system(messages: Vec<Value>, notes: &mut Notes) -> Result<Vec<Value>, Error> {
+    let role = |m: &Value| m["role"].as_str().map(str::to_owned);
+    let roles: Vec<Option<String>> = messages.iter().map(role).collect();
+    // The role of the first message from `i` on that is not a system message.
+    let next_role = |i: usize| {
+        roles[i..]
+            .iter()
+            .find(|r| r.as_deref() != Some("system"))
+            .cloned()
+            .flatten()
+    };
+    let no_user = || {
+        Error::Validation(
+            "a system message with content needs a user message after it: Anthropic takes one \
+             only after a user message or a server tool result, and before the model's reply"
+                .into(),
+        )
+    };
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut pending: Vec<Value> = Vec::new();
+    let mut messages = messages.into_iter().enumerate().peekable();
+    while let Some((i, mut message)) = messages.next() {
+        match roles[i].as_deref() {
+            Some("system") => {
+                let mut run = vec![message];
+                while let Some((_, next)) =
+                    messages.next_if(|(j, _)| roles[*j].as_deref() == Some("system"))
+                {
+                    run.push(next);
+                }
+                let end = i + run.len();
+                let content = run
+                    .iter()
+                    .any(|m| m["content"].as_array().is_some_and(|c| !c.is_empty()));
+                let after = out
+                    .iter()
+                    .rev()
+                    .find(|m| m["role"] != "system")
+                    .is_some_and(takes_system_after);
+                let before = matches!(
+                    roles.get(end).cloned().flatten().as_deref(),
+                    None | Some("assistant")
+                );
+                if !content || (pending.is_empty() && after && before) {
+                    out.extend(run);
+                } else {
+                    notes.note(
+                        "system message",
+                        "Anthropic does not take a system message with content here; it moves to \
+                         just after the last user message before the model's reply",
+                    );
+                    pending.extend(run);
+                }
+            }
+            Some("user") => {
+                match out.last_mut() {
+                    Some(last) if last["role"] == "user" => {
+                        if let (Some(merged), Value::Array(content)) =
+                            (last["content"].as_array_mut(), message["content"].take())
+                        {
+                            merged.extend(content);
+                        }
+                    }
+                    _ => out.push(message),
+                }
+                if matches!(next_role(i + 1).as_deref(), None | Some("assistant")) {
+                    out.append(&mut pending);
+                }
+            }
+            _ => {
+                if !pending.is_empty() {
+                    return Err(no_user());
+                }
+                out.push(message);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        return Err(no_user());
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
