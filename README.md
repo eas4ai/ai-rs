@@ -170,7 +170,8 @@ with Together AI's. Image calls make one image each and return the TypeScript
 warnings in `Item.warnings`; DeepInfra fetches input image URLs, and Fireworks
 a Kontext result on another server, through the provider's download
 transport: register them with `register_with_downloads`, or build one with
-`provider(...).with_download_transport(...)`.
+`provider(...).with_download_transport(...)`. A Fireworks Kontext call
+without a download transport fails before its job starts.
 Hosts do not support `list_models` or `probe`.
 
 `providers::google` is the Gemini API and `providers::google_vertex` is Vertex

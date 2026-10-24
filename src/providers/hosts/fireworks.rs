@@ -4,7 +4,9 @@
 //! `serviceTier`, `thinking` and `reasoningHistory`, sent under Fireworks'
 //! names, and any other Fireworks field as it is. Its models also complete
 //! text (`completion_protocol`), embed, and generate images, polling the
-//! Kontext models' jobs.
+//! Kontext models' jobs. A Kontext result is usually on another server, so a
+//! Kontext call needs a download transport (`register_with_downloads`) and
+//! fails with `Error::Validation` before the job starts without one.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
@@ -84,9 +86,9 @@ pub fn register(
     super::register(&HOST, registry, config, transport, None)
 }
 
-/// Register the Fireworks provider as `register` does, with a download
-/// transport that fetches Kontext results on another origin than the base URL, also for a provider restored from a
-/// snapshot.
+/// Register the Fireworks provider as `register` does, with the download
+/// transport a Kontext call needs to fetch its result from another origin
+/// than the base URL, also for a provider restored from a snapshot.
 pub fn register_with_downloads(
     registry: &mut ProviderRegistry,
     config: ProviderConfig,

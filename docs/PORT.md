@@ -181,9 +181,10 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   TypeScript sends `NaN` or the split text; Fireworks' chat entry values are
   checked, and its image options refuse `null`, where TypeScript sends them
   unchecked; Fireworks images leave out the size or aspect ratio they warn
-  about, which TypeScript sends; a Fireworks Kontext result on another
-  origin than the base URL is fetched without the key through the download
-  transport, so it needs one, where TypeScript fetches it itself; Fireworks
+  about, which TypeScript sends; a Fireworks Kontext call needs a download
+  transport and fails with `Error::Validation` before its job starts without
+  one, and fetches a result on another origin than the base URL through it
+  without the key, where TypeScript fetches the result itself; Fireworks
   image errors take the body's message, where TypeScript uses the HTTP
   status text; and the deprecated `openai-compatible` entry is not read.
 - Chat Completions tool call deltas without an index, as Mistral and Moonshot

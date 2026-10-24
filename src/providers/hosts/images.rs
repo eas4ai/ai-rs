@@ -687,8 +687,16 @@ async fn fireworks(
         )
     };
     let (bytes, declared) = if kontext {
-        // The poll needs a timer; check before a job is started and billed.
+        // The poll needs a timer, and the sample, usually on a CDN, the
+        // download transport; check both before a job is started and billed.
         crate::models::call::require_timer()?;
+        let downloads = downloads.ok_or_else(|| {
+            invalid(
+                "a Fireworks Kontext model's result is fetched through the download transport; \
+                 build the provider with with_download_transport or register it with \
+                 register_with_downloads",
+            )
+        })?;
         let submitted = http::json(
             api,
             transport,
@@ -798,7 +806,7 @@ fn any_type() -> std::collections::BTreeMap<String, String> {
 /// origin, through the download transport without it from another.
 async fn download_sample(
     api: &'static ApiProfile,
-    downloads: Option<&dyn DownloadTransport>,
+    downloads: &dyn DownloadTransport,
     sample: &str,
     provider: &dyn Provider,
     model_id: &str,
@@ -833,12 +841,6 @@ async fn download_sample(
             http::read_body_with_limit(api, provider.name(), response, DEFAULT_MAX_BYTES).await?;
         return Ok((bytes.to_vec(), content_type(&headers)));
     }
-    let downloads = downloads.ok_or_else(|| {
-        invalid(format!(
-            "the Fireworks sample {sample} is on another origin than the base URL; build the \
-             provider with with_download_transport to fetch it without the key"
-        ))
-    })?;
     let (bytes, media_type) = files::download(downloads, sample, DEFAULT_MAX_BYTES)
         .await
         .map_err(|e| {
