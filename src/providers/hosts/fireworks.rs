@@ -54,7 +54,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.fireworks.ai/inference/v1",
     api_key_env: "FIREWORKS_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
-    models: Models::EMBEDDINGS,
+    models: Models::FIREWORKS,
 };
 
 /// Build the Fireworks provider. An unset base URL becomes `https://api.fireworks.ai/inference/v1` and an
