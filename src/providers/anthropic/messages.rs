@@ -522,7 +522,18 @@ fn builtin_result(
                "content": value})
     } else {
         match name {
-            "code_execution" => code_execution_result(result)?,
+            "code_execution" => {
+                let Some(block) = code_execution_result(result) else {
+                    notes.note(
+                        "provider tool result",
+                        format!(
+                            "the result of code execution call {id} is not a valid code execution result; it is left out"
+                        ),
+                    );
+                    return None;
+                };
+                block
+            }
             "web_fetch" if result.is_error => json!({"type": "web_fetch_tool_result",
                 "tool_use_id": id, "content": {"type": "web_fetch_tool_result_error",
                 "error_code": error_code(value)}}),
