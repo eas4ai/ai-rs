@@ -1171,6 +1171,9 @@ pub(super) struct History<'a> {
     pub quoted_results: &'a [String],
     /// The provider tools the application runs (OAI-010).
     pub host_tools: &'a super::tools::CallTools,
+    /// The call goes to a DeepSeek base URL ending in `/beta`, which takes
+    /// an assistant prefix (HST-034).
+    pub deepseek_beta: bool,
 }
 
 impl<'a> History<'a> {
@@ -1187,6 +1190,7 @@ impl<'a> History<'a> {
             previous_response: false,
             quoted_results: &[],
             host_tools: &super::tools::NO_CALL_TOOLS,
+            deepseek_beta: false,
         }
     }
 }
@@ -1248,6 +1252,12 @@ pub(super) fn convert(
     let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
     let mut out = vec![];
     for (index, msg) in messages.into_iter().enumerate() {
+        // DeepSeek names a message and prefixes the last assistant one from
+        // the message's `deepseek` metadata (HST-034).
+        let deepseek = match dialect {
+            Dialect::DeepSeek => Some(super::deepseek::MessageOptions::parse(&msg)?),
+            _ => None,
+        };
         match msg.role {
             MessageRole::System => {
                 if openai_responses && let Some(update) = effort_update(&msg, &history)? {
@@ -1271,7 +1281,11 @@ pub(super) fn convert(
                         }]),
                         None => json!(text),
                     };
-                    out.push(json!({"role":role,"content":content}));
+                    let mut entry = json!({"role":role,"content":content});
+                    if let Some(deepseek) = &deepseek {
+                        deepseek.name(&mut entry);
+                    }
+                    out.push(entry);
                 }
             }
             MessageRole::User => {
@@ -1287,7 +1301,11 @@ pub(super) fn convert(
                     && !msg.parts.iter().any(|p| matches!(p, Part::File(_)))
                     && breakpoints.iter().all(Option::is_none)
                 {
-                    out.push(json!({"role":"user","content":msg.text()}));
+                    let mut entry = json!({"role":"user","content":msg.text()});
+                    if let Some(deepseek) = &deepseek {
+                        deepseek.name(&mut entry);
+                    }
+                    out.push(entry);
                     continue;
                 }
                 let mut content = vec![];
@@ -1304,7 +1322,11 @@ pub(super) fn convert(
                     }
                     content.push(item);
                 }
-                out.push(json!({"role":"user","content":content}));
+                let mut entry = json!({"role":"user","content":content});
+                if let Some(deepseek) = &deepseek {
+                    deepseek.name(&mut entry);
+                }
+                out.push(entry);
             }
             MessageRole::Assistant if !responses => {
                 let mut entry = json!({"role":"assistant"});
@@ -1368,6 +1390,10 @@ pub(super) fn convert(
                         entry["content"] = Value::Null;
                     }
                     entry["tool_calls"] = calls.into();
+                }
+                if let Some(deepseek) = &deepseek {
+                    deepseek.name(&mut entry);
+                    deepseek.prefix(&mut entry, index == last, history.deepseek_beta)?;
                 }
                 out.push(entry);
             }

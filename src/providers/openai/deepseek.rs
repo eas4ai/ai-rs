@@ -1,9 +1,12 @@
 //! DeepSeek's own request rules beyond the dialect's field names, as
 //! `@ai-sdk/deepseek` 3.0.70 sends them: the `deepseek` options entry of a
-//! chat call (HST-033). A value outside an option's schema, or an option
-//! name the entry does not take, fails with `Error::Validation` before any
-//! request, as the OpenAI and Anthropic option entries do; TypeScript's
-//! schema strips an unknown name.
+//! chat call (HST-033), and the message names, the assistant prefix and the
+//! strict tools that a base URL ending in `/beta` turns on (HST-034). A
+//! value outside an option's schema, or an option name the call's entry does
+//! not take, fails with `Error::Validation` before any request, as the
+//! OpenAI and Anthropic option entries do; TypeScript's schema strips an
+//! unknown name. A message's metadata may carry other keys, which are passed
+//! over.
 
 use serde_json::{Map, Value, json};
 
@@ -11,7 +14,11 @@ use super::{
     dialect::{self, Effort},
     params::invalid,
 };
-use crate::{Error, models::params::InferenceRequestParams};
+use crate::{
+    Error, ProviderConfig,
+    models::params::InferenceRequestParams,
+    types::{Message, MessageRole, Tool, tools::ToolKind},
+};
 
 /// The `deepseek` entry of a chat call (`deepseekLanguageModelChatOptions`).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -174,4 +181,120 @@ impl Options {
             body.insert("user_id".into(), json!(user));
         }
     }
+}
+
+/// Whether a base URL turns DeepSeek's beta features on, the assistant
+/// prefix and strict tools: it ends in `/beta` (`deepseek-provider.ts`).
+pub(super) fn beta(config: &ProviderConfig) -> bool {
+    config.base_url().trim_end_matches('/').ends_with("/beta")
+}
+
+/// The `deepseek` metadata of a message
+/// (`deepseekAssistantMessageProviderOptions`): a `name` for a system, user
+/// or assistant message, and `prefix: true` for the last assistant message
+/// of a call to a `/beta` base URL (HST-034).
+#[derive(Debug, Default)]
+pub(super) struct MessageOptions {
+    name: Option<String>,
+    prefix: bool,
+}
+
+impl MessageOptions {
+    pub(super) fn parse(message: &Message) -> Result<Self, Error> {
+        let Some(entry) = message
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("deepseek"))
+        else {
+            return Ok(Self::default());
+        };
+        let Value::Object(entry) = entry else {
+            return Err(invalid("deepseek message metadata must be an object"));
+        };
+        let name = match entry.get("name") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.clone()),
+            Some(other) => {
+                return Err(invalid(format!(
+                    "deepseek message option name must be a string, not {other}"
+                )));
+            }
+        };
+        let prefix = match entry.get("prefix") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(true)) => true,
+            Some(other) => {
+                return Err(invalid(format!(
+                    "deepseek message option prefix must be true, not {other}"
+                )));
+            }
+        };
+        if prefix && message.role != MessageRole::Assistant {
+            return Err(invalid(
+                "DeepSeek assistant prefix completion requires prefix: true on an assistant message",
+            ));
+        }
+        Ok(Self { name, prefix })
+    }
+
+    /// Put the name on a message entry; a tool message takes none.
+    pub(super) fn name(&self, entry: &mut Value) {
+        if let Some(name) = &self.name {
+            entry["name"] = json!(name);
+        }
+    }
+
+    /// Put the prefix on an assistant message entry, which must be the last
+    /// message of a call to a `/beta` base URL.
+    pub(super) fn prefix(&self, entry: &mut Value, last: bool, beta: bool) -> Result<(), Error> {
+        if !self.prefix {
+            return Ok(());
+        }
+        if !last {
+            return Err(invalid(
+                "DeepSeek assistant prefix completion requires the prefixed assistant message to be the final message",
+            ));
+        }
+        if !beta {
+            return Err(invalid(
+                "DeepSeek assistant prefix completion requires a base URL ending in /beta",
+            ));
+        }
+        entry["prefix"] = json!(true);
+        Ok(())
+    }
+}
+
+/// Strict function tools (`deepseek-prepare-tools.ts`): each strict tool
+/// goes with `strict: true` on a `/beta` base URL; a strict tool on another
+/// base URL, or beside a function tool that is not strict, fails.
+pub(super) fn strict_tools(
+    tools: &[Tool],
+    body: &mut Map<String, Value>,
+    beta: bool,
+) -> Result<(), Error> {
+    let functions: Vec<&Tool> = tools
+        .iter()
+        .filter(|tool| tool.kind == ToolKind::Function)
+        .collect();
+    let strict = functions.iter().filter(|tool| tool.is_strict()).count();
+    if strict == 0 {
+        return Ok(());
+    }
+    if !beta {
+        return Err(invalid(
+            "DeepSeek strict tool calls require a base URL ending in /beta",
+        ));
+    }
+    if strict != functions.len() {
+        return Err(invalid(
+            "DeepSeek strict mode requires every function tool in the request to be strict",
+        ));
+    }
+    if let Some(sent) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in sent.iter_mut().filter(|tool| tool["type"] == "function") {
+            tool["function"]["strict"] = json!(true);
+        }
+    }
+    Ok(())
 }
