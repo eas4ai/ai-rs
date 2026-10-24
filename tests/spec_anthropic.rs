@@ -2709,7 +2709,9 @@ async fn ant_011_a_system_message_after_assistant_text_moves_after_the_next_user
         "{body}"
     );
     assert!(
-        betas.iter().any(|b| b == "mid-conversation-system-2026-04-07"),
+        betas
+            .iter()
+            .any(|b| b == "mid-conversation-system-2026-04-07"),
         "{betas:?}"
     );
     assert_eq!(moves(&logs), 1);

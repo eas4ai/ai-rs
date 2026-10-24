@@ -9,10 +9,11 @@ use suprnova_ai::{
 };
 
 #[tokio::test]
-async fn system_messages_go_first_or_in_place_and_roles_merge() {
+async fn system_messages_go_first_or_after_a_user_message_and_roles_merge() {
     // The first system message is the top-level system text; a later one
-    // goes in place (ANT-011). The model's limit is the default output
-    // limit (ANT-003).
+    // before a user message moves after it, and the user messages it
+    // separated go as one (ANT-011). The model's limit is the default
+    // output limit (ANT-003).
     let (body, _) = capture(
         vec![
             suprnova_ai::system_message("First instruction."),
@@ -31,9 +32,8 @@ async fn system_messages_go_first_or_in_place_and_roles_merge() {
     assert_eq!(
         body["messages"],
         json!([
-            {"role":"user","content":[{"type":"text","text":"Hi"},{"type":"text","text":"Again"}]},
-            {"role":"system","content":[{"type":"text","text":"Second instruction."}]},
-            {"role":"user","content":[{"type":"text","text":"Last"}]}
+            {"role":"user","content":[{"type":"text","text":"Hi"},{"type":"text","text":"Again"},{"type":"text","text":"Last"}]},
+            {"role":"system","content":[{"type":"text","text":"Second instruction."}]}
         ])
     );
     assert_eq!(body["max_tokens"], 128000);
