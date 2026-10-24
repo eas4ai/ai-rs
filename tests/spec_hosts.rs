@@ -3575,3 +3575,112 @@ async fn hst_027_completion_errors_read_as_the_hosts_chat_errors() {
         assert_eq!(error.kind, kind, "HTTP {status}");
     }
 }
+
+// HST-028
+
+/// A server that answers each embedding request with one embedding per
+/// input value, `[i, len]` for the value at index `i`.
+#[derive(Default)]
+struct EmbedServer {
+    requests: Mutex<Vec<HttpRequest>>,
+}
+impl HttpTransport for EmbedServer {
+    fn send(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        self.requests.lock().unwrap().push(request);
+        let count = body["input"].as_array().map_or(0, Vec::len);
+        let data: Vec<Value> = (0..count)
+            .map(|i| json!({"object": "embedding", "index": i, "embedding": [i as f64, count as f64]}))
+            .collect();
+        let reply = json!({"object": "list", "data": data, "usage": {"prompt_tokens": count}});
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: stream::iter([Ok(Bytes::from(reply.to_string()))]).boxed(),
+            })
+        })
+    }
+}
+
+fn embed_params(entry: Option<(&str, Value)>) -> suprnova_ai::providers::operations::EmbedParams {
+    suprnova_ai::providers::operations::EmbedParams {
+        provider_options: entry
+            .map(|(key, value)| [(key.to_owned(), value)].into())
+            .unwrap_or_default(),
+    }
+}
+
+#[tokio::test]
+async fn hst_028_each_host_embeds_on_the_compatible_protocol() {
+    for (name, url) in [
+        ("togetherai", "https://api.together.xyz/v1/embeddings"),
+        (
+            "deepinfra",
+            "https://api.deepinfra.com/v1/openai/embeddings",
+        ),
+        (
+            "fireworks",
+            "https://api.fireworks.ai/inference/v1/embeddings",
+        ),
+    ] {
+        let server = Arc::new(EmbedServer::default());
+        let mut registry = ProviderRegistry::new();
+        (host(name).register)(&mut registry, key_config(), server.clone()).unwrap();
+        let model = Model::new("some-embedder", registry.get_provider(name).unwrap());
+        let item = suprnova_ai::ops::embed(
+            &model,
+            vec!["a".into(), "b".into()],
+            embed_params(Some((name, json!({"dimensions": 256})))),
+            Default::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_eq!(item.value, vec![vec![0.0, 2.0], vec![1.0, 2.0]], "{name}");
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{name}");
+        assert_eq!(requests[0].url, url, "{name}");
+        let auth = requests[0]
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(auth, Some("Bearer sk-test"), "{name}");
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body,
+            json!({"model": "some-embedder", "input": ["a", "b"], "encoding_format": "float", "dimensions": 256}),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hst_028_a_host_takes_2048_values_per_call() {
+    let server = Arc::new(EmbedServer::default());
+    let mut registry = ProviderRegistry::new();
+    togetherai::register(&mut registry, key_config(), server.clone()).unwrap();
+    let model = Model::new(
+        "some-embedder",
+        registry.get_provider("togetherai").unwrap(),
+    );
+    let values: Vec<String> = (0..2049).map(|i| format!("v{i}")).collect();
+    let item = suprnova_ai::ops::embed(&model, values, embed_params(None), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(item.value.len(), 2049);
+    let mut sizes: Vec<usize> = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["input"]
+                .as_array()
+                .unwrap()
+                .len()
+        })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, vec![1, 2048]);
+}
