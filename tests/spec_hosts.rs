@@ -3865,3 +3865,146 @@ async fn hst_029_a_mask_fails_before_a_request() {
     assert!(matches!(error, Error::Validation(_)), "{error:?}");
     assert_eq!(transport.count(), 0);
 }
+
+// HST-030
+
+#[tokio::test]
+async fn hst_030_deepinfra_generates_at_its_inference_url() {
+    let transport = Recorder::new([json_reply(
+        json!({"images": [format!("data:image/png;base64,{}", b64(PNG))]}),
+    )]);
+    let item = image(
+        "deepinfra",
+        "black-forest-labs/FLUX-1-schnell",
+        transport.clone(),
+        prompt("a cat", vec![], None),
+        image_params(
+            Some("1024x768"),
+            Some("16:9"),
+            Some(7),
+            Some(("deepinfra", json!({"num_inference_steps": 4}))),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.request().url,
+        "https://api.deepinfra.com/v1/inference/black-forest-labs/FLUX-1-schnell"
+    );
+    assert_eq!(
+        transport.body(),
+        json!({"prompt": "a cat", "num_images": 1, "aspect_ratio": "16:9", "width": "1024",
+            "height": "768", "seed": 7, "num_inference_steps": 4})
+    );
+    assert_eq!(png_bytes(&item.value[0]), PNG);
+}
+
+#[tokio::test]
+async fn hst_030_deepinfra_edits_images_as_a_form() {
+    let transport = Recorder::new([json_reply(json!({"data": [{"b64_json": b64(PNG)}]}))]);
+    let item = image(
+        "deepinfra",
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        transport.clone(),
+        prompt(
+            "a cat",
+            vec![
+                MediaInput::Bytes(PNG.to_vec()),
+                MediaInput::Bytes(PNG.to_vec()),
+            ],
+            Some(MediaInput::Bytes(PNG.to_vec())),
+        ),
+        image_params(
+            Some("512x512"),
+            None,
+            None,
+            Some(("deepinfra", json!({"guidance": 3}))),
+        ),
+    )
+    .await
+    .unwrap();
+    let request = transport.request();
+    assert_eq!(
+        request.url,
+        "https://api.deepinfra.com/v1/openai/images/edits"
+    );
+    let form = String::from_utf8_lossy(&request.body).into_owned();
+    for (field, count) in [
+        ("name=\"model\"", 1),
+        ("name=\"prompt\"", 1),
+        ("name=\"image\"", 2),
+        ("name=\"mask\"", 1),
+        ("name=\"n\"", 1),
+        ("name=\"size\"", 1),
+        ("name=\"guidance\"", 1),
+    ] {
+        assert_eq!(form.matches(field).count(), count, "{field} in {form}");
+    }
+    assert!(
+        form.contains("black-forest-labs/FLUX.1-Kontext-dev"),
+        "{form}"
+    );
+    assert_eq!(png_bytes(&item.value[0]), PNG);
+}
+
+#[tokio::test]
+async fn hst_030_an_image_url_without_a_download_transport_fails_before_a_request() {
+    let transport = Recorder::new([]);
+    let error = image(
+        "deepinfra",
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        transport.clone(),
+        prompt(
+            "a cat",
+            vec![MediaInput::Url("https://img.test/a.png".into())],
+            None,
+        ),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Validation(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+}
+
+#[tokio::test]
+async fn hst_030_a_base_url_not_ending_in_openai_fails_before_a_request() {
+    let transport = Recorder::new([]);
+    let config = ProviderConfig {
+        default_base_url: "https://api.deepinfra.com/v1".into(),
+        ..key_config()
+    };
+    let model = Model::new(
+        "black-forest-labs/FLUX-1-schnell",
+        Arc::new(deepinfra::provider(config, transport.clone())),
+    );
+    let error = suprnova_ai::ops::generate_image(
+        &model,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Configuration(_)), "{error:?}");
+    assert_eq!(transport.count(), 0);
+}
+
+#[tokio::test]
+async fn hst_030_deepinfra_image_errors_give_their_message() {
+    let transport = Recorder::new([(400, br#"{"detail": {"error": "bad size"}}"#.to_vec())]);
+    let error = image(
+        "deepinfra",
+        "black-forest-labs/FLUX-1-schnell",
+        transport,
+        prompt("a cat", vec![], None),
+        image_params(None, None, None, None),
+    )
+    .await
+    .unwrap_err();
+    let Error::Provider(error) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(error.message, "bad size");
+    assert_eq!(error.kind, ProviderErrorKind::BadRequest);
+}
