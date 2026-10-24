@@ -250,7 +250,16 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   fallback or container upload block is an empty text part with `anthropic`
   metadata. MiniMax and Vertex AI's Anthropic models share these rules with
   their own settings. A batch's `results_url` on another origin than the
-  base URL is refused, so the key stays with it.
+  base URL is refused, so the key stays with it. Other changes a caller
+  sees: a file in a tool result that is not an image or a PDF, such as a
+  text file, is left out and logged; a tool choice without tools is not
+  sent; and a message without a stop reason finishes as `other`. Two
+  changes to the crate's own API: `WebSearchOptions` gains
+  `response_inclusion` and `WebFetchOptions` gains `use_cache` and
+  `response_inclusion`, for the 2026-03-18 web tools, so a struct literal
+  of either must end with `..Default::default()`; and the public constant
+  `tools::BETA_HEADERS` is gone, because each tool version now adds its own
+  beta.
 - `providers::google` and `providers::google_vertex` port the TypeScript
   Google packages, which Python lacks, with every model kind. Settings those
   packages drop with a warning fail with `Error::Validation`; operations return
