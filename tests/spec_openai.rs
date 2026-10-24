@@ -5469,6 +5469,61 @@ async fn oai_027_another_property_names_fails_before_a_request() {
 }
 
 #[tokio::test]
+async fn oai_003_a_compatible_server_gets_no_organization_or_project() {
+    // The headers go to OpenAI only; an OpenAI-compatible server without a
+    // host profile is not OpenAI.
+    use suprnova_ai::providers::openai::{OpenAICompletionsProtocol, OpenAIEmbeddingProtocol};
+    let transport = Recorder::new([
+        chat_reply(),
+        completion_stream(&["a"], "stop"),
+        embeddings_reply(1, 1),
+    ]);
+    let metadata: suprnova_ai::providers::ModelsDevProvider = serde_json::from_value(
+        json!({"id": "my-server", "name": "my-server", "api": "https://local.test/v1", "env": [], "npm": "@ai-sdk/openai-compatible", "models": {}}),
+    )
+    .unwrap();
+    let provider = Arc::new(
+        OpenAICompatibleProvider::from_modelsdev_provider(
+            &metadata,
+            org_config(),
+            transport.clone(),
+        )
+        .unwrap(),
+    );
+    run(
+        &Model::new("llama", provider.clone()),
+        StreamOptions::default(),
+    )
+    .await
+    .unwrap();
+    run(
+        &Model::new("llama", provider.clone())
+            .with_protocol(Arc::new(OpenAICompletionsProtocol::compatible(true))),
+        StreamOptions::default(),
+    )
+    .await
+    .unwrap();
+    suprnova_ai::ops::embed(
+        &Model::new("nomic-embed", provider)
+            .with_protocol(Arc::new(OpenAIEmbeddingProtocol::compatible(1, false))),
+        vec!["a".into()],
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    for index in 0..3 {
+        assert!(url(&transport, index).starts_with("https://local.test/v1/"));
+        assert_eq!(
+            header(&transport, index, "OpenAI-Organization"),
+            None,
+            "{index}"
+        );
+        assert_eq!(header(&transport, index, "OpenAI-Project"), None, "{index}");
+    }
+}
+
+#[tokio::test]
 async fn oai_003_every_operation_uses_its_path_key_organization_and_project() {
     use suprnova_ai::providers::openai::{OpenAICompletionsProtocol, OpenAIDecisionsProtocol};
     use suprnova_ai::providers::operations::{

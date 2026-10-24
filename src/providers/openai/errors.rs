@@ -19,6 +19,13 @@ pub(crate) const API: http::ApiProfile = http::ApiProfile {
     ],
 };
 
+/// The API of an OpenAI-compatible server: OpenAI's, without OpenAI's
+/// organization and project headers (OAI-003).
+pub(crate) const COMPATIBLE_API: http::ApiProfile = http::ApiProfile {
+    config_headers: &[],
+    ..API
+};
+
 /// Map a transport failure to a provider error that keeps it as the source.
 pub fn map_transport(error: TransportError, provider: &str) -> Error {
     http::transport_error(&API, provider, error)

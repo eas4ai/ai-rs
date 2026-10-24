@@ -4,7 +4,8 @@
 //! Construct a provider with explicit configuration and a shared transport. Register
 //! handles and snapshot factories explicitly; no process environment is read.
 //! The `env` values `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` set the
-//! `OpenAI-Organization` and `OpenAI-Project` headers.
+//! `OpenAI-Organization` and `OpenAI-Project` headers of OpenAI's own
+//! requests; an OpenAI-compatible server gets neither.
 //!
 //! ```
 //! use std::sync::Arc;

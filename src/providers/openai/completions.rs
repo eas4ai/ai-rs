@@ -396,8 +396,13 @@ fn request(
     if let Some(extra) = &p.extra_body {
         body.extend(extra.clone());
     }
+    // An OpenAI-compatible server gets no OpenAI organization or project.
+    let api = match protocol.compatible {
+        Some(_) => &errors::COMPATIBLE_API,
+        None => &errors::API,
+    };
     http_request(
-        &errors::API,
+        api,
         "POST",
         provider.config(),
         &["completions"],

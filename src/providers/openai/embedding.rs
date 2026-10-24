@@ -147,8 +147,13 @@ pub(super) async fn embed(
     if let Some(user) = options.user {
         body["user"] = json!(user);
     }
+    // An OpenAI-compatible server gets no OpenAI organization or project.
+    let api = match protocol.compatible {
+        Some(_) => &errors::COMPATIBLE_API,
+        None => &errors::API,
+    };
     let request = http_request(
-        &errors::API,
+        api,
         "POST",
         provider.config(),
         &["embeddings"],
