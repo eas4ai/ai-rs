@@ -148,6 +148,11 @@ impl Models {
         embeddings: true,
         images: None,
     };
+    /// DeepInfra's: embeddings and images.
+    pub(crate) const DEEPINFRA: Self = Self {
+        embeddings: true,
+        images: Some(images::Images::DeepInfra),
+    };
     /// Together AI's: embeddings and images.
     pub(crate) const TOGETHER_AI: Self = Self {
         embeddings: true,

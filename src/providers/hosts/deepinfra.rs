@@ -52,7 +52,7 @@ pub(super) static HOST: Host = Host {
     default_base_url: "https://api.deepinfra.com/v1/openai",
     api_key_env: "DEEPINFRA_API_KEY",
     protocol: HostProtocol::Chat(&PROFILE),
-    models: Models::EMBEDDINGS,
+    models: Models::DEEPINFRA,
 };
 
 /// Build the DeepInfra provider. An unset base URL becomes `https://api.deepinfra.com/v1/openai` and an
