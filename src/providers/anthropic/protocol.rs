@@ -56,6 +56,10 @@ pub(crate) struct MessagesProfile {
     /// entry's rules and over it, and of the copy of the final metadata a
     /// call that used the entry gets (HST-038).
     pub options_key: Option<&'static str>,
+    /// Whether a model takes the host's own image and video blocks, with
+    /// their options and its cache control under `options_key`, and sends
+    /// video URLs as URLs (HST-039).
+    pub host_media: fn(&str) -> bool,
 }
 
 const ANTHROPIC_RULES: MessagesProfile = MessagesProfile {
@@ -68,6 +72,7 @@ const ANTHROPIC_RULES: MessagesProfile = MessagesProfile {
     max_temperature: |_| 1.0,
     sampling_with_thinking: |_| false,
     options_key: None,
+    host_media: |_| false,
 };
 
 /// The Messages API of any server, as `AnthropicMessagesProtocol` speaks it:
@@ -367,6 +372,7 @@ pub(crate) fn request_parts(
         &messages::Context {
             send_reasoning,
             names: &names,
+            host_key: profile.options_key.filter(|_| (profile.host_media)(model)),
         },
         &mut notes,
     )?;
@@ -866,14 +872,17 @@ pub(crate) fn request_parts(
     })
 }
 
-/// Whether a user file goes to Anthropic by URL: images and PDFs; another
-/// file given by URL is downloaded first.
-fn sent_by_url(media_type: &str) -> bool {
-    media_type.starts_with("image/") || media_type == "application/pdf"
+/// Whether a user file goes to the server by URL: images and PDFs, and
+/// videos for a model with the host's media blocks; another file given by
+/// URL is downloaded first.
+fn sent_by_url(media_type: &str, host_media: bool) -> bool {
+    media_type.starts_with("image/")
+        || media_type == "application/pdf"
+        || (host_media && media_type.starts_with("video/"))
 }
-fn download_url(part: &Part) -> Option<&str> {
+fn download_url(part: &Part, host_media: bool) -> Option<&str> {
     match part {
-        Part::File(file) if !sent_by_url(&file.media_type) => file
+        Part::File(file) if !sent_by_url(&file.media_type, host_media) => file
             .data
             .as_text()
             .filter(|url| crate::types::media::is_downloadable_url(url)),
@@ -882,12 +891,12 @@ fn download_url(part: &Part) -> Option<&str> {
 }
 /// The messages with each file to download given as empty bytes, to check
 /// the request before any download; `None` when there is none.
-fn without_downloads(messages: &[Message]) -> Option<Vec<Message>> {
+fn without_downloads(messages: &[Message], host_media: bool) -> Option<Vec<Message>> {
     let mut found = false;
     let mut messages = messages.to_vec();
     for msg in messages.iter_mut().filter(|m| m.role == MessageRole::User) {
         for part in &mut msg.parts {
-            if download_url(part).is_some()
+            if download_url(part, host_media).is_some()
                 && let Part::File(file) = part
             {
                 file.data = FileData::Bytes(Vec::new());
@@ -902,10 +911,11 @@ async fn download_files(
     mut messages: Vec<Message>,
     transport: &dyn DownloadTransport,
     label: &str,
+    host_media: bool,
 ) -> Result<Vec<Message>, Error> {
     for msg in messages.iter_mut().filter(|m| m.role == MessageRole::User) {
         for part in &mut msg.parts {
-            let Some(url) = download_url(part).map(str::to_owned) else {
+            let Some(url) = download_url(part, host_media).map(str::to_owned) else {
                 continue;
             };
             let (bytes, _) = crate::models::files::download(
@@ -961,10 +971,11 @@ async fn prepare(
     options: &StreamOptions,
     streaming: bool,
 ) -> Result<(HttpRequest, Reading), Error> {
-    let messages = match (&downloads, without_downloads(&messages)) {
+    let host_media = (profile.host_media)(model_id);
+    let messages = match (&downloads, without_downloads(&messages, host_media)) {
         (Some(downloads), Some(inline)) => {
             request_parts(profile, model_id, &inline, options, streaming)?;
-            download_files(messages, downloads.as_ref(), profile.api.label).await?
+            download_files(messages, downloads.as_ref(), profile.api.label, host_media).await?
         }
         _ => messages,
     };

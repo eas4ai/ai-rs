@@ -1,8 +1,15 @@
 //! MiniMax over the Anthropic Messages protocol, at `<base>/v1/messages` with
-//! `x-api-key` and `anthropic-version: 2023-06-01`. MiniMax 3.1 and later
-//! (`MiniMax-M3.1`, `minimax-m4`) always reason: a reasoning effort goes out as
+//! `x-api-key` and `anthropic-version: 2023-06-01`, as `@ai-sdk/minimax`
+//! 3.0.62 sends it. The `minimax` options entry is read with the `anthropic`
+//! entry's rules and over it, and a call that used it gets its final
+//! metadata under `minimax` too. MiniMax 3.1 and later (`MiniMax-M3.1`,
+//! `minimax-m4`) always reason: a reasoning effort goes out as
 //! `output_config.effort` with `minimal` as `low`, and disabled reasoning
-//! becomes effort `low`. Older models keep the Anthropic mapping.
+//! becomes effort `low`; an `effort` in either entry wins. They take user
+//! images and videos as `image` and `video` blocks with the part's `minimax`
+//! `detail` or `fps`, a video `mm_file://` id as a URL, and cache control
+//! from `minimax` metadata before `anthropic`. Older models keep the
+//! Anthropic mapping and conversion.
 use super::{Host, HostProtocol, HostProvider, Models};
 use crate::{
     Error, ProviderConfig, ProviderRegistry,
@@ -44,6 +51,9 @@ static PROFILE: MessagesProfile = MessagesProfile {
     // The `minimax` entry is read over the `anthropic` one, and a call that
     // used it gets its final metadata under `minimax` too (HST-038).
     options_key: Some("minimax"),
+    // MiniMax 3.1 and later take image and video blocks with `detail` and
+    // `fps`, and read cache control under `minimax` first (HST-039).
+    host_media: names_version_3_1_or_later,
 };
 
 pub(super) static HOST: Host = Host {
