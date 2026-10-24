@@ -187,6 +187,25 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   without the key, where TypeScript fetches the result itself; Fireworks
   image errors take the body's message, where TypeScript uses the HTTP
   status text; and the deprecated `openai-compatible` entry is not read.
+  DeepSeek and MiniMax bring every model kind of their TypeScript packages
+  too: DeepSeek's `deepseek` chat options, message names, the assistant
+  prefix and strict tools of a `/beta` base URL, image parts with
+  `imageDetail` and `fileData`, the `deepseek` metadata of the final message
+  and file uploads through `ops::upload_file`; MiniMax's `minimax` entry read
+  over `anthropic`, the image and video blocks of MiniMax 3.1 and later, and
+  its video models as jobs through `ops::generate_video`. Departures: the
+  `deepseek` chat entry, DeepSeek's file options and MiniMax's video options
+  refuse an option name their schemas do not take, where TypeScript strips
+  it; DeepSeek's final metadata comes beside the `openai` entry every Chat
+  Completions host gets; a MiniMax video call needs a download transport and
+  fails with `Error::Validation` before its job starts without one, fetches
+  the finished video through it without the key as TypeScript's core does,
+  fails with `Error::Validation` on the `pollIntervalMs` and `pollTimeoutMs`
+  options, since `ops::generate_video` polls by its `VideoOptions`, has no
+  `webhookUrl`, and makes `n` videos as `n` jobs where TypeScript warns and
+  makes one; and a MiniMax video goes to the base URL without its last
+  segment `anthropic`, so a base URL that does not end in `/anthropic` fails
+  with `Error::Configuration`.
 - Chat Completions tool call deltas without an index, as Mistral and Moonshot
   AI send them, are told apart by their place in the chunk and their id; Python
   merges them. Text that follows reasoning, or reasoning that follows text,
@@ -371,7 +390,7 @@ rules follow the source.
 | `docs/spec/operations.md` (no Python source) | `tests/spec_operations.rs` | OPS-001 to OPS-014: front-end pass-through and retries, embedding runs, image and video batches, video jobs, uploads, batches, streaming transcription and translation, realtime connections, the WebSocket transport, the evaluation adapter, file info, downloads and deletes, skill uploads, and server and WebRTC realtime sessions |
 | `docs/spec/openai.md` (no Python source) | `tests/spec_openai.rs` | OAI-001 to OAI-027: Responses history under every `store` setting, reasoning models, endpoints, headers and errors, Responses and Chat Completions options, model-dependent settings, includes, files, tools, application-run tools, stream items, usage, Completions, embeddings, images, speech, transcription and its streaming form, translation, files, skills, batches, realtime and Live sessions, decisions, prompt caching and JSON schema normalization |
 | `docs/spec/anthropic.md` (no Python source) | `tests/spec_anthropic.rs` | ANT-001 to ANT-020: endpoints, auth token and betas, provider options, core parameters and reasoning, model capabilities and their logged changes, structured output, tools and tool names, application-run and Anthropic-run tools and their history, files, system messages, assistant history, the stream reader, usage and final metadata, prompt caching, the shared hosts, file and skill uploads, batches and evaluation |
-| `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-032: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort, the DeepSeek, Moonshot AI and Mistral dialects, tool calls without an index, stream error kinds, the xAI and Hugging Face Responses rules, Responses errors and terminal events, and the options, completions, embeddings, images and reranking of Together AI, DeepInfra and Fireworks |
+| `docs/spec/hosts.md` (no Python source) | `tests/spec_hosts.rs` | HST-001 to HST-041: host endpoints and keys, usage requests, field rules, Z.ai limits, error bodies, usage and JSON-mode fixes, MiniMax effort, the DeepSeek, Moonshot AI and Mistral dialects, tool calls without an index, stream error kinds, the xAI and Hugging Face Responses rules, Responses errors and terminal events, the options, completions, embeddings, images and reranking of Together AI, DeepInfra and Fireworks, DeepSeek's options, message names, prefix, strict tools, images, final metadata and file uploads, and MiniMax's own entry, 3.1 media blocks and video jobs |
 
 Tests combine related Python parameter cases into Rust table-driven tests. They do
 not reproduce Python test counts. Python garbage-collector closure behavior,

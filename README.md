@@ -155,6 +155,14 @@ a service tier.
 An output schema goes to a host without JSON schema support as JSON mode, which
 does not enforce the schema. Moonshot AI does not fetch media URLs: register it
 with `hosts::moonshotai::register_with_downloads` to send image and video URLs.
+DeepSeek reads its `deepseek` options entry, message names, the assistant
+prefix and strict tools of a base URL ending in `/beta`, and image parts as
+its package does, carries DeepSeek's metadata on the final message, and
+uploads images through `ops::upload_file`. MiniMax reads its `minimax` entry
+over the `anthropic` one; MiniMax 3.1 and later take image and video blocks
+with `detail` and `fps`; and its video models (`MiniMax-H3`, `MiniMax-H3-Max`)
+run as jobs through `ops::generate_video` on a provider registered with
+`hosts::minimax::register_with_downloads`, which fetches the finished video.
 xAI is ported for text: its built-in tools fail with
 `Error::UnsupportedOperation`, and its `store` setting is the provider
 parameter `xai` (`{"store": false}`).
