@@ -241,8 +241,10 @@ These follow `docs/spec/models.md`, `docs/spec/agents.md`, `docs/spec/hosts.md`,
   or leaves out a setting with a warning, the crate does the same and logs a
   `tracing` debug event with target `suprnova_ai::anthropic`. Departures from
   the Python port: the default output limit is the model's limit, not 8,192;
-  a system message after the first goes in place as a mid-conversation
-  system message, not joined to the first; input tokens count cache writes;
+  a system message after the first goes as a mid-conversation system
+  message, not joined to the first, in place where Anthropic takes it and
+  otherwise just after the last user message before the model's reply;
+  input tokens count cache writes;
   tool call arguments that are not a JSON object go as `rawInvalidInput`;
   `pause_turn` finishes as `stop`; and the output schema is TypeScript's
   sanitized schema. Built-in tool calls and results use TypeScript's shapes,
