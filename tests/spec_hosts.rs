@@ -4103,13 +4103,63 @@ fn kontext_replies(sample: &str, final_status: &str) -> Vec<(u16, Vec<u8>)> {
     ]
 }
 
+/// Generate with a Kontext model on a Fireworks provider built with a
+/// download transport, which a Kontext call needs.
+async fn kontext_image(
+    model_id: &str,
+    transport: Arc<Recorder>,
+    prompt: ImagePrompt,
+    params: ImageParams,
+) -> Result<suprnova_ai::providers::operations::Item<Vec<FilePart>>, Error> {
+    let model = Model::new(
+        model_id,
+        Arc::new(
+            fireworks::provider(key_config(), transport)
+                .with_download_transport(Arc::new(Downloads::default())),
+        ),
+    );
+    suprnova_ai::ops::generate_image(&model, prompt, params, Default::default()).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn hst_031_a_kontext_call_without_a_download_transport_fails_before_a_request() {
+    // Its sample is usually on another origin, so no job is started and
+    // billed whose sample the call could not fetch; not even one on the base
+    // origin.
+    for (model_id, sample) in [
+        (
+            "accounts/fireworks/models/flux-kontext-pro",
+            "https://cdn.fireworks.test/x.png",
+        ),
+        (
+            "accounts/fireworks/models/flux-kontext-max",
+            "https://api.fireworks.ai/inference/v1/samples/x.png",
+        ),
+    ] {
+        let transport = Recorder::new(kontext_replies(sample, "Ready"));
+        let error = image(
+            "fireworks",
+            model_id,
+            transport.clone(),
+            prompt("a cat", vec![], None),
+            image_params(None, None, None, None),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::Validation(_)),
+            "{model_id}: {error:?}"
+        );
+        assert_eq!(transport.count(), 0, "{model_id}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn hst_031_a_kontext_model_polls_and_downloads_from_the_base_origin_with_the_key() {
     let model_id = "accounts/fireworks/models/flux-kontext-pro";
     let sample = "https://api.fireworks.ai/inference/v1/samples/x.png";
     let transport = Recorder::new(kontext_replies(sample, "Ready"));
-    let item = image(
-        "fireworks",
+    let item = kontext_image(
         model_id,
         transport.clone(),
         prompt("a cat", vec![MediaInput::Bytes(PNG.to_vec())], None),
@@ -4152,20 +4202,7 @@ async fn hst_031_a_kontext_model_polls_and_downloads_from_the_base_origin_with_t
 async fn hst_031_a_sample_on_another_origin_downloads_without_the_key() {
     let model_id = "accounts/fireworks/models/flux-kontext-max";
     let sample = "https://cdn.fireworks.test/x.png";
-    // Without a download transport the call fails after the polls.
-    let transport = Recorder::new(kontext_replies(sample, "Ready"));
-    let error = image(
-        "fireworks",
-        model_id,
-        transport.clone(),
-        prompt("a cat", vec![], None),
-        image_params(None, None, None, None),
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, Error::Validation(_)), "{error:?}");
-    assert_eq!(fireworks_requests(&transport).len(), 3);
-    // With one, the sample comes through it.
+    // The sample comes through the download transport.
     let transport = Recorder::new(kontext_replies(sample, "Ready"));
     let downloads = Arc::new(Downloads::default());
     let model = Model::new(
@@ -4192,8 +4229,7 @@ async fn hst_031_a_sample_on_another_origin_downloads_without_the_key() {
 async fn hst_031_a_failed_or_slow_kontext_job_fails_the_call() {
     let model_id = "accounts/fireworks/models/flux-kontext-pro";
     let transport = Recorder::new(kontext_replies("unused", "Failed"));
-    let error = image(
-        "fireworks",
+    let error = kontext_image(
         model_id,
         transport.clone(),
         prompt("a cat", vec![], None),
@@ -4210,8 +4246,7 @@ async fn hst_031_a_failed_or_slow_kontext_job_fails_the_call() {
     );
     let transport = Recorder::new(replies);
     let started = tokio::time::Instant::now();
-    let error = image(
-        "fireworks",
+    let error = kontext_image(
         model_id,
         transport.clone(),
         prompt("a cat", vec![], None),
@@ -4662,8 +4697,7 @@ async fn hst_031_image_bytes_are_asked_for_as_any_type_and_must_be_an_image() {
         "https://api.fireworks.ai/inference/v1/samples/x.png",
         "Ready",
     ));
-    image(
-        "fireworks",
+    kontext_image(
         "accounts/fireworks/models/flux-kontext-pro",
         transport.clone(),
         prompt("a cat", vec![], None),
@@ -4691,8 +4725,7 @@ async fn hst_031_image_bytes_are_asked_for_as_any_type_and_must_be_an_image() {
 #[test]
 fn hst_031_a_kontext_call_without_a_tokio_runtime_fails_before_a_request() {
     let transport = Recorder::new(kontext_replies("unused", "Ready"));
-    let error = futures::executor::block_on(image(
-        "fireworks",
+    let error = futures::executor::block_on(kontext_image(
         "accounts/fireworks/models/flux-kontext-pro",
         transport.clone(),
         prompt("a cat", vec![], None),
